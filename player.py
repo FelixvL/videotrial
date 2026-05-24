@@ -47,6 +47,7 @@ except OSError:
     )
     sys.exit(1)
 from actors_panel import ActorsPanel
+from films_panel import FilmsPanel
 from database_panel import DatabasePanel
 import database as db
 
@@ -420,6 +421,11 @@ class CineMarker(QMainWindow):
 
         self.main_tabs.addTab(player_widget, "▶  SPELER")
 
+        # Films tab
+        self.films_panel = FilmsPanel()
+        self.films_panel.play_requested.connect(self._load_video_and_switch)
+        self.main_tabs.addTab(self.films_panel, "🎬  FILMS")
+
         # Acteurs tab
         self.actors_panel = ActorsPanel(self.player)
         self.actors_panel.open_film_requested.connect(self._load_video_and_switch)
@@ -430,7 +436,7 @@ class CineMarker(QMainWindow):
         self.db_panel = DatabasePanel()
         self.main_tabs.addTab(self.db_panel, "⊞  DATABASE")
 
-        self.main_tabs.setCurrentIndex(1)
+        self.main_tabs.setCurrentIndex(1)  # default: FILMS
 
         root.addWidget(self.main_tabs)
 

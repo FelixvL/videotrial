@@ -932,7 +932,7 @@ class ActorDetailPanel(QWidget):
 class ActorDetailDialog(QDialog):
 
     KLEUR_OPTS  = [('', '—'), ('1', 'Wit'), ('2', 'Zwart'), ('3', 'Bruin')]
-    GROOTTE_OPTS = [('', '—')] + [(str(i), '★' * i) for i in range(1, 7)]
+    GROOTTE_OPTS = [('', '—')] + [(str(i), '★' * i) for i in range(1, 11)]
     RATING_OPTS  = [('', '—')] + [(str(i), str(i)) for i in range(1, 10)]
     DEC_OPTS     = ([('', '—')] +
                     [(str(d), f"{d*10}s") for d in range(3, 10)] +
@@ -1090,14 +1090,15 @@ class ActorsPanel(QWidget):
     scene_jump_requested = pyqtSignal(str, float)
 
     PHOTO_EXTS = {'.jpg', '.jpeg', '.png', '.webp', '.bmp', '.tiff', '.gif'}
-    ZOOM_STEPS = [(100,130),(130,168),(160,206),(200,258),(240,310)]
-    ZOOM_DEFAULT = 2
+    ZOOM_STEP_W  = 20   # px per zoom level
+    ZOOM_MIN_W   = 40   # never narrower than this
+    ZOOM_DEFAULT_LEVEL = 0  # level 0 = 160px wide
 
     def __init__(self, player):
         super().__init__()
         self.player = player
         self._all_items: list = []
-        self._zoom_idx = self.ZOOM_DEFAULT
+        self._zoom_level = self.ZOOM_DEFAULT_LEVEL
         self._cb_db: dict = {}
         self._cb_kleur: dict = {}
         self._cb_grootte: dict = {}
@@ -1197,7 +1198,7 @@ class ActorsPanel(QWidget):
 
         # Grootte
         self._cb_grootte = self._cb_group(row_b, "Grootte:",
-            [(str(i), "★" * i) for i in range(1, 7)])
+            [(str(i), str(i)) for i in range(1, 11)])
 
         # Decennia
         self._cb_dec = self._cb_group(row_b, "Decennia:",
@@ -1211,7 +1212,7 @@ class ActorsPanel(QWidget):
         v.addWidget(filter_frame)
 
         # Photo grid
-        cw, ch = self.ZOOM_STEPS[self._zoom_idx]
+        cw, ch = self._zoom_size()
         self.grid = QListWidget()
         self.grid.setViewMode(QListWidget.ViewMode.IconMode)
         self.grid.setIconSize(QSize(1, 1))
@@ -1284,7 +1285,7 @@ class ActorsPanel(QWidget):
             # in_db = heeft zinvolle metadata (voornaam of achternaam ingevuld)
             in_db = bool(meta.get('voornaam') or meta.get('achternaam'))
 
-            cw, ch = self.ZOOM_STEPS[self._zoom_idx]
+            cw, ch = self._zoom_size()
             item = QListWidgetItem()
             item.setSizeHint(QSize(cw, ch))
             item.setData(Qt.ItemDataRole.UserRole, {
@@ -1359,18 +1360,22 @@ class ActorsPanel(QWidget):
 
     # ── Zoom ─────────────────────────────────────
 
+    def _zoom_size(self):
+        w = max(self.ZOOM_MIN_W, 160 + self._zoom_level * self.ZOOM_STEP_W)
+        h = int(w * 1.29)
+        return w, h
+
     def _zoom_in(self):
-        if self._zoom_idx < len(self.ZOOM_STEPS) - 1:
-            self._zoom_idx += 1
-            self._apply_zoom()
+        self._zoom_level += 1
+        self._apply_zoom()
 
     def _zoom_out(self):
-        if self._zoom_idx > 0:
-            self._zoom_idx -= 1
+        if 160 + (self._zoom_level - 1) * self.ZOOM_STEP_W >= self.ZOOM_MIN_W:
+            self._zoom_level -= 1
             self._apply_zoom()
 
     def _apply_zoom(self):
-        cw, ch = self.ZOOM_STEPS[self._zoom_idx]
+        cw, ch = self._zoom_size()
         self.grid.setGridSize(QSize(cw, ch))
         for item in self._all_items:
             item.setSizeHint(QSize(cw, ch))
