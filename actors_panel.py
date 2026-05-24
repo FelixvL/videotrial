@@ -66,6 +66,8 @@ class SceneExportWorker(QThread):
 
 class ActorCardDelegate(QStyledItemDelegate):
 
+    detail_requested = pyqtSignal(dict)
+
     BORDER = {
         '9': ('#FFD700', Qt.PenStyle.SolidLine, 3),
         '8': ('#C0C0C0', Qt.PenStyle.SolidLine, 3),
@@ -74,38 +76,41 @@ class ActorCardDelegate(QStyledItemDelegate):
         '5': ('#FFFFFF', Qt.PenStyle.DashLine, 2),
     }
     TEXT_COLOR = {
-        '1': QColor('#FFFFFF'),   # wit
-        '2': QColor('#000000'),   # zwart
-        '3': QColor('#8B4513'),   # bruin
+        '1': QColor('#FFFFFF'),
+        '2': QColor('#000000'),
+        '3': QColor('#8B4513'),
     }
     GLOW_COLOR = {
-        '1': QColor(0, 0, 0, 220),
-        '2': QColor(255, 255, 255, 220),
-        '3': QColor(0, 0, 0, 220),
+        '1': QColor(0, 0, 0, 230),
+        '2': QColor(255, 255, 255, 230),
+        '3': QColor(0, 0, 0, 230),
     }
-    GLOW_OFFSETS = [
+    BLACK_GLOW = [
         (-1,-1),(0,-1),(1,-1),
         (-1, 0),       (1, 0),
         (-1, 1),(0, 1),(1, 1),
         (-2, 0),(2, 0),(0,-2),(0, 2),
     ]
+    ARROW_SIZE = 22
 
     def __init__(self):
         super().__init__()
-        self._cache: dict[str, QPixmap] = {}
+        self._cache: dict = {}
 
     def _get_pix(self, path, w, h):
         key = f"{path}:{w}:{h}"
         if key not in self._cache:
-            if os.path.exists(path):
-                self._cache[key] = QPixmap(path).scaled(
-                    w, h,
+            self._cache[key] = (
+                QPixmap(path).scaled(w, h,
                     Qt.AspectRatioMode.KeepAspectRatio,
-                    Qt.TransformationMode.SmoothTransformation
-                )
-            else:
-                self._cache[key] = QPixmap()
+                    Qt.TransformationMode.SmoothTransformation)
+                if os.path.exists(path) else QPixmap()
+            )
         return self._cache[key]
+
+    def _arrow_rect(self, rect):
+        a = self.ARROW_SIZE
+        return QRect(rect.right() - a - 2, rect.bottom() - a - 2, a, a)
 
     def paint(self, painter, option, index):
         data = index.data(Qt.ItemDataRole.UserRole)
@@ -113,111 +118,131 @@ class ActorCardDelegate(QStyledItemDelegate):
             super().paint(painter, option, index)
             return
 
-        r = option.rect
-        inner = r.adjusted(3, 3, -3, -3)
-        meta = data.get('meta', {})
+        r     = option.rect          # full cell, no padding
+        meta  = data.get('meta', {})
         in_db = data.get('in_db', False)
 
         painter.save()
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
 
-        # Background
-        painter.fillRect(r, QColor('#0d0d0d'))
-
-        # Photo — fills entire inner rect
-        pix = self._get_pix(data['photo_path'], inner.width(), inner.height())
+        # Photo — flush, fills entire cell
+        pix = self._get_pix(data['photo_path'], r.width(), r.height())
         if not pix.isNull():
-            px = inner.x() + (inner.width() - pix.width()) // 2
-            py = inner.y() + (inner.height() - pix.height()) // 2
+            px = r.x() + (r.width()  - pix.width())  // 2
+            py = r.y() + (r.height() - pix.height()) // 2
             painter.drawPixmap(px, py, pix)
 
-        # Name — glow text, no bar
-        voornaam  = meta.get('voornaam', '')
+        # ── Naam (glow, geen balk) ────────────────
+        voornaam   = meta.get('voornaam', '')
         achternaam = meta.get('achternaam', '')
-        display = f"{voornaam} {achternaam}".strip() or data.get('stem', '')
+        display    = f"{voornaam} {achternaam}".strip() or data.get('stem', '')
+        kleur      = str(meta.get('kleur', '1'))
+        text_col   = self.TEXT_COLOR.get(kleur, QColor('#FFFFFF'))
+        glow_col   = self.GLOW_COLOR.get(kleur, QColor(0, 0, 0, 230))
 
-        kleur = str(meta.get('kleur', '1'))
-        text_col = self.TEXT_COLOR.get(kleur, QColor('#FFFFFF'))
-        glow_col = self.GLOW_COLOR.get(kleur, QColor(0, 0, 0, 220))
-
-        nf = painter.font()
-        nf.setPointSize(8)
+        nf = QFont(painter.font())
+        nf.setPointSize(9)
         nf.setBold(True)
         painter.setFont(nf)
 
-        name_rect = QRect(inner.x() + 2, inner.bottom() - 22, inner.width() - 4, 20)
+        name_rect  = QRect(r.x() + 2, r.bottom() - 24, r.width() - 4, 22)
         name_flags = Qt.AlignmentFlag.AlignCenter
-
         painter.setPen(glow_col)
-        for dx, dy in self.GLOW_OFFSETS:
+        for dx, dy in self.BLACK_GLOW:
             painter.drawText(name_rect.translated(dx, dy), name_flags, display)
         painter.setPen(text_col)
         painter.drawText(name_rect, name_flags, display)
 
-        # Stars — top right
+        # ── Sterren rechtsbovenin (groter + glow) ─
         try:
             stars = int(meta.get('grootte', 0))
         except (ValueError, TypeError):
             stars = 0
         if stars > 0:
-            sf = painter.font()
-            sf.setPointSize(9)
+            sf = QFont(painter.font())
+            sf.setPointSize(12)
             sf.setBold(False)
             painter.setFont(sf)
+            star_rect  = QRect(r.x(), r.y() + 2, r.width() - 3, 20)
+            star_flags = Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+            glow_blk   = QColor(0, 0, 0, 230)
+            painter.setPen(glow_blk)
+            for dx, dy in self.BLACK_GLOW:
+                painter.drawText(star_rect.translated(dx, dy), star_flags, '★' * stars)
             painter.setPen(QColor('#FFD700'))
-            star_rect = QRect(inner.x(), inner.y() + 3, inner.width() - 3, 16)
-            painter.drawText(star_rect,
-                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
-                '★' * stars)
+            painter.drawText(star_rect, star_flags, '★' * stars)
 
-        # Decade — top left
+        # ── Decennium linksbovenin (groter + glow) ─
         dec_val = str(meta.get('decennia', '')).strip()
         if dec_val and dec_val.lower() not in ('null', ''):
             try:
                 dec_str = str(int(dec_val) * 10)
             except ValueError:
                 dec_str = dec_val
-            df = painter.font()
-            df.setPointSize(8)
-            df.setBold(False)
+            df = QFont(painter.font())
+            df.setPointSize(11)
+            df.setBold(True)
             painter.setFont(df)
-            painter.setPen(QColor('#aaaaaa'))
-            dec_rect = QRect(inner.x() + 4, inner.y() + 3, 40, 16)
-            painter.drawText(dec_rect,
-                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-                dec_str)
+            dec_rect  = QRect(r.x() + 4, r.y() + 2, 50, 20)
+            dec_flags = Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+            painter.setPen(QColor(0, 0, 0, 230))
+            for dx, dy in self.BLACK_GLOW:
+                painter.drawText(dec_rect.translated(dx, dy), dec_flags, dec_str)
+            painter.setPen(QColor('#dddddd'))
+            painter.drawText(dec_rect, dec_flags, dec_str)
 
-        # Rating border
+        # ── Rating rand ───────────────────────────
         rating = str(meta.get('rating', '')).strip()
         if rating in self.BORDER:
             col, style, width = self.BORDER[rating]
-            pen = QPen(QColor(col), width, style)
-            painter.setPen(pen)
+            painter.setPen(QPen(QColor(col), width, style))
             painter.setBrush(Qt.BrushStyle.NoBrush)
-            painter.drawRect(inner.adjusted(1, 1, -1, -1))
+            painter.drawRect(r.adjusted(1, 1, -1, -1))
 
-        # Dim overlay if not in DB
+        # ── Pijltje (detail) ──────────────────────
+        ar = self._arrow_rect(r)
+        painter.fillRect(ar, QColor(0, 0, 0, 170))
+        af = QFont(painter.font())
+        af.setPointSize(13)
+        af.setBold(True)
+        painter.setFont(af)
+        painter.setPen(QColor('#e8b86d'))
+        painter.drawText(ar, Qt.AlignmentFlag.AlignCenter, '›')
+
+        # ── Niet in DB overlay ────────────────────
         if not in_db:
-            painter.fillRect(inner, QColor(0, 0, 0, 140))
-            f2 = painter.font()
-            f2.setPointSize(8)
-            f2.setBold(False)
-            painter.setFont(f2)
-            painter.setPen(QColor('#555555'))
-            painter.drawText(inner, Qt.AlignmentFlag.AlignCenter, "niet in\ndatabase")
+            painter.fillRect(r, QColor(0, 0, 0, 140))
+            fi = QFont(painter.font())
+            fi.setPointSize(8)
+            fi.setBold(False)
+            painter.setFont(fi)
+            painter.setPen(QColor('#555'))
+            painter.drawText(r, Qt.AlignmentFlag.AlignCenter, "niet in\ndatabase")
 
-        # Selection highlight
+        # ── Selectie highlight ────────────────────
         if option.state & QStyle.StateFlag.State_Selected:
-            painter.fillRect(inner, QColor(232, 184, 109, 35))
-            sel_pen = QPen(QColor('#e8b86d'), 2, Qt.PenStyle.SolidLine)
-            painter.setPen(sel_pen)
-            painter.drawRect(inner.adjusted(1, 1, -1, -1))
+            painter.fillRect(r, QColor(232, 184, 109, 30))
+            painter.setPen(QPen(QColor('#e8b86d'), 2))
+            painter.drawRect(r.adjusted(1, 1, -1, -1))
 
         painter.restore()
 
+    def editorEvent(self, event, model, option, index):
+        from PyQt6.QtCore import QEvent
+        if event.type() == QEvent.Type.MouseButtonRelease:
+            pos = event.position().toPoint()
+            if self._arrow_rect(option.rect).contains(pos):
+                data = index.data(Qt.ItemDataRole.UserRole)
+                if data:
+                    self.detail_requested.emit(data)
+                return True
+        return False
+
     def sizeHint(self, option, index):
-        return QSize(170, 220)
+        d = index.data(Qt.ItemDataRole.UserRole)
+        if d and 'cell_size' in d:
+            return d['cell_size']
+        return QSize(160, 206)
 
 
 # ─────────────────────────────────────────────
@@ -901,6 +926,162 @@ class ActorDetailPanel(QWidget):
 
 
 # ─────────────────────────────────────────────
+#  Actor Detail Dialog
+# ─────────────────────────────────────────────
+
+class ActorDetailDialog(QDialog):
+
+    KLEUR_OPTS  = [('', '—'), ('1', 'Wit'), ('2', 'Zwart'), ('3', 'Bruin')]
+    GROOTTE_OPTS = [('', '—')] + [(str(i), '★' * i) for i in range(1, 7)]
+    RATING_OPTS  = [('', '—')] + [(str(i), str(i)) for i in range(1, 10)]
+    DEC_OPTS     = ([('', '—')] +
+                    [(str(d), f"{d*10}s") for d in range(3, 10)] +
+                    [('0', '00s'), ('1', '10s'), ('2', '20s')])
+
+    def __init__(self, parent, data: dict):
+        super().__init__(parent)
+        self.data = data
+        meta = data.get('meta', {})
+        self._meta = dict(meta)
+        self._actor = data.get('actor')
+        self._photo_path = data.get('photo_path', '')
+        self.setWindowTitle("Acteur details")
+        self.setMinimumWidth(480)
+        self.setStyleSheet(parent.styleSheet() if parent else '')
+        self._build_ui()
+
+    def _build_ui(self):
+        v = QVBoxLayout(self)
+        v.setSpacing(12)
+        v.setContentsMargins(16, 16, 16, 16)
+
+        # Top row: photo + fields
+        top = QHBoxLayout()
+        top.setSpacing(16)
+
+        # Photo
+        self.lbl_photo = QLabel()
+        self.lbl_photo.setFixedSize(140, 180)
+        self.lbl_photo.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.lbl_photo.setStyleSheet(
+            "background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 4px; color: #333; font-size: 28px;"
+        )
+        if self._photo_path and os.path.exists(self._photo_path):
+            pix = QPixmap(self._photo_path).scaled(
+                140, 180,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation
+            )
+            self.lbl_photo.setPixmap(pix)
+        else:
+            self.lbl_photo.setText("?")
+        top.addWidget(self.lbl_photo)
+
+        # Fields grid
+        fg = QGridLayout()
+        fg.setSpacing(8)
+        fg.setColumnStretch(1, 1)
+
+        def lbl(text):
+            l = QLabel(text)
+            l.setStyleSheet("color: #555; font-size: 10px; letter-spacing: 2px;")
+            return l
+
+        # Bestandsnaam (read-only)
+        fg.addWidget(lbl("BESTAND"), 0, 0)
+        lbl_stem = QLabel(self.data.get('stem', ''))
+        lbl_stem.setStyleSheet("color: #444; font-size: 11px;")
+        fg.addWidget(lbl_stem, 0, 1)
+
+        # Voornaam
+        fg.addWidget(lbl("VOORNAAM"), 1, 0)
+        self.inp_voornaam = QLineEdit(self._meta.get('voornaam', ''))
+        fg.addWidget(self.inp_voornaam, 1, 1)
+
+        # Achternaam
+        fg.addWidget(lbl("ACHTERNAAM"), 2, 0)
+        self.inp_achternaam = QLineEdit(self._meta.get('achternaam', ''))
+        fg.addWidget(self.inp_achternaam, 2, 1)
+
+        # Kleur
+        fg.addWidget(lbl("KLEUR"), 3, 0)
+        self.cmb_kleur = QComboBox()
+        for val, text in self.KLEUR_OPTS:
+            self.cmb_kleur.addItem(text, val)
+        self._set_combo(self.cmb_kleur, self._meta.get('kleur', ''))
+        fg.addWidget(self.cmb_kleur, 3, 1)
+
+        # Grootte
+        fg.addWidget(lbl("GROOTTE"), 4, 0)
+        self.cmb_grootte = QComboBox()
+        for val, text in self.GROOTTE_OPTS:
+            self.cmb_grootte.addItem(text, val)
+        self._set_combo(self.cmb_grootte, self._meta.get('grootte', ''))
+        fg.addWidget(self.cmb_grootte, 4, 1)
+
+        # Rating
+        fg.addWidget(lbl("RATING"), 5, 0)
+        self.cmb_rating = QComboBox()
+        for val, text in self.RATING_OPTS:
+            self.cmb_rating.addItem(text, val)
+        self._set_combo(self.cmb_rating, self._meta.get('rating', ''))
+        fg.addWidget(self.cmb_rating, 5, 1)
+
+        # Decennia
+        fg.addWidget(lbl("DECENNIA"), 6, 0)
+        self.cmb_dec = QComboBox()
+        for val, text in self.DEC_OPTS:
+            self.cmb_dec.addItem(text, val)
+        self._set_combo(self.cmb_dec, self._meta.get('decennia', ''))
+        fg.addWidget(self.cmb_dec, 6, 1)
+
+        top.addLayout(fg)
+        v.addLayout(top)
+
+        # Buttons
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setStyleSheet("background: #222;")
+        v.addWidget(sep)
+
+        btns = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Save |
+            QDialogButtonBox.StandardButton.Cancel
+        )
+        btns.accepted.connect(self.accept)
+        btns.rejected.connect(self.reject)
+        btns.button(QDialogButtonBox.StandardButton.Save).setText("💾  Opslaan")
+        btns.button(QDialogButtonBox.StandardButton.Cancel).setText("Annuleren")
+        v.addWidget(btns)
+
+    def _set_combo(self, combo: QComboBox, value: str):
+        for i in range(combo.count()):
+            if combo.itemData(i) == value:
+                combo.setCurrentIndex(i)
+                return
+
+    def get_meta(self) -> dict:
+        meta = {}
+        for field, widget in [
+            ('voornaam',   self.inp_voornaam),
+            ('achternaam', self.inp_achternaam),
+        ]:
+            val = widget.text().strip()
+            if val:
+                meta[field] = val
+        for field, combo in [
+            ('kleur',    self.cmb_kleur),
+            ('grootte',  self.cmb_grootte),
+            ('rating',   self.cmb_rating),
+            ('decennia', self.cmb_dec),
+        ]:
+            val = combo.currentData()
+            if val:
+                meta[field] = val
+        return meta
+
+
+# ─────────────────────────────────────────────
 #  Main Actors Panel — full-screen photo grid
 # ─────────────────────────────────────────────
 
@@ -1034,17 +1215,19 @@ class ActorsPanel(QWidget):
         self.grid = QListWidget()
         self.grid.setViewMode(QListWidget.ViewMode.IconMode)
         self.grid.setIconSize(QSize(1, 1))
-        self.grid.setGridSize(QSize(cw + 8, ch + 8))
+        self.grid.setGridSize(QSize(cw, ch))
+        self.grid.setSpacing(0)
         self.grid.setResizeMode(QListWidget.ResizeMode.Adjust)
         self.grid.setMovement(QListWidget.Movement.Static)
         self.grid.setUniformItemSizes(True)
         self.grid.setStyleSheet(
-            "QListWidget { background: #0a0a0a; border: none; padding: 10px; }"
-            "QListWidget::item { border: none; background: transparent; }"
+            "QListWidget { background: #0a0a0a; border: none; padding: 0px; }"
+            "QListWidget::item { border: none; background: transparent; padding: 0px; margin: 0px; }"
         )
         self._delegate = ActorCardDelegate()
         self.grid.setItemDelegate(self._delegate)
         self.grid.itemClicked.connect(self._on_item_clicked)
+        self._delegate.detail_requested.connect(self._open_detail)
         v.addWidget(self.grid)
 
     def _cb_group(self, layout: QHBoxLayout, label: str,
@@ -1110,6 +1293,7 @@ class ActorsPanel(QWidget):
                 'actor': actor,
                 'in_db': in_db,
                 'meta': meta,
+                'cell_size': QSize(cw, ch),
             })
             self.grid.addItem(item)
             self._all_items.append(item)
@@ -1187,9 +1371,13 @@ class ActorsPanel(QWidget):
 
     def _apply_zoom(self):
         cw, ch = self.ZOOM_STEPS[self._zoom_idx]
-        self.grid.setGridSize(QSize(cw + 8, ch + 8))
+        self.grid.setGridSize(QSize(cw, ch))
         for item in self._all_items:
             item.setSizeHint(QSize(cw, ch))
+            d = item.data(Qt.ItemDataRole.UserRole)
+            if d:
+                d['cell_size'] = QSize(cw, ch)
+                item.setData(Qt.ItemDataRole.UserRole, d)
         self._delegate._cache.clear()
         self.grid.update()
 
@@ -1203,6 +1391,24 @@ class ActorsPanel(QWidget):
         full_name  = f"{voornaam} {achternaam}".strip() or data.get('stem', '')
         if full_name:
             QApplication.clipboard().setText(full_name)
+
+    def _open_detail(self, data: dict):
+        dlg = ActorDetailDialog(self, data)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        new_meta = dlg.get_meta()
+        stem = data.get('stem', '')
+
+        # Get or create actor record
+        actor = data.get('actor')
+        if actor:
+            actor_id = actor['id']
+        else:
+            actor_id = db.create_actor(stem)
+
+        db.update_actor_meta(actor_id, new_meta)
+        self.refresh()
 
     # ── Import ───────────────────────────────────
 
