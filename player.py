@@ -415,9 +415,9 @@ class _FilmActorsOverlay(QWidget):
         self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self._scroll.setStyleSheet(
             "QScrollArea { border: none; background: transparent; }"
-            "QWidget     { background: transparent; }"
         )
         self._inner = QWidget()
+        self._inner.setStyleSheet("background: transparent;")
         self._row = QHBoxLayout(self._inner)
         self._row.setContentsMargins(0, 0, 0, 0)
         self._row.setSpacing(4)
