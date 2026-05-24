@@ -4,6 +4,7 @@ CineMarker Database — SQLite layer voor acteurs, films en scènes
 """
 
 import sqlite3
+import json
 import os
 from pathlib import Path
 
@@ -152,6 +153,14 @@ def get_actor(actor_id):
     row = conn.execute("SELECT * FROM actors WHERE id=?", (actor_id,)).fetchone()
     conn.close()
     return dict(row) if row else None
+
+
+def update_actor_meta(actor_id, meta: dict):
+    conn = get_connection()
+    notes = json.dumps(meta, ensure_ascii=False) if meta else ''
+    conn.execute("UPDATE actors SET notes=? WHERE id=?", (notes, actor_id))
+    conn.commit()
+    conn.close()
 
 
 def update_actor(actor_id, name, notes=''):
