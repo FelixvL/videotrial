@@ -342,6 +342,7 @@ class _PanelOverlay(QFrame):
         v.setSpacing(0)
         self.tab_widget = QTabWidget()
         self.tab_widget.setObjectName("panelTabs")
+        self.tab_widget.setAutoFillBackground(False)
         v.addWidget(self.tab_widget)
         self.setObjectName("panelOverlay")
         self._reposition()
@@ -641,6 +642,7 @@ class CineMarker(QMainWindow):
 
     def _build_markers_tab(self):
         w = QWidget()
+        w.setAutoFillBackground(False)
         v = QVBoxLayout(w)
         v.setContentsMargins(8, 8, 8, 8)
         v.setSpacing(6)
@@ -677,6 +679,7 @@ class CineMarker(QMainWindow):
 
     def _build_converter_tab(self):
         w = QWidget()
+        w.setAutoFillBackground(False)
         v = QVBoxLayout(w)
         v.setContentsMargins(8, 8, 8, 8)
         v.setSpacing(8)
