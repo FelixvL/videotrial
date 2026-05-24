@@ -23,12 +23,12 @@ os.environ["PATH"] = os.path.dirname(os.path.abspath(__file__)) + os.pathsep + o
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QSlider, QLabel, QFileDialog, QListWidget,
-    QListWidgetItem, QSplitter, QLineEdit, QComboBox, QSpinBox,
+    QListWidgetItem, QLineEdit, QComboBox, QSpinBox,
     QProgressBar, QTabWidget, QFrame, QMessageBox, QInputDialog,
-    QSizePolicy, QStatusBar, QToolBar, QStyle
+    QSizePolicy, QStatusBar, QStyle
 )
 from PyQt6.QtCore import (
-    Qt, QTimer, pyqtSignal, QObject, QThread, QSize
+    Qt, QTimer, pyqtSignal, QObject, QThread, QSize, QEvent
 )
 from PyQt6.QtGui import QFont, QIcon, QKeySequence, QShortcut, QColor, QPalette
 
@@ -322,6 +322,39 @@ class _ActorLinkOverlay(QFrame):
 
 
 # ─────────────────────────────────────────────
+#  Right-panel overlay (floats over player)
+# ─────────────────────────────────────────────
+
+class _PanelOverlay(QFrame):
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.setFixedWidth(320)
+        self.setStyleSheet("""
+            QFrame {
+                background: #0d0d0d;
+                border-left: 1px solid #222;
+            }
+        """)
+        parent.installEventFilter(self)
+        v = QVBoxLayout(self)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(0)
+        self.tab_widget = QTabWidget()
+        v.addWidget(self.tab_widget)
+        self._reposition()
+
+    def eventFilter(self, obj, event):
+        if obj is self.parent() and event.type() == QEvent.Type.Resize:
+            self._reposition()
+        return False
+
+    def _reposition(self):
+        p = self.parent()
+        if p:
+            self.setGeometry(p.width() - self.width(), 0, self.width(), p.height())
+
+
+# ─────────────────────────────────────────────
 #  Main Window
 # ─────────────────────────────────────────────
 
@@ -496,39 +529,29 @@ class CineMarker(QMainWindow):
         self.main_tabs.setCornerWidget(_corner, Qt.Corner.TopRightCorner)
         self._corner_layout = _ch  # keep ref to insert actors toolbar later
 
-        # Player tab container
+        # Player tab — video fills all, ultra-thin seekbar at bottom
         player_widget = QWidget()
-        player_layout = QVBoxLayout(player_widget)
-        player_layout.setContentsMargins(0, 0, 0, 0)
-        player_layout.setSpacing(0)
+        pv = QVBoxLayout(player_widget)
+        pv.setContentsMargins(0, 0, 0, 0)
+        pv.setSpacing(0)
 
-        # Main splitter
-        splitter = QSplitter(Qt.Orientation.Horizontal)
-        splitter.setHandleWidth(2)
+        self._build_video_area(pv)
 
-        # Left: video + controls
-        left = QWidget()
-        left_layout = QVBoxLayout(left)
-        left_layout.setContentsMargins(8, 8, 8, 8)
-        left_layout.setSpacing(6)
+        self.timeline = TimelineSlider()
+        self.timeline.seeked.connect(self._on_timeline_seek)
+        self.timeline.setFixedHeight(4)
+        self.timeline.setStyleSheet(
+            "QSlider::groove:horizontal { height: 4px; background: #141414; border-radius: 0; }"
+            "QSlider::sub-page:horizontal { background: #e8b86d; border-radius: 0; }"
+            "QSlider::handle:horizontal { background: transparent; width: 0; margin: 0; }"
+        )
+        pv.addWidget(self.timeline)
 
-        self._build_video_area(left_layout)
-        self._build_timeline(left_layout)
-        self._build_transport(left_layout)
-        self._build_timecode_row(left_layout)
-
-        splitter.addWidget(left)
-
-        # Right: tabs (markers + converter)
-        self.tabs = QTabWidget()
-        self.tabs.setMinimumWidth(300)
-        self.tabs.setMaximumWidth(400)
+        # Floating right panel (markers + converter)
+        self._panel = _PanelOverlay(player_widget)
+        self.tabs = self._panel.tab_widget
         self._build_markers_tab()
         self._build_converter_tab()
-        splitter.addWidget(self.tabs)
-
-        splitter.setSizes([1000, 350])
-        player_layout.addWidget(splitter)
 
         # Floating actor-link overlay (positioned over player_widget)
         self._actor_overlay = _ActorLinkOverlay(player_widget)
@@ -592,7 +615,6 @@ class CineMarker(QMainWindow):
 
     def _build_video_area(self, layout):
         self.video_container = QWidget()
-        self.video_container.setMinimumHeight(400)
         self.video_container.setStyleSheet("background: #000;")
         self.video_container.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         layout.addWidget(self.video_container, stretch=1)
@@ -609,126 +631,6 @@ class CineMarker(QMainWindow):
     def showEvent(self, event):
         super().showEvent(event)
         QTimer.singleShot(100, self._attach_mpv)
-
-    def _build_timeline(self, layout):
-        row = QHBoxLayout()
-        row.setSpacing(6)
-
-        self.lbl_pos = QLabel("00:00:00.000")
-        self.lbl_pos.setObjectName("timecode")
-        self.lbl_pos.setFixedWidth(160)
-        row.addWidget(self.lbl_pos)
-
-        self.timeline = TimelineSlider()
-        self.timeline.seeked.connect(self._on_timeline_seek)
-        row.addWidget(self.timeline, stretch=1)
-
-        self.lbl_dur = QLabel("00:00:00.000")
-        self.lbl_dur.setObjectName("timecode")
-        self.lbl_dur.setFixedWidth(160)
-        self.lbl_dur.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        row.addWidget(self.lbl_dur)
-
-        layout.addLayout(row)
-
-    def _build_transport(self, layout):
-        row = QHBoxLayout()
-        row.setSpacing(6)
-        row.setContentsMargins(0, 4, 0, 4)
-
-        def btn(text, tip, cb, oid=None):
-            b = QPushButton(text)
-            b.setToolTip(tip)
-            b.setFixedHeight(34)
-            b.clicked.connect(cb)
-            if oid:
-                b.setObjectName(oid)
-            return b
-
-        row.addWidget(btn("⏮", "Begin (Home)", self.go_to_start))
-        row.addWidget(btn("◀◀", "−10s", lambda: self.seek_relative(-10)))
-        row.addWidget(btn("◀", "−5s", lambda: self.seek_relative(-5)))
-        row.addWidget(btn("◁", "−1s", lambda: self.seek_relative(-1)))
-        row.addWidget(btn("◁|", "Vorig frame", lambda: self.seek_frames(-1)))
-
-        self.btn_play = btn("▶  PLAY", "Play/Pause (Space)", self.toggle_play, "accent")
-        self.btn_play.setFixedWidth(100)
-        row.addWidget(self.btn_play)
-
-        row.addWidget(btn("|▷", "Volgend frame", lambda: self.seek_frames(1)))
-        row.addWidget(btn("▷", "+1s", lambda: self.seek_relative(1)))
-        row.addWidget(btn("▶", "+5s", lambda: self.seek_relative(5)))
-        row.addWidget(btn("▶▶", "+10s", lambda: self.seek_relative(10)))
-        row.addWidget(btn("⏭", "Einde", self.go_to_end))
-
-        row.addSpacing(12)
-
-        # Speed
-        speed_label = QLabel("×")
-        speed_label.setStyleSheet("color: #555;")
-        row.addWidget(speed_label)
-        self.speed_box = QComboBox()
-        self.speed_box.addItems(["0.25", "0.5", "0.75", "1.0", "1.25", "1.5", "2.0", "4.0"])
-        self.speed_box.setCurrentText("1.0")
-        self.speed_box.setFixedWidth(70)
-        self.speed_box.currentTextChanged.connect(self._on_speed_change)
-        row.addWidget(self.speed_box)
-
-        row.addSpacing(8)
-
-        # Volume
-        vol_label = QLabel("▶)")
-        vol_label.setStyleSheet("color: #555;")
-        row.addWidget(vol_label)
-        self.vol_slider = QSlider(Qt.Orientation.Horizontal)
-        self.vol_slider.setRange(0, 100)
-        self.vol_slider.setValue(100)
-        self.vol_slider.setFixedWidth(80)
-        self.vol_slider.valueChanged.connect(self._on_volume_change)
-        row.addWidget(self.vol_slider)
-
-        row.addStretch()
-        layout.addLayout(row)
-
-    def _build_timecode_row(self, layout):
-        row = QHBoxLayout()
-        row.setSpacing(6)
-
-        lbl = QLabel("SPRING NAAR:")
-        lbl.setObjectName("section")
-        row.addWidget(lbl)
-
-        self.tc_input = QLineEdit()
-        self.tc_input.setPlaceholderText("HH:MM:SS.mmm")
-        self.tc_input.setFixedWidth(160)
-        self.tc_input.returnPressed.connect(self._on_goto_timecode)
-        row.addWidget(self.tc_input)
-
-        btn_go = QPushButton("↵ Ga")
-        btn_go.setFixedWidth(60)
-        btn_go.clicked.connect(self._on_goto_timecode)
-        row.addWidget(btn_go)
-
-        row.addStretch()
-
-        btn_mark = QPushButton("⊕ Marker plaatsen")
-        btn_mark.setObjectName("accent")
-        btn_mark.setFixedHeight(30)
-        btn_mark.clicked.connect(self.add_marker)
-        row.addWidget(btn_mark)
-
-        btn_link = QPushButton("🔗 Acteur")
-        btn_link.setFixedHeight(30)
-        btn_link.setToolTip("Acteur koppelen aan film  Ctrl+L")
-        btn_link.clicked.connect(self._show_actor_overlay)
-        row.addWidget(btn_link)
-
-        btn_thumb = QPushButton("⊡ Thumbnail")
-        btn_thumb.setFixedHeight(30)
-        btn_thumb.clicked.connect(self.export_thumbnail)
-        row.addWidget(btn_thumb)
-
-        layout.addLayout(row)
 
     def _build_markers_tab(self):
         w = QWidget()
@@ -897,24 +799,12 @@ class CineMarker(QMainWindow):
         try:
             pos = self.player.time_pos
             dur = self.player.duration
-            paused = self.player.pause
-
-            if pos is not None:
-                self.lbl_pos.setText(format_time(pos))
-                if dur and dur > 0:
-                    self._updating_slider = True
-                    self.timeline.setValue(int(pos / dur * 10000))
-                    self._updating_slider = False
-
+            if pos is not None and dur and dur > 0:
+                self._updating_slider = True
+                self.timeline.setValue(int(pos / dur * 10000))
+                self._updating_slider = False
             if dur is not None and self._duration != dur:
                 self._duration = dur
-                self.lbl_dur.setText(format_time(dur))
-
-            if paused:
-                self.btn_play.setText("▶  PLAY")
-            else:
-                self.btn_play.setText("⏸  PAUSE")
-
         except Exception:
             pass
 
@@ -933,7 +823,6 @@ class CineMarker(QMainWindow):
         self._markers = load_markers(path)
         self._refresh_marker_list()
         self.player.play(path)
-        self.player.pause = True
         self.status.showMessage(f"  {Path(path).name}  •  {path}")
         self.setWindowTitle(f"CineMarker  —  {Path(path).name}")
 
@@ -981,22 +870,6 @@ class CineMarker(QMainWindow):
     def _on_timeline_seek(self, fraction):
         if self._video_path and self._duration and not self._updating_slider:
             self.player.seek(fraction * self._duration, 'absolute+exact')
-
-    def _on_speed_change(self, val):
-        try:
-            self.player.speed = float(val)
-        except Exception:
-            pass
-
-    def _on_volume_change(self, val):
-        self.player.volume = val
-
-    def _on_goto_timecode(self):
-        if not self._video_path:
-            return
-        t = parse_time(self.tc_input.text())
-        self.player.seek(t, 'absolute+exact')
-        self.tc_input.clear()
 
     # ── Markers ───────────────────────────────
 
