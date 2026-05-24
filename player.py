@@ -326,37 +326,87 @@ class _ActorLinkOverlay(QFrame):
 #  Right-panel overlay (floats over player)
 # ─────────────────────────────────────────────
 
-class _PanelOverlay(QFrame):
-    def __init__(self, parent):
-        super().__init__(parent)
-        self.setFixedWidth(320)
-        # Native window so it sits in the HWND z-order above mpv's surface
-        self.setAttribute(Qt.WidgetAttribute.WA_NativeWindow, True)
+class _PanelOverlay(QWidget):
+    """Frameless top-level window — WA_TranslucentBackground works only for
+    top-level windows on Windows; child-widget transparency can never show
+    through an mpv-rendered surface."""
+
+    def __init__(self, main_win, video_container):
+        super().__init__(
+            main_win,
+            Qt.WindowType.FramelessWindowHint | Qt.WindowType.Tool,
+        )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
-        self.setAutoFillBackground(False)
-        self.setStyleSheet("background: transparent; border: none;")
-        parent.installEventFilter(self)
+        self.setFixedWidth(320)
+        self._vc = video_container
+
+        self.setStyleSheet("""
+            QWidget          { background: transparent; color: #e0e0e0;
+                               font-family: 'Consolas', monospace; font-size: 12px; }
+            QTabWidget::pane { background: transparent; border: none; }
+            QTabBar::tab     { background: rgba(18,18,18,210); color: #666;
+                               padding: 6px 16px; border: 1px solid #2a2a2a;
+                               border-bottom: none; border-radius: 4px 4px 0 0; }
+            QTabBar::tab:selected { background: rgba(10,10,10,220); color: #e8b86d; }
+            QListWidget      { background: rgba(12,12,12,210); border: 1px solid #222;
+                               border-radius: 4px; }
+            QListWidget::item          { padding: 6px 8px; border-bottom: 1px solid #1a1a1a; }
+            QListWidget::item:hover    { background: rgba(26,26,26,240); }
+            QListWidget::item:selected { background: rgba(42,34,0,240); color: #e8b86d; }
+            QPushButton      { background: rgba(30,30,30,210); border: 1px solid #333;
+                               border-radius: 4px; padding: 5px 12px; color: #e0e0e0; }
+            QPushButton:hover    { background: rgba(42,42,42,240); border-color: #e8b86d; }
+            QPushButton:pressed  { background: #e8b86d; color: #000; }
+            QPushButton#accent   { background: rgba(232,184,109,230); color: #000;
+                                   font-weight: bold; border: none; }
+            QPushButton#accent:hover { background: rgba(240,202,138,240); }
+            QPushButton#danger   { border-color: #c0392b; color: #c0392b; }
+            QPushButton#danger:hover { background: #c0392b; color: #fff; }
+            QLineEdit, QComboBox, QSpinBox {
+                background: rgba(26,26,26,210); border: 1px solid #333;
+                border-radius: 4px; padding: 4px 8px; color: #e0e0e0; }
+            QComboBox::drop-down { border: none; }
+            QProgressBar         { background: rgba(26,26,26,210); border: 1px solid #333;
+                                   border-radius: 4px; text-align: center; }
+            QProgressBar::chunk  { background: #e8b86d; border-radius: 3px; }
+            QLabel#section       { color: #888; font-size: 10px; letter-spacing: 3px; }
+            QFrame#separator     { background: #333; max-height: 1px; }
+            QScrollBar:vertical  { background: transparent; width: 8px; }
+            QScrollBar::handle:vertical { background: rgba(42,42,42,200); border-radius: 4px; }
+        """)
+
         v = QVBoxLayout(self)
         v.setContentsMargins(0, 0, 0, 0)
         v.setSpacing(0)
         self.tab_widget = QTabWidget()
-        self.tab_widget.setAutoFillBackground(False)
-        self.tab_widget.setStyleSheet(
-            "QTabWidget { background: transparent; }"
-            "QTabWidget::pane { background: transparent; border: none; }"
-        )
         v.addWidget(self.tab_widget)
-        self._reposition()
+
+        main_win.installEventFilter(self)
+
+    def paintEvent(self, _event):
+        # Clear to fully transparent — child widgets paint themselves on top
+        from PyQt6.QtGui import QPainter
+        p = QPainter(self)
+        p.setCompositionMode(QPainter.CompositionMode.CompositionMode_Clear)
+        p.fillRect(self.rect(), Qt.GlobalColor.transparent)
 
     def eventFilter(self, obj, event):
-        if obj is self.parent() and event.type() == QEvent.Type.Resize:
+        if event.type() in (QEvent.Type.Resize, QEvent.Type.Move,
+                            QEvent.Type.Show, QEvent.Type.WindowStateChange):
             self._reposition()
         return False
 
     def _reposition(self):
-        p = self.parent()
-        if p:
-            self.setGeometry(p.width() - self.width(), 0, self.width(), p.height())
+        vc = self._vc
+        if not vc.isVisible():
+            return
+        tl = vc.mapToGlobal(vc.rect().topLeft())
+        self.setGeometry(
+            tl.x() + vc.width() - self.width(),
+            tl.y(),
+            self.width(),
+            vc.height(),
+        )
 
 
 # ─────────────────────────────────────────────
@@ -536,6 +586,7 @@ class CineMarker(QMainWindow):
 
         # Player tab — video fills all, ultra-thin seekbar at bottom
         player_widget = QWidget()
+        self._player_widget = player_widget
         pv = QVBoxLayout(player_widget)
         pv.setContentsMargins(0, 0, 0, 0)
         pv.setSpacing(0)
@@ -552,14 +603,15 @@ class CineMarker(QMainWindow):
         )
         pv.addWidget(self.timeline)
 
-        # Floating right panel (markers + converter)
-        self._panel = _PanelOverlay(self.video_container)
+        # Floating right panel — top-level transparent window
+        self._panel = _PanelOverlay(self, self.video_container)
         self.tabs = self._panel.tab_widget
         self._build_markers_tab()
         self._build_converter_tab()
+        self._panel.hide()
 
-        # Floating actor-link overlay (positioned over player_widget)
-        self._actor_overlay = _ActorLinkOverlay(self.video_container)
+        # Floating actor-link overlay (child of player_widget)
+        self._actor_overlay = _ActorLinkOverlay(player_widget)
         self._actor_overlay.link_requested.connect(self._link_actor_to_film)
 
         self.main_tabs.addTab(player_widget, "▶  SPELER")
@@ -601,6 +653,8 @@ class CineMarker(QMainWindow):
     def _on_tab_changed(self, idx):
         actors_idx = self.main_tabs.indexOf(self.actors_panel)
         self._actors_tb.setVisible(idx == actors_idx)
+        player_idx = self.main_tabs.indexOf(self._player_widget)
+        self._panel.setVisible(idx == player_idx)
 
     def _toggle_fullscreen(self):
         if self.isFullScreen():
@@ -643,8 +697,6 @@ class CineMarker(QMainWindow):
 
     def _build_markers_tab(self):
         w = QWidget()
-        w.setAutoFillBackground(False)
-        w.setStyleSheet("QWidget { background: transparent; }")
         v = QVBoxLayout(w)
         v.setContentsMargins(8, 8, 8, 8)
         v.setSpacing(6)
@@ -681,8 +733,6 @@ class CineMarker(QMainWindow):
 
     def _build_converter_tab(self):
         w = QWidget()
-        w.setAutoFillBackground(False)
-        w.setStyleSheet("QWidget { background: transparent; }")
         v = QVBoxLayout(w)
         v.setContentsMargins(8, 8, 8, 8)
         v.setSpacing(8)
