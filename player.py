@@ -227,6 +227,101 @@ class ClickableLabel(QLabel):
 
 
 # ─────────────────────────────────────────────
+#  Actor Link Overlay  (floating over player)
+# ─────────────────────────────────────────────
+
+class _ActorLinkOverlay(QFrame):
+    link_requested = pyqtSignal(dict)
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.setFixedWidth(270)
+        self.setFixedHeight(320)
+        self.setStyleSheet("""
+            _ActorLinkOverlay, QFrame#actorOverlay {
+                background: #111;
+                border: 1px solid #333;
+                border-radius: 8px;
+            }
+            QLineEdit {
+                background: #1a1a1a;
+                border: 1px solid #2a2a2a;
+                border-radius: 4px;
+                padding: 6px 8px;
+                color: #e0e0e0;
+                font-size: 13px;
+            }
+            QListWidget {
+                background: #0e0e0e;
+                border: none;
+                color: #ccc;
+                font-size: 12px;
+            }
+            QListWidget::item { padding: 7px 10px; border-bottom: 1px solid #181818; }
+            QListWidget::item:hover { background: #1a1a1a; }
+            QListWidget::item:selected { background: #2a2200; color: #e8b86d; }
+        """)
+        self._actors: list = []
+        self._build_ui()
+        self.hide()
+
+    def _build_ui(self):
+        v = QVBoxLayout(self)
+        v.setContentsMargins(12, 10, 12, 12)
+        v.setSpacing(8)
+
+        hdr = QHBoxLayout()
+        lbl = QLabel("ACTEUR KOPPELEN")
+        lbl.setStyleSheet("color: #555; font-size: 9px; letter-spacing: 3px;")
+        hdr.addWidget(lbl)
+        hdr.addStretch()
+        btn_x = QPushButton("✕")
+        btn_x.setFixedSize(20, 20)
+        btn_x.setStyleSheet(
+            "QPushButton { border: none; color: #444; background: transparent; }"
+            "QPushButton:hover { color: #e0e0e0; }"
+        )
+        btn_x.clicked.connect(self.hide)
+        hdr.addWidget(btn_x)
+        v.addLayout(hdr)
+
+        self.search = QLineEdit()
+        self.search.setPlaceholderText("Naam zoeken...")
+        self.search.textChanged.connect(self._filter)
+        v.addWidget(self.search)
+
+        self.actor_list = QListWidget()
+        self.actor_list.itemClicked.connect(self._on_actor_click)
+        v.addWidget(self.actor_list)
+
+    def show_overlay(self):
+        self._actors = db.get_all_actors()
+        self.search.clear()
+        self._filter('')
+        p = self.parent()
+        if p:
+            self.move(p.width() - self.width() - 16, 56)
+        self.show()
+        self.raise_()
+        self.search.setFocus()
+
+    def _filter(self, text: str):
+        self.actor_list.clear()
+        q = text.lower()
+        for a in self._actors:
+            if not q or q in a.get('name', '').lower():
+                item = QListWidgetItem(a['name'])
+                item.setData(Qt.ItemDataRole.UserRole, a)
+                self.actor_list.addItem(item)
+
+    def _on_actor_click(self, item):
+        a = item.data(Qt.ItemDataRole.UserRole)
+        if a:
+            self.link_requested.emit(a)
+            self.hide()
+
+
+# ─────────────────────────────────────────────
 #  Main Window
 # ─────────────────────────────────────────────
 
@@ -375,15 +470,30 @@ class CineMarker(QMainWindow):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        # Toolbar
-        self._build_toolbar(root)
-
-        # Main tabs: Player / Acteurs
+        # Main tabs — no separate title bar
         self.main_tabs = QTabWidget()
         self.main_tabs.setStyleSheet("""
-            QTabBar::tab { padding: 8px 24px; font-size: 12px; letter-spacing: 2px; }
+            QTabBar::tab { padding: 8px 20px; font-size: 12px; letter-spacing: 2px; }
             QTabBar::tab:selected { color: #e8b86d; }
         """)
+
+        # Corner widget: Open Video + Fullscreen
+        _corner = QWidget()
+        _corner.setStyleSheet("background: transparent;")
+        _ch = QHBoxLayout(_corner)
+        _ch.setContentsMargins(0, 3, 8, 3)
+        _ch.setSpacing(6)
+        btn_open_corner = QPushButton("⊕  Open Video")
+        btn_open_corner.setObjectName("accent")
+        btn_open_corner.setFixedHeight(28)
+        btn_open_corner.clicked.connect(self.open_file)
+        _ch.addWidget(btn_open_corner)
+        self.btn_fs = QPushButton("⛶")
+        self.btn_fs.setFixedSize(28, 28)
+        self.btn_fs.setToolTip("Volledig scherm  F11")
+        self.btn_fs.clicked.connect(self._toggle_fullscreen)
+        _ch.addWidget(self.btn_fs)
+        self.main_tabs.setCornerWidget(_corner, Qt.Corner.TopRightCorner)
 
         # Player tab container
         player_widget = QWidget()
@@ -419,6 +529,10 @@ class CineMarker(QMainWindow):
         splitter.setSizes([1000, 350])
         player_layout.addWidget(splitter)
 
+        # Floating actor-link overlay (positioned over player_widget)
+        self._actor_overlay = _ActorLinkOverlay(player_widget)
+        self._actor_overlay.link_requested.connect(self._link_actor_to_film)
+
         self.main_tabs.addTab(player_widget, "▶  SPELER")
 
         # Films tab
@@ -445,25 +559,25 @@ class CineMarker(QMainWindow):
         self.setStatusBar(self.status)
         self.status.showMessage("Open een videobestand om te beginnen  •  CineMarker")
 
-    def _build_toolbar(self, layout):
-        bar = QWidget()
-        bar.setStyleSheet("background: #0a0a0a; border-bottom: 1px solid #1e1e1e;")
-        bar.setFixedHeight(44)
-        h = QHBoxLayout(bar)
-        h.setContentsMargins(12, 0, 12, 0)
-        h.setSpacing(8)
+    def _toggle_fullscreen(self):
+        if self.isFullScreen():
+            self.showNormal()
+        else:
+            self.showFullScreen()
 
-        title = QLabel("◈ CINEMARKER")
-        title.setStyleSheet("color: #e8b86d; font-size: 13px; font-weight: bold; letter-spacing: 4px;")
-        h.addWidget(title)
-        h.addStretch()
+    def _show_actor_overlay(self):
+        if not self._video_path:
+            return
+        self._actor_overlay.show_overlay()
 
-        btn_open = QPushButton("⊕  Open Video")
-        btn_open.setObjectName("accent")
-        btn_open.clicked.connect(self.open_file)
-        h.addWidget(btn_open)
-
-        layout.addWidget(bar)
+    def _link_actor_to_film(self, actor: dict):
+        if not self._video_path:
+            return
+        film = db.get_or_create_film(self._video_path)
+        db.link_actor_film(actor['id'], film['id'])
+        self.status.showMessage(
+            f"  {actor['name']} gekoppeld aan {Path(self._video_path).name}"
+        )
 
     def _build_video_area(self, layout):
         self.video_container = QWidget()
@@ -591,6 +705,12 @@ class CineMarker(QMainWindow):
         btn_mark.setFixedHeight(30)
         btn_mark.clicked.connect(self.add_marker)
         row.addWidget(btn_mark)
+
+        btn_link = QPushButton("🔗 Acteur")
+        btn_link.setFixedHeight(30)
+        btn_link.setToolTip("Acteur koppelen aan film  Ctrl+L")
+        btn_link.clicked.connect(self._show_actor_overlay)
+        row.addWidget(btn_link)
 
         btn_thumb = QPushButton("⊡ Thumbnail")
         btn_thumb.setFixedHeight(30)
@@ -747,6 +867,8 @@ class CineMarker(QMainWindow):
         QShortcut(QKeySequence("M"), self).activated.connect(self.add_marker)
         QShortcut(QKeySequence("T"), self).activated.connect(self.export_thumbnail)
         QShortcut(QKeySequence("Ctrl+O"), self).activated.connect(self.open_file)
+        QShortcut(QKeySequence("F11"),    self).activated.connect(self._toggle_fullscreen)
+        QShortcut(QKeySequence("Ctrl+L"), self).activated.connect(self._show_actor_overlay)
         QShortcut(QKeySequence("Home"), self).activated.connect(self.go_to_start)
         QShortcut(QKeySequence("End"), self).activated.connect(self.go_to_end)
 

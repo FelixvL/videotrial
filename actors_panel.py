@@ -926,133 +926,189 @@ class ActorDetailPanel(QWidget):
 
 
 # ─────────────────────────────────────────────
-#  Actor Detail Dialog
+#  Actor Detail View  (full-screen embedded page)
 # ─────────────────────────────────────────────
 
-class ActorDetailDialog(QDialog):
+class ActorDetailView(QWidget):
 
-    KLEUR_OPTS  = [('', '—'), ('1', 'Wit'), ('2', 'Zwart'), ('3', 'Bruin')]
+    back_requested = pyqtSignal()
+    saved          = pyqtSignal()
+
+    KLEUR_OPTS   = [('', '—'), ('1', 'Wit'), ('2', 'Zwart'), ('3', 'Bruin')]
     GROOTTE_OPTS = [('', '—')] + [(str(i), '★' * i) for i in range(1, 11)]
     RATING_OPTS  = [('', '—')] + [(str(i), str(i)) for i in range(1, 10)]
     DEC_OPTS     = ([('', '—')] +
                     [(str(d), f"{d*10}s") for d in range(3, 10)] +
                     [('0', '00s'), ('1', '10s'), ('2', '20s')])
 
-    def __init__(self, parent, data: dict):
-        super().__init__(parent)
-        self.data = data
-        meta = data.get('meta', {})
-        self._meta = dict(meta)
-        self._actor = data.get('actor')
-        self._photo_path = data.get('photo_path', '')
-        self.setWindowTitle("Acteur details")
-        self.setMinimumWidth(480)
-        self.setStyleSheet(parent.styleSheet() if parent else '')
+    def __init__(self):
+        super().__init__()
+        self._data:  dict = {}
+        self._actor        = None
         self._build_ui()
 
     def _build_ui(self):
         v = QVBoxLayout(self)
-        v.setSpacing(12)
-        v.setContentsMargins(16, 16, 16, 16)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(0)
 
-        # Top row: photo + fields
-        top = QHBoxLayout()
-        top.setSpacing(16)
+        # Header bar
+        bar = QFrame()
+        bar.setFixedHeight(44)
+        bar.setStyleSheet("QFrame { background: #0d0d0d; border-bottom: 1px solid #1e1e1e; }")
+        b = QHBoxLayout(bar)
+        b.setContentsMargins(12, 0, 12, 0)
+        b.setSpacing(10)
 
-        # Photo
+        btn_back = QPushButton("← Terug")
+        btn_back.setFixedHeight(28)
+        btn_back.clicked.connect(self.back_requested)
+        b.addWidget(btn_back)
+
+        self.lbl_stem = QLabel("")
+        self.lbl_stem.setStyleSheet("color: #555; font-size: 11px;")
+        b.addWidget(self.lbl_stem)
+
+        b.addStretch()
+
+        btn_save = QPushButton("💾  Opslaan")
+        btn_save.setObjectName("accent")
+        btn_save.setFixedHeight(28)
+        btn_save.clicked.connect(self._save)
+        b.addWidget(btn_save)
+
+        v.addWidget(bar)
+
+        # Content
+        content = QWidget()
+        ch = QHBoxLayout(content)
+        ch.setContentsMargins(24, 24, 24, 24)
+        ch.setSpacing(24)
+
+        # Left: photo
         self.lbl_photo = QLabel()
-        self.lbl_photo.setFixedSize(140, 180)
+        self.lbl_photo.setFixedSize(220, 284)
         self.lbl_photo.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.lbl_photo.setStyleSheet(
-            "background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 4px; color: #333; font-size: 28px;"
+            "background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 4px;"
+            " color: #333; font-size: 40px;"
         )
-        if self._photo_path and os.path.exists(self._photo_path):
-            pix = QPixmap(self._photo_path).scaled(
-                140, 180,
+        self.lbl_photo.setText("?")
+        ch.addWidget(self.lbl_photo)
+
+        # Right column
+        right = QVBoxLayout()
+        right.setSpacing(16)
+
+        # Edit fields
+        fields_frame = QFrame()
+        fields_frame.setStyleSheet(
+            "QFrame { background: #111; border: 1px solid #1e1e1e; border-radius: 6px; }"
+        )
+        fg = QGridLayout(fields_frame)
+        fg.setContentsMargins(16, 16, 16, 16)
+        fg.setSpacing(10)
+        fg.setColumnStretch(1, 1)
+        fg.setColumnStretch(3, 1)
+
+        def lbl(t):
+            l = QLabel(t)
+            l.setStyleSheet("color: #444; font-size: 10px; letter-spacing: 2px;")
+            return l
+
+        fg.addWidget(lbl("VOORNAAM"),    0, 0)
+        self.inp_voornaam   = QLineEdit()
+        fg.addWidget(self.inp_voornaam,  0, 1)
+
+        fg.addWidget(lbl("ACHTERNAAM"),  0, 2)
+        self.inp_achternaam = QLineEdit()
+        fg.addWidget(self.inp_achternaam, 0, 3)
+
+        fg.addWidget(lbl("KLEUR"),    1, 0)
+        self.cmb_kleur = QComboBox()
+        for val, text in self.KLEUR_OPTS:
+            self.cmb_kleur.addItem(text, val)
+        fg.addWidget(self.cmb_kleur, 1, 1)
+
+        fg.addWidget(lbl("GROOTTE"),  1, 2)
+        self.cmb_grootte = QComboBox()
+        for val, text in self.GROOTTE_OPTS:
+            self.cmb_grootte.addItem(text, val)
+        fg.addWidget(self.cmb_grootte, 1, 3)
+
+        fg.addWidget(lbl("RATING"),   2, 0)
+        self.cmb_rating = QComboBox()
+        for val, text in self.RATING_OPTS:
+            self.cmb_rating.addItem(text, val)
+        fg.addWidget(self.cmb_rating, 2, 1)
+
+        fg.addWidget(lbl("DECENNIA"), 2, 2)
+        self.cmb_dec = QComboBox()
+        for val, text in self.DEC_OPTS:
+            self.cmb_dec.addItem(text, val)
+        fg.addWidget(self.cmb_dec, 2, 3)
+
+        right.addWidget(fields_frame)
+
+        # Films linked to this actor
+        films_frame = QFrame()
+        films_frame.setStyleSheet(
+            "QFrame { background: #111; border: 1px solid #1e1e1e; border-radius: 6px; }"
+        )
+        fv = QVBoxLayout(films_frame)
+        fv.setContentsMargins(16, 12, 16, 12)
+        fv.setSpacing(6)
+
+        fl_h = QHBoxLayout()
+        fl_lbl = QLabel("FILMS")
+        fl_lbl.setStyleSheet("color: #444; font-size: 10px; letter-spacing: 3px;")
+        fl_h.addWidget(fl_lbl)
+        fl_h.addStretch()
+        fv.addLayout(fl_h)
+
+        self.films_list = QListWidget()
+        fv.addWidget(self.films_list)
+
+        right.addWidget(films_frame, stretch=1)
+        ch.addLayout(right, stretch=1)
+        v.addWidget(content, stretch=1)
+
+    def load(self, data: dict):
+        self._data  = data
+        self._actor = data.get('actor')
+        meta        = data.get('meta', {})
+
+        self.lbl_stem.setText(data.get('stem', ''))
+
+        photo_path = data.get('photo_path', '')
+        if photo_path and os.path.exists(photo_path):
+            pix = QPixmap(photo_path).scaled(
+                220, 284,
                 Qt.AspectRatioMode.KeepAspectRatio,
                 Qt.TransformationMode.SmoothTransformation
             )
             self.lbl_photo.setPixmap(pix)
+            self.lbl_photo.setText('')
         else:
-            self.lbl_photo.setText("?")
-        top.addWidget(self.lbl_photo)
+            self.lbl_photo.setPixmap(QPixmap())
+            self.lbl_photo.setText('?')
 
-        # Fields grid
-        fg = QGridLayout()
-        fg.setSpacing(8)
-        fg.setColumnStretch(1, 1)
+        self.inp_voornaam.setText(meta.get('voornaam', ''))
+        self.inp_achternaam.setText(meta.get('achternaam', ''))
+        self._set_combo(self.cmb_kleur,   meta.get('kleur', ''))
+        self._set_combo(self.cmb_grootte, meta.get('grootte', ''))
+        self._set_combo(self.cmb_rating,  meta.get('rating', ''))
+        self._set_combo(self.cmb_dec,     meta.get('decennia', ''))
 
-        def lbl(text):
-            l = QLabel(text)
-            l.setStyleSheet("color: #555; font-size: 10px; letter-spacing: 2px;")
-            return l
+        self._refresh_films()
 
-        # Bestandsnaam (read-only)
-        fg.addWidget(lbl("BESTAND"), 0, 0)
-        lbl_stem = QLabel(self.data.get('stem', ''))
-        lbl_stem.setStyleSheet("color: #444; font-size: 11px;")
-        fg.addWidget(lbl_stem, 0, 1)
-
-        # Voornaam
-        fg.addWidget(lbl("VOORNAAM"), 1, 0)
-        self.inp_voornaam = QLineEdit(self._meta.get('voornaam', ''))
-        fg.addWidget(self.inp_voornaam, 1, 1)
-
-        # Achternaam
-        fg.addWidget(lbl("ACHTERNAAM"), 2, 0)
-        self.inp_achternaam = QLineEdit(self._meta.get('achternaam', ''))
-        fg.addWidget(self.inp_achternaam, 2, 1)
-
-        # Kleur
-        fg.addWidget(lbl("KLEUR"), 3, 0)
-        self.cmb_kleur = QComboBox()
-        for val, text in self.KLEUR_OPTS:
-            self.cmb_kleur.addItem(text, val)
-        self._set_combo(self.cmb_kleur, self._meta.get('kleur', ''))
-        fg.addWidget(self.cmb_kleur, 3, 1)
-
-        # Grootte
-        fg.addWidget(lbl("GROOTTE"), 4, 0)
-        self.cmb_grootte = QComboBox()
-        for val, text in self.GROOTTE_OPTS:
-            self.cmb_grootte.addItem(text, val)
-        self._set_combo(self.cmb_grootte, self._meta.get('grootte', ''))
-        fg.addWidget(self.cmb_grootte, 4, 1)
-
-        # Rating
-        fg.addWidget(lbl("RATING"), 5, 0)
-        self.cmb_rating = QComboBox()
-        for val, text in self.RATING_OPTS:
-            self.cmb_rating.addItem(text, val)
-        self._set_combo(self.cmb_rating, self._meta.get('rating', ''))
-        fg.addWidget(self.cmb_rating, 5, 1)
-
-        # Decennia
-        fg.addWidget(lbl("DECENNIA"), 6, 0)
-        self.cmb_dec = QComboBox()
-        for val, text in self.DEC_OPTS:
-            self.cmb_dec.addItem(text, val)
-        self._set_combo(self.cmb_dec, self._meta.get('decennia', ''))
-        fg.addWidget(self.cmb_dec, 6, 1)
-
-        top.addLayout(fg)
-        v.addLayout(top)
-
-        # Buttons
-        sep = QFrame()
-        sep.setFrameShape(QFrame.Shape.HLine)
-        sep.setStyleSheet("background: #222;")
-        v.addWidget(sep)
-
-        btns = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Save |
-            QDialogButtonBox.StandardButton.Cancel
-        )
-        btns.accepted.connect(self.accept)
-        btns.rejected.connect(self.reject)
-        btns.button(QDialogButtonBox.StandardButton.Save).setText("💾  Opslaan")
-        btns.button(QDialogButtonBox.StandardButton.Cancel).setText("Annuleren")
-        v.addWidget(btns)
+    def _refresh_films(self):
+        self.films_list.clear()
+        if self._actor:
+            for f in db.get_films_for_actor(self._actor['id']):
+                item = QListWidgetItem(f"▶   {f['title']}")
+                item.setData(Qt.ItemDataRole.UserRole, f)
+                self.films_list.addItem(item)
 
     def _set_combo(self, combo: QComboBox, value: str):
         for i in range(combo.count()):
@@ -1060,25 +1116,29 @@ class ActorDetailDialog(QDialog):
                 combo.setCurrentIndex(i)
                 return
 
-    def get_meta(self) -> dict:
+    def _get_meta(self) -> dict:
         meta = {}
-        for field, widget in [
-            ('voornaam',   self.inp_voornaam),
-            ('achternaam', self.inp_achternaam),
-        ]:
-            val = widget.text().strip()
+        for field, w in [('voornaam', self.inp_voornaam), ('achternaam', self.inp_achternaam)]:
+            val = w.text().strip()
             if val:
                 meta[field] = val
-        for field, combo in [
-            ('kleur',    self.cmb_kleur),
-            ('grootte',  self.cmb_grootte),
-            ('rating',   self.cmb_rating),
-            ('decennia', self.cmb_dec),
-        ]:
-            val = combo.currentData()
+        for field, c in [('kleur', self.cmb_kleur), ('grootte', self.cmb_grootte),
+                         ('rating', self.cmb_rating), ('decennia', self.cmb_dec)]:
+            val = c.currentData()
             if val:
                 meta[field] = val
         return meta
+
+    def _save(self):
+        meta = self._get_meta()
+        stem = self._data.get('stem', '')
+        if self._actor:
+            actor_id = self._actor['id']
+        else:
+            actor_id = db.create_actor(stem)
+        db.update_actor_meta(actor_id, meta)
+        self.saved.emit()
+        self.back_requested.emit()
 
 
 # ─────────────────────────────────────────────
@@ -1114,6 +1174,15 @@ class ActorsPanel(QWidget):
         v = QVBoxLayout(self)
         v.setContentsMargins(0, 0, 0, 0)
         v.setSpacing(0)
+
+        self._stack = QStackedWidget()
+        v.addWidget(self._stack)
+
+        # ── Page 0: photo grid ────────────────────
+        page0 = QWidget()
+        v0 = QVBoxLayout(page0)
+        v0.setContentsMargins(0, 0, 0, 0)
+        v0.setSpacing(0)
 
         # Row 1: title / folder / search / buttons
         bar1 = QFrame()
@@ -1158,9 +1227,9 @@ class ActorsPanel(QWidget):
         btn_zoom_in.clicked.connect(self._zoom_in)
         b1.addWidget(btn_zoom_in)
 
-        v.addWidget(bar1)
+        v0.addWidget(bar1)
 
-        # Filter sectie — 2 rijen checkboxes
+        # Filter — 1 rij checkboxes
         filter_frame = QFrame()
         filter_frame.setStyleSheet(
             "QFrame { background: #0a0a0a; border-bottom: 1px solid #161616; }"
@@ -1170,46 +1239,36 @@ class ActorsPanel(QWidget):
         )
         fv = QVBoxLayout(filter_frame)
         fv.setContentsMargins(12, 4, 12, 4)
-        fv.setSpacing(4)
+        fv.setSpacing(0)
 
-        row_a = QHBoxLayout()
-        row_a.setSpacing(16)
-        row_b = QHBoxLayout()
-        row_b.setSpacing(16)
+        row_f = QHBoxLayout()
+        row_f.setSpacing(10)
 
-        # DB
-        self._cb_db = self._cb_group(row_a, "Database:",
-            [("in_db", "In DB"), ("not_in_db", "Niet in DB")])
+        self._cb_db = self._cb_group(row_f, "DB:",
+            [("in_db", "✓"), ("not_in_db", "✗")])
 
-        # Kleur
-        self._cb_kleur = self._cb_group(row_a, "Kleur:",
+        self._cb_kleur = self._cb_group(row_f, "Kleur:",
             [("1", "Wit"), ("2", "Zwart"), ("3", "Bruin")])
 
-        # Rating
-        self._cb_rating = self._cb_group(row_a, "Rating:",
-            [("9", "9●"), ("8", "8●"), ("7", "7●"), ("6", "6--"), ("5", "5--")])
+        self._cb_rating = self._cb_group(row_f, "Rating:",
+            [("9", "9"), ("8", "8"), ("7", "7"), ("6", "6"), ("5", "5")])
+
+        self._cb_grootte = self._cb_group(row_f, "Grootte:",
+            [(str(i), str(i)) for i in range(1, 11)])
+
+        self._cb_dec = self._cb_group(row_f, "Dec:",
+            [(str(d), f"{d*10}") for d in range(6, 10)] +
+            [("0", "00"), ("1", "10"), ("2", "20")])
 
         btn_reset = QPushButton("✕")
         btn_reset.setFixedSize(22, 22)
         btn_reset.setToolTip("Reset filters")
         btn_reset.clicked.connect(self._reset_filters)
-        row_a.addStretch()
-        row_a.addWidget(btn_reset)
+        row_f.addStretch()
+        row_f.addWidget(btn_reset)
 
-        # Grootte
-        self._cb_grootte = self._cb_group(row_b, "Grootte:",
-            [(str(i), str(i)) for i in range(1, 11)])
-
-        # Decennia
-        self._cb_dec = self._cb_group(row_b, "Decennia:",
-            [(str(d), f"{d*10}s") for d in range(3, 10)] +
-            [("0", "00s"), ("1", "10s"), ("2", "20s")])
-
-        row_b.addStretch()
-
-        fv.addLayout(row_a)
-        fv.addLayout(row_b)
-        v.addWidget(filter_frame)
+        fv.addLayout(row_f)
+        v0.addWidget(filter_frame)
 
         # Photo grid
         cw, ch = self._zoom_size()
@@ -1229,7 +1288,15 @@ class ActorsPanel(QWidget):
         self.grid.setItemDelegate(self._delegate)
         self.grid.itemClicked.connect(self._on_item_clicked)
         self._delegate.detail_requested.connect(self._open_detail)
-        v.addWidget(self.grid)
+        v0.addWidget(self.grid)
+
+        self._stack.addWidget(page0)
+
+        # ── Page 1: detail view ───────────────────
+        self._detail_view = ActorDetailView()
+        self._detail_view.back_requested.connect(self._on_detail_back)
+        self._detail_view.saved.connect(self._on_detail_saved)
+        self._stack.addWidget(self._detail_view)
 
     def _cb_group(self, layout: QHBoxLayout, label: str,
                   options: list) -> dict:
@@ -1398,21 +1465,13 @@ class ActorsPanel(QWidget):
             QApplication.clipboard().setText(full_name)
 
     def _open_detail(self, data: dict):
-        dlg = ActorDetailDialog(self, data)
-        if dlg.exec() != QDialog.DialogCode.Accepted:
-            return
+        self._detail_view.load(data)
+        self._stack.setCurrentIndex(1)
 
-        new_meta = dlg.get_meta()
-        stem = data.get('stem', '')
+    def _on_detail_back(self):
+        self._stack.setCurrentIndex(0)
 
-        # Get or create actor record
-        actor = data.get('actor')
-        if actor:
-            actor_id = actor['id']
-        else:
-            actor_id = db.create_actor(stem)
-
-        db.update_actor_meta(actor_id, new_meta)
+    def _on_detail_saved(self):
         self.refresh()
 
     # ── Import ───────────────────────────────────
