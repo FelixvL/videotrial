@@ -426,6 +426,14 @@ class CineMarker(QMainWindow):
         self._convert_worker = None
         self._thumb_worker = None
 
+        # Multi-tap seek state
+        self._seek_count = 0
+        self._seek_dir   = 0
+        self._seek_timer = QTimer()
+        self._seek_timer.setSingleShot(True)
+        self._seek_timer.setInterval(380)
+        self._seek_timer.timeout.connect(self._commit_seek)
+
         self._setup_style()
         self._setup_mpv()
         self._build_ui()
@@ -834,12 +842,8 @@ class CineMarker(QMainWindow):
 
     def _setup_shortcuts(self):
         QShortcut(QKeySequence("Space"), self).activated.connect(self.toggle_play)
-        QShortcut(QKeySequence("Left"), self).activated.connect(lambda: self.seek_relative(-5))
-        QShortcut(QKeySequence("Right"), self).activated.connect(lambda: self.seek_relative(5))
-        QShortcut(QKeySequence("Shift+Left"), self).activated.connect(lambda: self.seek_relative(-1))
-        QShortcut(QKeySequence("Shift+Right"), self).activated.connect(lambda: self.seek_relative(1))
-        QShortcut(QKeySequence("Ctrl+Left"), self).activated.connect(lambda: self.seek_frames(-1))
-        QShortcut(QKeySequence("Ctrl+Right"), self).activated.connect(lambda: self.seek_frames(1))
+        QShortcut(QKeySequence("Left"),  self).activated.connect(lambda: self._on_seek_key(-1))
+        QShortcut(QKeySequence("Right"), self).activated.connect(lambda: self._on_seek_key(1))
         QShortcut(QKeySequence("M"), self).activated.connect(self.add_marker)
         QShortcut(QKeySequence("T"), self).activated.connect(self.export_thumbnail)
         QShortcut(QKeySequence("Ctrl+O"), self).activated.connect(self.open_file)
@@ -933,6 +937,41 @@ class CineMarker(QMainWindow):
     def _on_timeline_seek(self, fraction):
         if self._video_path and self._duration and not self._updating_slider:
             self.player.seek(fraction * self._duration, 'absolute+exact')
+
+    # ── Multi-tap seek ────────────────────────
+
+    # playing:  1×=5s  2×=30s  3×=5min  4×=30min
+    # paused:   1×=1frame  2×=1s  3×=10s  4×=1min
+    _SEEK_PLAY   = [0,    5,   30,  300, 1800]
+    _SEEK_PAUSE  = [0,    0,    1,   10,   60]  # 0 = frame step
+
+    def _on_seek_key(self, direction: int):
+        if not self._video_path:
+            return
+        if self._seek_dir != direction and self._seek_count > 0:
+            self._seek_timer.stop()
+            self._commit_seek()
+        self._seek_dir    = direction
+        self._seek_count  = min(self._seek_count + 1, 4)
+        self._seek_timer.start()
+
+    def _commit_seek(self):
+        n, d = self._seek_count, self._seek_dir
+        self._seek_count = 0
+        self._seek_dir   = 0
+        if n == 0 or not self._video_path:
+            return
+        try:
+            paused = self.player.pause
+        except Exception:
+            paused = False
+        if paused:
+            if n == 1:
+                self.seek_frames(d)
+            else:
+                self.seek_relative(d * self._SEEK_PAUSE[n])
+        else:
+            self.seek_relative(d * self._SEEK_PLAY[n])
 
     # ── Markers ───────────────────────────────
 
