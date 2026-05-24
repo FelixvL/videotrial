@@ -728,9 +728,19 @@ class ActorDetailPanel(QWidget):
         if not self._actor:
             return
         self.films_list.clear()
+        self.films_list.setIconSize(QSize(96, 54))
         films = db.get_films_for_actor(self._actor['id'])
         for f in films:
-            item = QListWidgetItem(f"  {f['title']}")
+            item = QListWidgetItem()
+            thumb = f.get('thumbnail', '')
+            if thumb and os.path.exists(thumb):
+                pix = QPixmap(thumb).scaled(
+                    96, 54,
+                    Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                    Qt.TransformationMode.SmoothTransformation
+                )
+                item.setIcon(QIcon(pix))
+            item.setText(f"  {f['title']}")
             item.setData(Qt.ItemDataRole.UserRole, f)
             self.films_list.addItem(item)
 
@@ -1104,9 +1114,19 @@ class ActorDetailView(QWidget):
 
     def _refresh_films(self):
         self.films_list.clear()
+        self.films_list.setIconSize(QSize(96, 54))
         if self._actor:
             for f in db.get_films_for_actor(self._actor['id']):
-                item = QListWidgetItem(f"▶   {f['title']}")
+                item = QListWidgetItem()
+                thumb = f.get('thumbnail', '')
+                if thumb and os.path.exists(thumb):
+                    pix = QPixmap(thumb).scaled(
+                        96, 54,
+                        Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                        Qt.TransformationMode.SmoothTransformation
+                    )
+                    item.setIcon(QIcon(pix))
+                item.setText(f"  {f['title']}")
                 item.setData(Qt.ItemDataRole.UserRole, f)
                 self.films_list.addItem(item)
 

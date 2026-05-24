@@ -71,6 +71,12 @@ def init_db():
         );
     """)
 
+    # Migration: thumbnail column
+    try:
+        c.execute("ALTER TABLE films ADD COLUMN thumbnail TEXT DEFAULT ''")
+    except Exception:
+        pass
+
     conn.commit()
     conn.close()
 
@@ -249,6 +255,13 @@ def get_film(film_id):
 def update_film_notes(film_id, notes):
     conn = get_connection()
     conn.execute("UPDATE films SET notes=? WHERE id=?", (notes, film_id))
+    conn.commit()
+    conn.close()
+
+
+def set_film_thumbnail(film_id, path):
+    conn = get_connection()
+    conn.execute("UPDATE films SET thumbnail=? WHERE id=?", (path, film_id))
     conn.commit()
     conn.close()
 
