@@ -330,91 +330,39 @@ class _ActorLinkOverlay(QFrame):
 from PyQt6.QtCore import pyqtSignal as _pyqtSignal
 
 
-class _SelectableThumb(QWidget):
-    toggled = _pyqtSignal(int, bool)   # actor_id, selected
-
-    TW, TH = 52, 62
-    _STYLE_NORMAL   = "QWidget { background: #1a1a1a; border: 2px solid transparent; border-radius: 4px; }"
-    _STYLE_SELECTED = "QWidget { background: #3c3200; border: 2px solid #e8b86d;    border-radius: 4px; }"
-
-    def __init__(self, actor: dict):
-        super().__init__()
-        self._actor = actor
-        self._selected = False
-        self.setFixedSize(self.TW + 8, self.TH + 18)
-        self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setStyleSheet(self._STYLE_NORMAL)
-
-        v = QVBoxLayout(self)
-        v.setContentsMargins(3, 3, 3, 2)
-        v.setSpacing(2)
-
-        img = QLabel()
-        img.setFixedSize(self.TW, self.TH)
-        img.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        img.setStyleSheet("border: none; background: #2a2a2a; border-radius: 2px;")
-        photos = db.get_actor_photos(actor['id'])
-        path = photos[0]['photo_path'] if photos else ''
-        if path:
-            raw = QPixmap(path)
-            if not raw.isNull():
-                scaled = raw.scaled(self.TW, self.TH,
-                    Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-                    Qt.TransformationMode.SmoothTransformation)
-                ox = (scaled.width()  - self.TW) // 2
-                oy = (scaled.height() - self.TH) // 2
-                img.setPixmap(scaled.copy(ox, oy, self.TW, self.TH))
-        v.addWidget(img, alignment=Qt.AlignmentFlag.AlignHCenter)
-
-        name_lbl = QLabel(actor.get('name', ''))
-        name_lbl.setFixedWidth(self.TW + 2)
-        name_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        name_lbl.setStyleSheet("color: #666; font-size: 8px; background: transparent; border: none;")
-        metrics = name_lbl.fontMetrics()
-        name_lbl.setText(metrics.elidedText(actor.get('name', ''), Qt.TextElideMode.ElideRight, self.TW + 2))
-        v.addWidget(name_lbl, alignment=Qt.AlignmentFlag.AlignHCenter)
-
-    def mousePressEvent(self, _e):
-        self._selected = not self._selected
-        self.setStyleSheet(self._STYLE_SELECTED if self._selected else self._STYLE_NORMAL)
-        self.toggled.emit(self._actor['id'], self._selected)
-
-
 class _FilmActorsOverlay(QWidget):
-    """Floating overlay at bottom-left of video showing linked actors."""
-    marker_requested    = _pyqtSignal(list)   # list of selected actor dicts
+    """Floating overlay at bottom-left of video.
+    Draws actor thumbnails directly in paintEvent — no child widgets for photos,
+    which avoids all Qt stylesheet-cascade / top-level-window rendering issues."""
+
+    marker_requested    = _pyqtSignal(list)
     thumbnail_requested = _pyqtSignal()
+
+    TW, TH  = 52, 62    # thumb dimensions
+    SPACING = 6
+    PAD     = 6
+    BTN_W   = 36
 
     def __init__(self, main_win, video_container):
         super().__init__(main_win,
             Qt.WindowType.FramelessWindowHint | Qt.WindowType.Tool)
         self._vc = video_container
-        self._film_id = None
-        self._selected_ids: set = set()
-        self._thumb_widgets: dict = {}   # actor_id -> _SelectableThumb
+        self._actors:  list = []          # list of actor dicts
+        self._pixmaps: list = []          # parallel list of QPixmap|None
+        self._selected: set = set()       # actor ids
 
-        self.setStyleSheet(
-            "QWidget { background: #0d0d0d; }"
-            "QScrollArea { border: none; background: #0d0d0d; }"
-        )
+        # Cell height = photo + name label
+        cell_h = self.TH + 16
+        total_h = cell_h + self.PAD * 2
 
-        h = QHBoxLayout(self)
-        h.setContentsMargins(4, 4, 4, 4)
-        h.setSpacing(4)
+        self.setFixedHeight(total_h)
+        self.setStyleSheet("background: #111;")
 
-        self._scroll = QScrollArea()
-        self._scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self._inner = QWidget()
-        self._row = QHBoxLayout(self._inner)
-        self._row.setContentsMargins(0, 0, 0, 0)
-        self._row.setSpacing(4)
-        self._row.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-        self._scroll.setWidget(self._inner)
-        h.addWidget(self._scroll)
+        # Buttons (real widgets, right side)
+        btn_y = (total_h - self.BTN_W) // 2
 
-        self._btn_marker = QPushButton("◉")
-        self._btn_marker.setFixedSize(32, 32)
+        self._btn_marker = QPushButton("◉", self)
+        self._btn_marker.setFixedSize(self.BTN_W, self.BTN_W)
         self._btn_marker.setToolTip("Marker met geselecteerde acteurs")
         self._btn_marker.setStyleSheet(
             "QPushButton { background: #1a1000; border: 1px solid #6b4a00;"
@@ -424,10 +372,9 @@ class _FilmActorsOverlay(QWidget):
         )
         self._btn_marker.clicked.connect(
             lambda: self.marker_requested.emit(self.selected_actors()))
-        h.addWidget(self._btn_marker, alignment=Qt.AlignmentFlag.AlignVCenter)
 
-        self._btn_thumb = QPushButton("⊡")
-        self._btn_thumb.setFixedSize(32, 32)
+        self._btn_thumb = QPushButton("⊡", self)
+        self._btn_thumb.setFixedSize(self.BTN_W, self.BTN_W)
         self._btn_thumb.setToolTip("Sla huidig frame op als filmthumbnail")
         self._btn_thumb.setStyleSheet(
             "QPushButton { background: #001a1a; border: 1px solid #006b6b;"
@@ -436,9 +383,79 @@ class _FilmActorsOverlay(QWidget):
             "QPushButton:pressed { background: #55dede; color: #000; }"
         )
         self._btn_thumb.clicked.connect(self.thumbnail_requested)
-        h.addWidget(self._btn_thumb, alignment=Qt.AlignmentFlag.AlignVCenter)
 
+        self._place_buttons()
         main_win.installEventFilter(self)
+
+    def _place_buttons(self):
+        total_h = self.height()
+        btn_y = (total_h - self.BTN_W) // 2
+        photos_w = self._photos_width()
+        x = self.PAD + photos_w + self.SPACING
+        self._btn_marker.move(x, btn_y)
+        self._btn_thumb.move(x + self.BTN_W + 4, btn_y)
+
+    def _photos_width(self):
+        n = len(self._actors)
+        return n * (self.TW + self.SPACING) - (self.SPACING if n else 0)
+
+    def _total_width(self):
+        return self.PAD + self._photos_width() + self.SPACING + self.BTN_W * 2 + 4 + self.PAD
+
+    def paintEvent(self, _event):
+        from PyQt6.QtGui import QPainter, QPen, QFont, QFontMetrics
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.fillRect(self.rect(), QColor('#111111'))
+
+        fm = QFontMetrics(p.font())
+        x = self.PAD
+        for i, (actor, pix) in enumerate(zip(self._actors, self._pixmaps)):
+            aid = actor['id']
+            selected = aid in self._selected
+
+            # card background
+            bg = QColor('#3c3200') if selected else QColor('#1e1e1e')
+            p.fillRect(x, self.PAD, self.TW, self.TH, bg)
+
+            # photo
+            if pix and not pix.isNull():
+                p.drawPixmap(x, self.PAD, pix)
+            else:
+                p.fillRect(x, self.PAD, self.TW, self.TH, QColor('#2a2a2a'))
+
+            # selection border
+            if selected:
+                pen = QPen(QColor('#e8b86d'), 2)
+                p.setPen(pen)
+                p.setBrush(Qt.BrushStyle.NoBrush)
+                p.drawRect(x, self.PAD, self.TW - 1, self.TH - 1)
+                p.setPen(Qt.PenStyle.NoPen)
+
+            # name
+            p.setPen(QColor('#aaa') if selected else QColor('#555'))
+            name = fm.elidedText(actor.get('name', ''), Qt.TextElideMode.ElideRight, self.TW)
+            from PyQt6.QtCore import QRect as _QRect
+            p.drawText(_QRect(x, self.PAD + self.TH + 2, self.TW, 13),
+                       Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop, name)
+            p.setPen(Qt.PenStyle.NoPen)
+
+            x += self.TW + self.SPACING
+
+    def mousePressEvent(self, event):
+        x = self.PAD
+        for actor in self._actors:
+            if x <= event.pos().x() <= x + self.TW and \
+               self.PAD <= event.pos().y() <= self.PAD + self.TH:
+                aid = actor['id']
+                if aid in self._selected:
+                    self._selected.discard(aid)
+                else:
+                    self._selected.add(aid)
+                self.update()
+                return
+            x += self.TW + self.SPACING
+        super().mousePressEvent(event)
 
     def eventFilter(self, obj, event):
         if event.type() in (QEvent.Type.Resize, QEvent.Type.Move, QEvent.Type.Show):
@@ -450,49 +467,45 @@ class _FilmActorsOverlay(QWidget):
         if not vc.isVisible():
             return
         tl = vc.mapToGlobal(vc.rect().topLeft())
-        n = len(self._thumb_widgets)
-        thumb_w = _SelectableThumb.TW + 8
-        content_w = n * (thumb_w + 4) + 32 + 32 + 16 + 20   # thumbs + 2 btns + margins
-        w = min(content_w, vc.width() - 40)
-        w = max(60, w)
-        h = _SelectableThumb.TH + 18 + 12
-        self.setFixedHeight(h)
-        self._scroll.setFixedHeight(h - 12)
-        self.setGeometry(tl.x() + 8, tl.y() + vc.height() - h - 8, w, h)
+        w = min(self._total_width(), vc.width() - 20)
+        w = max(self.BTN_W * 2 + self.PAD * 2 + 4, w)
+        h = self.height()
+        self.setFixedWidth(w)
+        self._place_buttons()
+        self.move(tl.x() + 8, tl.y() + vc.height() - h - 8)
 
     def refresh(self, film_id: int | None):
-        while self._row.count():
-            item = self._row.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
-        self._thumb_widgets.clear()
-        self._selected_ids.clear()
+        self._actors.clear()
+        self._pixmaps.clear()
+        self._selected.clear()
 
         if film_id is None:
             self.hide()
             return
 
-        self._film_id = film_id
-        actors = db.get_actors_for_film(film_id)
-        for actor in actors:
-            thumb = _SelectableThumb(actor)
-            thumb.toggled.connect(self._on_toggle)
-            self._thumb_widgets[actor['id']] = thumb
-            self._row.addWidget(thumb)
+        for actor in db.get_actors_for_film(film_id):
+            self._actors.append(actor)
+            photos = db.get_actor_photos(actor['id'])
+            path = photos[0]['photo_path'] if photos else ''
+            pix = None
+            if path:
+                raw = QPixmap(path)
+                if not raw.isNull():
+                    scaled = raw.scaled(self.TW, self.TH,
+                        Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                        Qt.TransformationMode.SmoothTransformation)
+                    ox = (scaled.width()  - self.TW) // 2
+                    oy = (scaled.height() - self.TH) // 2
+                    pix = scaled.copy(ox, oy, self.TW, self.TH)
+            self._pixmaps.append(pix)
 
         self._reposition()
+        self.update()
         self.show()
         self.raise_()
 
-    def _on_toggle(self, actor_id: int, selected: bool):
-        if selected:
-            self._selected_ids.add(actor_id)
-        else:
-            self._selected_ids.discard(actor_id)
-
     def selected_actors(self) -> list:
-        return [w._actor for aid, w in self._thumb_widgets.items()
-                if aid in self._selected_ids]
+        return [a for a in self._actors if a['id'] in self._selected]
 
 
 # ─────────────────────────────────────────────
