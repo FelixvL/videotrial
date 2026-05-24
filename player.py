@@ -400,24 +400,24 @@ class _FilmActorsOverlay(QWidget):
     def __init__(self, main_win, video_container):
         super().__init__(main_win,
             Qt.WindowType.FramelessWindowHint | Qt.WindowType.Tool)
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self._vc = video_container
         self._film_id = None
         self._selected_ids: set = set()
         self._thumb_widgets: dict = {}   # actor_id -> _SelectableThumb
 
+        self.setStyleSheet(
+            "QWidget { background: #0d0d0d; }"
+            "QScrollArea { border: none; background: #0d0d0d; }"
+        )
+
         h = QHBoxLayout(self)
-        h.setContentsMargins(6, 6, 6, 6)
+        h.setContentsMargins(4, 4, 4, 4)
         h.setSpacing(4)
 
         self._scroll = QScrollArea()
         self._scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self._scroll.setStyleSheet(
-            "QScrollArea { border: none; background: transparent; }"
-        )
         self._inner = QWidget()
-        self._inner.setStyleSheet("background: transparent;")
         self._row = QHBoxLayout(self._inner)
         self._row.setContentsMargins(0, 0, 0, 0)
         self._row.setSpacing(4)
