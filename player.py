@@ -346,6 +346,7 @@ class _FilmActorsOverlay(QWidget):
     def __init__(self, main_win, video_container):
         super().__init__(main_win,
             Qt.WindowType.FramelessWindowHint | Qt.WindowType.Tool)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self._vc = video_container
         self._actors:  list = []          # list of actor dicts
         self._pixmaps: list = []          # parallel list of QPixmap|None
@@ -356,7 +357,6 @@ class _FilmActorsOverlay(QWidget):
         total_h = cell_h + self.PAD * 2
 
         self.setFixedHeight(total_h)
-        self.setStyleSheet("background: #111;")
 
         # Buttons (real widgets, right side)
         btn_y = (total_h - self.BTN_W) // 2
@@ -406,7 +406,6 @@ class _FilmActorsOverlay(QWidget):
         from PyQt6.QtGui import QPainter, QPen, QFont, QFontMetrics
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        p.fillRect(self.rect(), QColor('#111111'))
 
         fm = QFontMetrics(p.font())
         x = self.PAD
