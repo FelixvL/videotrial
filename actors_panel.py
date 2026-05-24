@@ -57,69 +57,68 @@ class SceneExportWorker(QThread):
 
 
 # ─────────────────────────────────────────────
-#  Photo Grid Widget
+#  Actor Photo List Item
 # ─────────────────────────────────────────────
 
-class PhotoGrid(QScrollArea):
-    def __init__(self):
+class ActorPhotoItem(QFrame):
+    clicked = pyqtSignal(object)  # emits actor dict
+
+    def __init__(self, photo_path, actor):
         super().__init__()
-        self.setWidgetResizable(True)
-        self.setStyleSheet("QScrollArea { border: none; background: transparent; }")
-        self._container = QWidget()
-        self._grid = QGridLayout(self._container)
-        self._grid.setSpacing(6)
-        self._grid.setContentsMargins(0, 0, 0, 0)
-        self.setWidget(self._container)
-        self._photos = []
+        self._actor = actor
+        self._photo_path = photo_path
+        self._selected = False
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFixedHeight(56)
+        self._set_style()
 
-    def set_photos(self, photo_records):
-        # Clear
-        while self._grid.count():
-            item = self._grid.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
-        self._photos = photo_records
+        row = QHBoxLayout(self)
+        row.setContentsMargins(6, 4, 6, 4)
+        row.setSpacing(8)
 
-        cols = 3
-        for i, photo in enumerate(photo_records):
-            frame = QFrame()
-            frame.setStyleSheet("""
-                QFrame { background: #1a1a1a; border-radius: 4px; border: 1px solid #2a2a2a; }
-                QFrame:hover { border-color: #e8b86d; }
-            """)
-            v = QVBoxLayout(frame)
-            v.setContentsMargins(4, 4, 4, 4)
-            v.setSpacing(2)
+        self._img = QLabel()
+        self._img.setFixedSize(38, 46)
+        self._img.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._img.setStyleSheet("border: none; background: transparent;")
+        self._load_thumb()
+        row.addWidget(self._img)
 
-            lbl = QLabel()
-            lbl.setFixedSize(100, 120)
-            lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            lbl.setStyleSheet("border: none;")
+        self._lbl = QLabel(Path(photo_path).stem)
+        self._lbl.setStyleSheet("color: #ccc; font-size: 11px; background: transparent; border: none;")
+        self._lbl.setWordWrap(False)
+        row.addWidget(self._lbl, stretch=1)
 
-            path = photo['photo_path']
-            if os.path.exists(path):
-                pix = QPixmap(path).scaled(100, 120,
-                    Qt.AspectRatioMode.KeepAspectRatio,
-                    Qt.TransformationMode.SmoothTransformation)
-                lbl.setPixmap(pix)
-            else:
-                lbl.setText("?")
-                lbl.setStyleSheet("color: #555; font-size: 24px; border: none;")
+    def _load_thumb(self):
+        if os.path.exists(self._photo_path):
+            pix = QPixmap(self._photo_path).scaled(
+                38, 46,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation
+            )
+            self._img.setPixmap(pix)
+        else:
+            self._img.setText("?")
+            self._img.setStyleSheet("color: #555; font-size: 18px; border: none;")
 
-            v.addWidget(lbl)
-            name_lbl = QLabel(Path(path).stem[:14])
-            name_lbl.setStyleSheet("color: #888; font-size: 9px; border: none;")
-            name_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            v.addWidget(name_lbl)
+    def set_selected(self, selected):
+        self._selected = selected
+        self._set_style()
 
-            self._grid.addWidget(frame, i // cols, i % cols)
+    def _set_style(self):
+        if self._selected:
+            self.setStyleSheet(
+                "QFrame { background: #1e1600; border-left: 3px solid #e8b86d;"
+                " border-bottom: 1px solid #111; }"
+            )
+        else:
+            self.setStyleSheet(
+                "QFrame { background: transparent; border-left: 3px solid transparent;"
+                " border-bottom: 1px solid #111; }"
+                "QFrame:hover { background: #141414; }"
+            )
 
-        # Fill remaining cells
-        remainder = len(photo_records) % cols
-        if remainder:
-            for j in range(cols - remainder):
-                spacer = QWidget()
-                self._grid.addWidget(spacer, len(photo_records) // cols, remainder + j)
+    def mousePressEvent(self, event):
+        self.clicked.emit(self._actor)
 
 
 # ─────────────────────────────────────────────
@@ -464,33 +463,25 @@ class ActorDetailPanel(QWidget):
         top_h.setContentsMargins(0, 0, 0, 0)
         top_h.setSpacing(8)
 
-        # Photos
+        # Photo
         photos_frame = QFrame()
         photos_frame.setStyleSheet("QFrame { background: #111; border-radius: 6px; border: 1px solid #1e1e1e; }")
+        photos_frame.setFixedWidth(160)
         photos_v = QVBoxLayout(photos_frame)
         photos_v.setContentsMargins(8, 8, 8, 8)
         photos_v.setSpacing(4)
+        photos_v.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-        ph_header = QHBoxLayout()
-        ph_lbl = QLabel("FOTO'S")
-        ph_lbl.setStyleSheet("color: #555; font-size: 10px; letter-spacing: 3px;")
-        ph_header.addWidget(ph_lbl)
-        ph_header.addStretch()
-        btn_add_photos = QPushButton("+ Foto's")
-        btn_add_photos.setFixedHeight(24)
-        btn_add_photos.clicked.connect(self._add_photos)
-        ph_header.addWidget(btn_add_photos)
-        btn_add_folder = QPushButton("+ Map")
-        btn_add_folder.setFixedHeight(24)
-        btn_add_folder.clicked.connect(self._add_photo_folder)
-        ph_header.addWidget(btn_add_folder)
-        photos_v.addLayout(ph_header)
+        self.lbl_actor_photo = QLabel()
+        self.lbl_actor_photo.setFixedSize(140, 175)
+        self.lbl_actor_photo.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.lbl_actor_photo.setStyleSheet(
+            "background: #1a1a1a; border-radius: 4px; color: #333; font-size: 32px;"
+        )
+        self.lbl_actor_photo.setText("?")
+        photos_v.addWidget(self.lbl_actor_photo)
 
-        self.photo_grid = PhotoGrid()
-        self.photo_grid.setMinimumHeight(160)
-        photos_v.addWidget(self.photo_grid)
-
-        top_h.addWidget(photos_frame, stretch=3)
+        top_h.addWidget(photos_frame)
 
         # Films
         films_frame = QFrame()
@@ -579,15 +570,35 @@ class ActorDetailPanel(QWidget):
         self.lbl_name.setText(actor['name'])
         self.btn_edit_actor.setVisible(True)
         self.btn_delete_actor.setVisible(True)
-        self._refresh_photos()
+        self._refresh_photo()
         self._refresh_films()
         self._refresh_scenes()
 
-    def _refresh_photos(self):
+    def _refresh_photo(self):
         if not self._actor:
             return
-        photos = db.get_actor_photos(self._actor['id'])
-        self.photo_grid.set_photos(photos)
+        path = self._find_actor_photo()
+        if path:
+            pix = QPixmap(path).scaled(
+                140, 175,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation
+            )
+            self.lbl_actor_photo.setPixmap(pix)
+        else:
+            self.lbl_actor_photo.setPixmap(QPixmap())
+            self.lbl_actor_photo.setText("?")
+
+    def _find_actor_photo(self):
+        folder = db.get_setting('photo_folder', '')
+        if not folder or not self._actor:
+            return None
+        exts = ['.jpg', '.jpeg', '.png', '.webp', '.bmp', '.tiff', '.gif']
+        for ext in exts:
+            p = Path(folder) / f"{self._actor['name']}{ext}"
+            if p.exists():
+                return str(p)
+        return None
 
     def _refresh_films(self):
         if not self._actor:
@@ -639,7 +650,8 @@ class ActorDetailPanel(QWidget):
             self.lbl_name.setText("Selecteer een acteur")
             self.btn_edit_actor.setVisible(False)
             self.btn_delete_actor.setVisible(False)
-            self.photo_grid.set_photos([])
+            self.lbl_actor_photo.setPixmap(QPixmap())
+            self.lbl_actor_photo.setText("?")
             self.films_list.clear()
             self.scenes_list.clear()
 
@@ -790,91 +802,154 @@ class ActorDetailPanel(QWidget):
 
 
 # ─────────────────────────────────────────────
-#  Main Actors Panel (list + detail)
+#  Main Actors Panel — full-screen photo grid
 # ─────────────────────────────────────────────
 
 class ActorsPanel(QWidget):
     open_film_requested = pyqtSignal(str)
     scene_jump_requested = pyqtSignal(str, float)
 
+    PHOTO_EXTS = {'.jpg', '.jpeg', '.png', '.webp', '.bmp', '.tiff', '.gif'}
+    THUMB_W = 150
+    THUMB_H = 190
+    CELL_W  = 170
+    CELL_H  = 220
+
     def __init__(self, player):
         super().__init__()
         self.player = player
+        self._all_items = []   # (photo_path, actor, QListWidgetItem)
         self._build_ui()
-        self._refresh_list()
+        folder = db.get_setting('photo_folder', '')
+        if folder:
+            self._update_folder_label(folder)
+            self._scan_folder(folder)
 
     def _build_ui(self):
-        h = QHBoxLayout(self)
-        h.setContentsMargins(0, 0, 0, 0)
-        h.setSpacing(0)
+        v = QVBoxLayout(self)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(0)
 
-        # Left: actor list
-        left = QFrame()
-        left.setFixedWidth(220)
-        left.setStyleSheet("QFrame { background: #0a0a0a; border-right: 1px solid #1e1e1e; }")
-        left_v = QVBoxLayout(left)
-        left_v.setContentsMargins(8, 8, 8, 8)
-        left_v.setSpacing(6)
+        # ── Top bar ──────────────────────────────
+        bar = QFrame()
+        bar.setFixedHeight(44)
+        bar.setStyleSheet("QFrame { background: #0d0d0d; border-bottom: 1px solid #1e1e1e; }")
+        bar_h = QHBoxLayout(bar)
+        bar_h.setContentsMargins(12, 0, 12, 0)
+        bar_h.setSpacing(10)
 
         lbl = QLabel("ACTEURS")
-        lbl.setStyleSheet("color: #555; font-size: 10px; letter-spacing: 4px; padding: 4px 0;")
-        left_v.addWidget(lbl)
+        lbl.setStyleSheet("color: #555; font-size: 10px; letter-spacing: 4px;")
+        bar_h.addWidget(lbl)
+
+        self.lbl_folder = QLabel("Geen map geselecteerd")
+        self.lbl_folder.setStyleSheet("color: #383838; font-size: 10px;")
+        bar_h.addWidget(self.lbl_folder)
+
+        bar_h.addStretch()
 
         self.search_input = QLineEdit()
         self.search_input.setPlaceholderText("Zoeken...")
-        self.search_input.textChanged.connect(self._filter_list)
-        left_v.addWidget(self.search_input)
+        self.search_input.setFixedWidth(200)
+        self.search_input.textChanged.connect(self._filter)
+        bar_h.addWidget(self.search_input)
 
-        self.actor_list = QListWidget()
-        self.actor_list.setStyleSheet("""
-            QListWidget { background: transparent; border: none; }
-            QListWidget::item { padding: 8px 6px; border-bottom: 1px solid #111; }
-            QListWidget::item:hover { background: #141414; }
-            QListWidget::item:selected { background: #1e1600; color: #e8b86d; border-left: 3px solid #e8b86d; }
+        btn_folder = QPushButton("📁  Kies map")
+        btn_folder.setFixedHeight(28)
+        btn_folder.clicked.connect(self._pick_folder)
+        bar_h.addWidget(btn_folder)
+
+        v.addWidget(bar)
+
+        # ── Photo grid ───────────────────────────
+        self.grid = QListWidget()
+        self.grid.setViewMode(QListWidget.ViewMode.IconMode)
+        self.grid.setIconSize(QSize(self.THUMB_W, self.THUMB_H))
+        self.grid.setGridSize(QSize(self.CELL_W, self.CELL_H))
+        self.grid.setResizeMode(QListWidget.ResizeMode.Adjust)
+        self.grid.setMovement(QListWidget.Movement.Static)
+        self.grid.setSpacing(6)
+        self.grid.setUniformItemSizes(True)
+        self.grid.setStyleSheet("""
+            QListWidget {
+                background: #0a0a0a;
+                border: none;
+                padding: 12px;
+            }
+            QListWidget::item {
+                color: #aaa;
+                background: #111;
+                border-radius: 6px;
+                border: 1px solid #1e1e1e;
+            }
+            QListWidget::item:hover  { border-color: #444; background: #161616; }
+            QListWidget::item:selected {
+                background: #1e1600;
+                border-color: #e8b86d;
+                color: #e8b86d;
+            }
         """)
-        self.actor_list.currentItemChanged.connect(self._on_actor_selected)
-        left_v.addWidget(self.actor_list)
+        self.grid.itemDoubleClicked.connect(self._on_double_click)
+        v.addWidget(self.grid)
 
-        btn_new = QPushButton("＋  Nieuwe acteur")
-        btn_new.setObjectName("accent")
-        btn_new.clicked.connect(self._new_actor)
-        left_v.addWidget(btn_new)
+    # ── Folder ───────────────────────────────────
 
-        h.addWidget(left)
+    def _pick_folder(self):
+        folder = QFileDialog.getExistingDirectory(self, "Selecteer foto-map")
+        if folder:
+            db.set_setting('photo_folder', folder)
+            self._update_folder_label(folder)
+            self._scan_folder(folder)
 
-        # Right: detail
-        self.detail = ActorDetailPanel(self.player)
-        self.detail.open_film_requested.connect(self.open_film_requested)
-        self.detail.scene_jump_requested.connect(self.scene_jump_requested)
-        h.addWidget(self.detail, stretch=1)
+    def _update_folder_label(self, folder):
+        self.lbl_folder.setText(Path(folder).name or folder)
+        self.lbl_folder.setToolTip(folder)
 
-    def _refresh_list(self):
-        self._filter_list(self.search_input.text())
+    # ── Scan ─────────────────────────────────────
 
-    def _filter_list(self, query=""):
-        self.actor_list.clear()
-        actors = db.get_all_actors()
-        for a in actors:
-            if query.lower() in a['name'].lower():
-                item = QListWidgetItem(f"  {a['name']}")
-                item.setData(Qt.ItemDataRole.UserRole, a)
-                self.actor_list.addItem(item)
+    def _scan_folder(self, folder):
+        self.grid.clear()
+        self._all_items.clear()
 
-    def _on_actor_selected(self, item):
-        if item:
-            actor = item.data(Qt.ItemDataRole.UserRole)
-            self.detail.load_actor(actor)
+        folder_path = Path(folder)
+        if not folder_path.exists():
+            return
 
-    def _new_actor(self):
-        name, ok = QInputDialog.getText(self, "Nieuwe acteur", "Naam van de acteur:")
-        if ok and name.strip():
-            db.create_actor(name.strip())
-            self._refresh_list()
-            # Select new actor
-            for i in range(self.actor_list.count()):
-                if self.actor_list.item(i).data(Qt.ItemDataRole.UserRole)['name'] == name.strip():
-                    self.actor_list.setCurrentRow(i)
-                    break
+        photos = sorted(
+            (f for f in folder_path.iterdir() if f.suffix.lower() in self.PHOTO_EXTS),
+            key=lambda f: f.stem.lower()
+        )
+
+        for photo_path in photos:
+            actor = db.get_or_create_actor_by_name(photo_path.stem)
+            icon = QIcon(QPixmap(str(photo_path)).scaled(
+                self.THUMB_W, self.THUMB_H,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation
+            ))
+            item = QListWidgetItem(icon, photo_path.stem)
+            item.setData(Qt.ItemDataRole.UserRole, (str(photo_path), actor))
+            item.setTextAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignBottom)
+            item.setSizeHint(QSize(self.CELL_W, self.CELL_H))
+            self.grid.addItem(item)
+            self._all_items.append(item)
+
+        self._filter(self.search_input.text())
+
+    # ── Filter ───────────────────────────────────
+
+    def _filter(self, query=""):
+        q = query.lower()
+        for item in self._all_items:
+            item.setHidden(bool(q) and q not in item.text().lower())
+
+    # ── Interaction ──────────────────────────────
+
+    def _on_double_click(self, item):
+        # Placeholder — detail view will be wired here later
+        pass
 
     def refresh(self):
-        self._refresh_list()
+        folder = db.get_setting('photo_folder', '')
+        if folder:
+            self._scan_folder(folder)

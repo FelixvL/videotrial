@@ -23,6 +23,11 @@ def init_db():
     c = conn.cursor()
 
     c.executescript("""
+        CREATE TABLE IF NOT EXISTS settings (
+            key   TEXT PRIMARY KEY,
+            value TEXT
+        );
+
         CREATE TABLE IF NOT EXISTS actors (
             id      INTEGER PRIMARY KEY AUTOINCREMENT,
             name    TEXT NOT NULL,
@@ -69,7 +74,37 @@ def init_db():
     conn.close()
 
 
+# ── Settings ──────────────────────────────────
+
+def get_setting(key, default=None):
+    conn = get_connection()
+    row = conn.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+    conn.close()
+    return row['value'] if row else default
+
+
+def set_setting(key, value):
+    conn = get_connection()
+    conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, value))
+    conn.commit()
+    conn.close()
+
+
 # ── Actors ────────────────────────────────────
+
+def get_or_create_actor_by_name(name):
+    conn = get_connection()
+    row = conn.execute("SELECT * FROM actors WHERE name=?", (name,)).fetchone()
+    if row:
+        conn.close()
+        return dict(row)
+    c = conn.cursor()
+    c.execute("INSERT INTO actors (name) VALUES (?)", (name,))
+    actor_id = c.lastrowid
+    conn.commit()
+    conn.close()
+    return {'id': actor_id, 'name': name, 'notes': ''}
+
 
 def create_actor(name, notes=''):
     conn = get_connection()
