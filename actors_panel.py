@@ -1181,12 +1181,12 @@ class ActorsPanel(QWidget):
         if msg.exec() != QMessageBox.StandardButton.Yes:
             return
 
-        imported = db.import_actors_from_records(records)
+        inserted, updated = db.import_actors_from_records(records)
         self.refresh()
         QMessageBox.information(
             self, "Klaar",
-            f"{imported} nieuwe acteurs geïmporteerd.\n"
-            f"{len(records) - imported} al aanwezig (overgeslagen)."
+            f"{inserted} nieuwe acteurs toegevoegd.\n"
+            f"{updated} bestaande acteurs bijgewerkt."
         )
 
     def _parse_import_file(self, path):

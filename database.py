@@ -116,19 +116,23 @@ def get_or_create_actor_by_name(name):
 
 def import_actors_from_records(records):
     conn = get_connection()
-    imported = 0
+    inserted = 0
+    updated = 0
     for r in records:
         name = (r.get('name') or '').strip()
         if not name:
             continue
-        exists = conn.execute("SELECT id FROM actors WHERE name=?", (name,)).fetchone()
-        if not exists:
-            conn.execute("INSERT INTO actors (name, notes) VALUES (?, ?)",
-                         (name, r.get('notes', '')))
-            imported += 1
+        notes = r.get('notes', '')
+        existing = conn.execute("SELECT id FROM actors WHERE name=?", (name,)).fetchone()
+        if existing:
+            conn.execute("UPDATE actors SET notes=? WHERE id=?", (notes, existing['id']))
+            updated += 1
+        else:
+            conn.execute("INSERT INTO actors (name, notes) VALUES (?, ?)", (name, notes))
+            inserted += 1
     conn.commit()
     conn.close()
-    return imported
+    return inserted, updated
 
 
 def create_actor(name, notes=''):
