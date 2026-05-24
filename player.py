@@ -340,6 +340,7 @@ class _SelectableThumb(QWidget):
         self._selected = False
         self.setFixedSize(self.TW + 8, self.TH + 18)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
         self._pix = None
         photos = db.get_actor_photos(actor['id'])
         path = photos[0]['photo_path'] if photos else ''
@@ -358,7 +359,7 @@ class _SelectableThumb(QWidget):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         # card background
-        bg = QColor(60, 50, 10, 220) if self._selected else QColor(18, 18, 18, 200)
+        bg = QColor(60, 50, 10, 255) if self._selected else QColor(18, 18, 18, 255)
         p.setBrush(bg)
         p.setPen(Qt.PenStyle.NoPen)
         p.drawRoundedRect(self.rect(), 4, 4)
