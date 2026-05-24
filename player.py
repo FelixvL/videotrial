@@ -30,7 +30,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import (
     Qt, QTimer, pyqtSignal, QObject, QThread, QSize, QEvent
 )
-from PyQt6.QtGui import QFont, QIcon, QKeySequence, QShortcut, QColor, QPalette
+from PyQt6.QtGui import QFont, QIcon, QKeySequence, QShortcut, QColor, QPalette, QPixmap
 
 try:
     import mpv
@@ -335,6 +335,7 @@ class _PhotoWidget(QWidget):
     def __init__(self, photo_path: str):
         super().__init__()
         self.setFixedSize(self.PW, self.PH)
+        self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
         self._pix = None
         if photo_path:
             raw = QPixmap(photo_path)
@@ -506,13 +507,6 @@ class _PanelOverlay(QWidget):
         self._stack.addWidget(self._search_page)  # index 1
 
         main_win.installEventFilter(self)
-
-    def paintEvent(self, _event):
-        # Clear to fully transparent — child widgets paint themselves on top
-        from PyQt6.QtGui import QPainter
-        p = QPainter(self)
-        p.setCompositionMode(QPainter.CompositionMode.CompositionMode_Clear)
-        p.fillRect(self.rect(), Qt.GlobalColor.transparent)
 
     def eventFilter(self, obj, event):
         if event.type() in (QEvent.Type.Resize, QEvent.Type.Move,
