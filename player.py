@@ -424,6 +424,7 @@ class CineMarker(QMainWindow):
         self.actors_panel.open_film_requested.connect(self._load_video_and_switch)
         self.actors_panel.scene_jump_requested.connect(self._on_scene_jump)
         self.main_tabs.addTab(self.actors_panel, "◉  ACTEURS")
+        self.main_tabs.setCurrentIndex(1)
 
         root.addWidget(self.main_tabs)
 

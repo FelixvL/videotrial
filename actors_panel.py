@@ -5,6 +5,9 @@ Acteursbeheer, filmkoppelingen, scène-editor
 """
 
 import os
+import csv
+import io
+import json
 import subprocess
 from pathlib import Path
 
@@ -13,10 +16,11 @@ from PyQt6.QtWidgets import (
     QListWidget, QListWidgetItem, QSplitter, QLineEdit,
     QFileDialog, QMessageBox, QInputDialog, QScrollArea,
     QFrame, QGridLayout, QTextEdit, QDialog, QDialogButtonBox,
-    QProgressBar, QCheckBox, QSizePolicy, QStackedWidget
+    QProgressBar, QCheckBox, QSizePolicy, QStackedWidget,
+    QStyledItemDelegate, QApplication, QComboBox, QStyle
 )
-from PyQt6.QtCore import Qt, QSize, QThread, pyqtSignal, QTimer
-from PyQt6.QtGui import QPixmap, QFont, QIcon
+from PyQt6.QtCore import Qt, QSize, QThread, pyqtSignal, QTimer, QRect
+from PyQt6.QtGui import QPixmap, QFont, QIcon, QPen, QColor, QPainter, QBrush
 
 import database as db
 
@@ -57,68 +61,149 @@ class SceneExportWorker(QThread):
 
 
 # ─────────────────────────────────────────────
-#  Actor Photo List Item
+#  Actor Card Delegate
 # ─────────────────────────────────────────────
 
-class ActorPhotoItem(QFrame):
-    clicked = pyqtSignal(object)  # emits actor dict
+class ActorCardDelegate(QStyledItemDelegate):
 
-    def __init__(self, photo_path, actor):
+    BORDER = {
+        '9': ('#FFD700', Qt.PenStyle.SolidLine, 3),
+        '8': ('#C0C0C0', Qt.PenStyle.SolidLine, 3),
+        '7': ('#CD7F32', Qt.PenStyle.SolidLine, 3),
+        '6': ('#FFFF00', Qt.PenStyle.DashLine, 2),
+        '5': ('#FFFFFF', Qt.PenStyle.DashLine, 2),
+    }
+    TEXT_COLOR = {
+        '1': QColor('#FFFFFF'),
+        '2': QColor('#8B4513'),
+        '3': QColor('#000000'),
+    }
+
+    def __init__(self):
         super().__init__()
-        self._actor = actor
-        self._photo_path = photo_path
-        self._selected = False
-        self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setFixedHeight(56)
-        self._set_style()
+        self._cache: dict[str, QPixmap] = {}
 
-        row = QHBoxLayout(self)
-        row.setContentsMargins(6, 4, 6, 4)
-        row.setSpacing(8)
+    def _get_pix(self, path, w, h):
+        key = f"{path}:{w}:{h}"
+        if key not in self._cache:
+            if os.path.exists(path):
+                self._cache[key] = QPixmap(path).scaled(
+                    w, h,
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation
+                )
+            else:
+                self._cache[key] = QPixmap()
+        return self._cache[key]
 
-        self._img = QLabel()
-        self._img.setFixedSize(38, 46)
-        self._img.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._img.setStyleSheet("border: none; background: transparent;")
-        self._load_thumb()
-        row.addWidget(self._img)
+    def paint(self, painter, option, index):
+        data = index.data(Qt.ItemDataRole.UserRole)
+        if not data:
+            super().paint(painter, option, index)
+            return
 
-        self._lbl = QLabel(Path(photo_path).stem)
-        self._lbl.setStyleSheet("color: #ccc; font-size: 11px; background: transparent; border: none;")
-        self._lbl.setWordWrap(False)
-        row.addWidget(self._lbl, stretch=1)
+        r = option.rect
+        inner = r.adjusted(3, 3, -3, -3)
+        meta = data.get('meta', {})
+        in_db = data.get('in_db', False)
 
-    def _load_thumb(self):
-        if os.path.exists(self._photo_path):
-            pix = QPixmap(self._photo_path).scaled(
-                38, 46,
-                Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation
-            )
-            self._img.setPixmap(pix)
-        else:
-            self._img.setText("?")
-            self._img.setStyleSheet("color: #555; font-size: 18px; border: none;")
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
 
-    def set_selected(self, selected):
-        self._selected = selected
-        self._set_style()
+        # Background
+        painter.fillRect(r, QColor('#0d0d0d'))
 
-    def _set_style(self):
-        if self._selected:
-            self.setStyleSheet(
-                "QFrame { background: #1e1600; border-left: 3px solid #e8b86d;"
-                " border-bottom: 1px solid #111; }"
-            )
-        else:
-            self.setStyleSheet(
-                "QFrame { background: transparent; border-left: 3px solid transparent;"
-                " border-bottom: 1px solid #111; }"
-                "QFrame:hover { background: #141414; }"
-            )
+        # Photo (fills card, name bar overlaid at bottom)
+        name_h = 26
+        photo_area = inner.adjusted(0, 0, 0, 0)
+        pix = self._get_pix(data['photo_path'], photo_area.width(), photo_area.height())
+        if not pix.isNull():
+            px = inner.x() + (inner.width() - pix.width()) // 2
+            py = inner.y() + (inner.height() - pix.height()) // 2
+            painter.drawPixmap(px, py, pix)
 
-    def mousePressEvent(self, event):
-        self.clicked.emit(self._actor)
+        # Name bar overlay
+        bar_rect = QRect(inner.x(), inner.bottom() - name_h, inner.width(), name_h)
+        painter.fillRect(bar_rect, QColor(0, 0, 0, 190))
+
+        voornaam = meta.get('voornaam', '')
+        achternaam = meta.get('achternaam', '')
+        display = f"{voornaam} {achternaam}".strip() or data.get('stem', '')
+
+        kleur = str(meta.get('kleur', '1'))
+        text_col = self.TEXT_COLOR.get(kleur, QColor('#FFFFFF'))
+
+        f = painter.font()
+        f.setPointSize(8)
+        f.setBold(True)
+        painter.setFont(f)
+        painter.setPen(text_col)
+        painter.drawText(bar_rect, Qt.AlignmentFlag.AlignCenter, display)
+
+        # Stars — top right
+        try:
+            stars = int(meta.get('grootte', 0))
+        except (ValueError, TypeError):
+            stars = 0
+        if stars > 0:
+            sf = painter.font()
+            sf.setPointSize(9)
+            sf.setBold(False)
+            painter.setFont(sf)
+            painter.setPen(QColor('#FFD700'))
+            star_rect = QRect(inner.x(), inner.y() + 3, inner.width() - 3, 16)
+            painter.drawText(star_rect,
+                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                '★' * stars)
+
+        # Decade — top left
+        dec_val = str(meta.get('decennia', '')).strip()
+        if dec_val and dec_val.lower() not in ('null', ''):
+            try:
+                dec_str = str(int(dec_val) * 10)
+            except ValueError:
+                dec_str = dec_val
+            df = painter.font()
+            df.setPointSize(8)
+            df.setBold(False)
+            painter.setFont(df)
+            painter.setPen(QColor('#aaaaaa'))
+            dec_rect = QRect(inner.x() + 4, inner.y() + 3, 40, 16)
+            painter.drawText(dec_rect,
+                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                dec_str)
+
+        # Rating border
+        rating = str(meta.get('rating', '')).strip()
+        if rating in self.BORDER:
+            col, style, width = self.BORDER[rating]
+            pen = QPen(QColor(col), width, style)
+            painter.setPen(pen)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRect(inner.adjusted(1, 1, -1, -1))
+
+        # Dim overlay if not in DB
+        if not in_db:
+            painter.fillRect(inner, QColor(0, 0, 0, 140))
+            f2 = painter.font()
+            f2.setPointSize(8)
+            f2.setBold(False)
+            painter.setFont(f2)
+            painter.setPen(QColor('#555555'))
+            painter.drawText(inner, Qt.AlignmentFlag.AlignCenter, "niet in\ndatabase")
+
+        # Selection highlight
+        if option.state & QStyle.StateFlag.State_Selected:
+            painter.fillRect(inner, QColor(232, 184, 109, 35))
+            sel_pen = QPen(QColor('#e8b86d'), 2, Qt.PenStyle.SolidLine)
+            painter.setPen(sel_pen)
+            painter.drawRect(inner.adjusted(1, 1, -1, -1))
+
+        painter.restore()
+
+    def sizeHint(self, option, index):
+        return QSize(170, 220)
 
 
 # ─────────────────────────────────────────────
@@ -810,15 +895,13 @@ class ActorsPanel(QWidget):
     scene_jump_requested = pyqtSignal(str, float)
 
     PHOTO_EXTS = {'.jpg', '.jpeg', '.png', '.webp', '.bmp', '.tiff', '.gif'}
-    THUMB_W = 150
-    THUMB_H = 190
-    CELL_W  = 170
-    CELL_H  = 220
+    CELL_W = 170
+    CELL_H = 220
 
     def __init__(self, player):
         super().__init__()
         self.player = player
-        self._all_items = []   # (photo_path, actor, QListWidgetItem)
+        self._all_items: list = []
         self._build_ui()
         folder = db.get_setting('photo_folder', '')
         if folder:
@@ -830,67 +913,123 @@ class ActorsPanel(QWidget):
         v.setContentsMargins(0, 0, 0, 0)
         v.setSpacing(0)
 
-        # ── Top bar ──────────────────────────────
-        bar = QFrame()
-        bar.setFixedHeight(44)
-        bar.setStyleSheet("QFrame { background: #0d0d0d; border-bottom: 1px solid #1e1e1e; }")
-        bar_h = QHBoxLayout(bar)
-        bar_h.setContentsMargins(12, 0, 12, 0)
-        bar_h.setSpacing(10)
+        # Row 1: title / folder / search / buttons
+        bar1 = QFrame()
+        bar1.setFixedHeight(44)
+        bar1.setStyleSheet("QFrame { background: #0d0d0d; border-bottom: 1px solid #1e1e1e; }")
+        b1 = QHBoxLayout(bar1)
+        b1.setContentsMargins(12, 0, 12, 0)
+        b1.setSpacing(10)
 
-        lbl = QLabel("ACTEURS")
-        lbl.setStyleSheet("color: #555; font-size: 10px; letter-spacing: 4px;")
-        bar_h.addWidget(lbl)
+        lbl_title = QLabel("ACTEURS")
+        lbl_title.setStyleSheet("color: #555; font-size: 10px; letter-spacing: 4px;")
+        b1.addWidget(lbl_title)
 
         self.lbl_folder = QLabel("Geen map geselecteerd")
         self.lbl_folder.setStyleSheet("color: #383838; font-size: 10px;")
-        bar_h.addWidget(self.lbl_folder)
-
-        bar_h.addStretch()
+        b1.addWidget(self.lbl_folder)
+        b1.addStretch()
 
         self.search_input = QLineEdit()
         self.search_input.setPlaceholderText("Zoeken...")
-        self.search_input.setFixedWidth(200)
-        self.search_input.textChanged.connect(self._filter)
-        bar_h.addWidget(self.search_input)
+        self.search_input.setFixedWidth(180)
+        self.search_input.textChanged.connect(self._apply_filters)
+        b1.addWidget(self.search_input)
 
         btn_folder = QPushButton("📁  Kies map")
         btn_folder.setFixedHeight(28)
         btn_folder.clicked.connect(self._pick_folder)
-        bar_h.addWidget(btn_folder)
+        b1.addWidget(btn_folder)
 
-        v.addWidget(bar)
+        btn_import = QPushButton("⬆  Importeer")
+        btn_import.setFixedHeight(28)
+        btn_import.clicked.connect(self._import_actors)
+        b1.addWidget(btn_import)
 
-        # ── Photo grid ───────────────────────────
+        v.addWidget(bar1)
+
+        # Row 2: filters
+        bar2 = QFrame()
+        bar2.setFixedHeight(38)
+        bar2.setStyleSheet("QFrame { background: #0a0a0a; border-bottom: 1px solid #161616; }")
+        b2 = QHBoxLayout(bar2)
+        b2.setContentsMargins(12, 0, 12, 0)
+        b2.setSpacing(8)
+
+        lbl_f = QLabel("Filter:")
+        lbl_f.setStyleSheet("color: #444; font-size: 10px;")
+        b2.addWidget(lbl_f)
+
+        self.cmb_db = self._make_combo([
+            ("Alle", ""),
+            ("In database", "in_db"),
+            ("Niet in database", "not_in_db"),
+        ])
+        b2.addWidget(self.cmb_db)
+
+        self.cmb_kleur = self._make_combo([
+            ("Kleur", ""),
+            ("Wit (1)", "1"),
+            ("Bruin (2)", "2"),
+            ("Zwart (3)", "3"),
+        ])
+        b2.addWidget(self.cmb_kleur)
+
+        self.cmb_grootte = self._make_combo(
+            [("Grootte", "")] +
+            [(f"{'★' * i} ({i})", str(i)) for i in range(1, 7)]
+        )
+        b2.addWidget(self.cmb_grootte)
+
+        self.cmb_rating = self._make_combo([
+            ("Rating", ""),
+            ("9 — Goud", "9"),
+            ("8 — Zilver", "8"),
+            ("7 — Brons", "7"),
+            ("6 — Geel stippel", "6"),
+            ("5 — Wit stippel", "5"),
+        ])
+        b2.addWidget(self.cmb_rating)
+
+        self.cmb_dec = self._make_combo(
+            [("Decennia", "")] +
+            [(f"{d * 10}s", str(d)) for d in range(3, 10)] +
+            [("00s", "0"), ("10s", "1"), ("20s", "2")]
+        )
+        b2.addWidget(self.cmb_dec)
+
+        btn_reset = QPushButton("✕ Reset")
+        btn_reset.setFixedHeight(26)
+        btn_reset.clicked.connect(self._reset_filters)
+        b2.addWidget(btn_reset)
+
+        b2.addStretch()
+        v.addWidget(bar2)
+
+        # Photo grid
         self.grid = QListWidget()
         self.grid.setViewMode(QListWidget.ViewMode.IconMode)
-        self.grid.setIconSize(QSize(self.THUMB_W, self.THUMB_H))
-        self.grid.setGridSize(QSize(self.CELL_W, self.CELL_H))
+        self.grid.setIconSize(QSize(1, 1))
+        self.grid.setGridSize(QSize(self.CELL_W + 8, self.CELL_H + 8))
         self.grid.setResizeMode(QListWidget.ResizeMode.Adjust)
         self.grid.setMovement(QListWidget.Movement.Static)
-        self.grid.setSpacing(6)
         self.grid.setUniformItemSizes(True)
-        self.grid.setStyleSheet("""
-            QListWidget {
-                background: #0a0a0a;
-                border: none;
-                padding: 12px;
-            }
-            QListWidget::item {
-                color: #aaa;
-                background: #111;
-                border-radius: 6px;
-                border: 1px solid #1e1e1e;
-            }
-            QListWidget::item:hover  { border-color: #444; background: #161616; }
-            QListWidget::item:selected {
-                background: #1e1600;
-                border-color: #e8b86d;
-                color: #e8b86d;
-            }
-        """)
-        self.grid.itemDoubleClicked.connect(self._on_double_click)
+        self.grid.setStyleSheet(
+            "QListWidget { background: #0a0a0a; border: none; padding: 10px; }"
+            "QListWidget::item { border: none; background: transparent; }"
+        )
+        self._delegate = ActorCardDelegate()
+        self.grid.setItemDelegate(self._delegate)
+        self.grid.itemClicked.connect(self._on_item_clicked)
         v.addWidget(self.grid)
+
+    def _make_combo(self, options: list) -> QComboBox:
+        cmb = QComboBox()
+        cmb.setFixedHeight(26)
+        for label, value in options:
+            cmb.addItem(label, value)
+        cmb.currentIndexChanged.connect(self._apply_filters)
+        return cmb
 
     # ── Folder ───────────────────────────────────
 
@@ -910,6 +1049,7 @@ class ActorsPanel(QWidget):
     def _scan_folder(self, folder):
         self.grid.clear()
         self._all_items.clear()
+        self._delegate._cache.clear()
 
         folder_path = Path(folder)
         if not folder_path.exists():
@@ -921,35 +1061,201 @@ class ActorsPanel(QWidget):
         )
 
         for photo_path in photos:
-            actor = db.get_or_create_actor_by_name(photo_path.stem)
-            icon = QIcon(QPixmap(str(photo_path)).scaled(
-                self.THUMB_W, self.THUMB_H,
-                Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation
-            ))
-            item = QListWidgetItem(icon, photo_path.stem)
-            item.setData(Qt.ItemDataRole.UserRole, (str(photo_path), actor))
-            item.setTextAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignBottom)
+            actor = db.get_actor_by_name(photo_path.stem)
+            in_db = actor is not None
+            meta = {}
+            if in_db and actor.get('notes'):
+                try:
+                    meta = json.loads(actor['notes'])
+                except (ValueError, TypeError):
+                    meta = {}
+
+            item = QListWidgetItem()
             item.setSizeHint(QSize(self.CELL_W, self.CELL_H))
+            item.setData(Qt.ItemDataRole.UserRole, {
+                'photo_path': str(photo_path),
+                'stem': photo_path.stem,
+                'actor': actor,
+                'in_db': in_db,
+                'meta': meta,
+            })
             self.grid.addItem(item)
             self._all_items.append(item)
 
-        self._filter(self.search_input.text())
+        self._apply_filters()
 
-    # ── Filter ───────────────────────────────────
+    def _reset_filters(self):
+        self.search_input.blockSignals(True)
+        self.search_input.clear()
+        self.search_input.blockSignals(False)
+        for cmb in (self.cmb_db, self.cmb_kleur, self.cmb_grootte,
+                    self.cmb_rating, self.cmb_dec):
+            cmb.blockSignals(True)
+            cmb.setCurrentIndex(0)
+            cmb.blockSignals(False)
+        self._apply_filters()
 
-    def _filter(self, query=""):
-        q = query.lower()
+    def _apply_filters(self):
+        query     = self.search_input.text().lower()
+        f_db      = self.cmb_db.currentData()
+        f_kleur   = self.cmb_kleur.currentData()
+        f_grootte = self.cmb_grootte.currentData()
+        f_rating  = self.cmb_rating.currentData()
+        f_dec     = self.cmb_dec.currentData()
+
         for item in self._all_items:
-            item.setHidden(bool(q) and q not in item.text().lower())
+            data  = item.data(Qt.ItemDataRole.UserRole)
+            meta  = data.get('meta', {})
+            in_db = data.get('in_db', False)
+            stem  = data.get('stem', '').lower()
 
-    # ── Interaction ──────────────────────────────
+            hide = False
 
-    def _on_double_click(self, item):
-        # Placeholder — detail view will be wired here later
-        pass
+            if query:
+                name_match = (
+                    query in stem or
+                    query in meta.get('voornaam', '').lower() or
+                    query in meta.get('achternaam', '').lower()
+                )
+                if not name_match:
+                    hide = True
+
+            if not hide and f_db == 'in_db' and not in_db:
+                hide = True
+            if not hide and f_db == 'not_in_db' and in_db:
+                hide = True
+            if not hide and f_kleur and str(meta.get('kleur', '')) != f_kleur:
+                hide = True
+            if not hide and f_grootte and str(meta.get('grootte', '')) != f_grootte:
+                hide = True
+            if not hide and f_rating and str(meta.get('rating', '')) != f_rating:
+                hide = True
+            if not hide and f_dec and str(meta.get('decennia', '')) != f_dec:
+                hide = True
+
+            item.setHidden(hide)
+
+    def _on_item_clicked(self, item):
+        data = item.data(Qt.ItemDataRole.UserRole)
+        if not data or not data.get('in_db'):
+            return
+        meta = data.get('meta', {})
+        voornaam   = meta.get('voornaam', '')
+        achternaam = meta.get('achternaam', '')
+        full_name  = f"{voornaam} {achternaam}".strip() or data.get('stem', '')
+        if full_name:
+            QApplication.clipboard().setText(full_name)
+
+    # ── Import ───────────────────────────────────
+
+    def _import_actors(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Importeer acteurs",
+            "", "Bestanden (*.csv *.txt *.tsv);;Alle bestanden (*.*)"
+        )
+        if not path:
+            return
+
+        try:
+            records = self._parse_import_file(path)
+        except Exception as e:
+            QMessageBox.critical(self, "Importfout", f"Kan bestand niet lezen:\n{e}")
+            return
+
+        if not records:
+            QMessageBox.information(self, "Importeren", "Geen records gevonden in het bestand.")
+            return
+
+        preview_lines = [f"• {r['name']}" for r in records[:15]]
+        if len(records) > 15:
+            preview_lines.append(f"... en {len(records) - 15} meer")
+
+        msg = QMessageBox(self)
+        msg.setWindowTitle("Importeren")
+        msg.setText(f"{len(records)} acteurs gevonden. Importeren?")
+        msg.setDetailedText("\n".join(preview_lines))
+        msg.setStandardButtons(
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel
+        )
+        msg.button(QMessageBox.StandardButton.Yes).setText("Importeer")
+        if msg.exec() != QMessageBox.StandardButton.Yes:
+            return
+
+        imported = db.import_actors_from_records(records)
+        self.refresh()
+        QMessageBox.information(
+            self, "Klaar",
+            f"{imported} nieuwe acteurs geïmporteerd.\n"
+            f"{len(records) - imported} al aanwezig (overgeslagen)."
+        )
+
+    def _parse_import_file(self, path):
+        with open(path, 'r', encoding='utf-8-sig', errors='replace') as f:
+            content = f.read()
+
+        first_line = content.lstrip()[:200]
+        if first_line.startswith('+') or '|' in first_line.split('\n')[0]:
+            return self._parse_mysql_table(content)
+        elif '\t' in content.split('\n')[0]:
+            return self._parse_dsv(content, delimiter='\t')
+        else:
+            return self._parse_dsv(content, delimiter=',')
+
+    def _parse_mysql_table(self, content):
+        data_lines = [l for l in content.splitlines() if l.strip().startswith('|')]
+        if not data_lines:
+            return []
+
+        def split_row(line):
+            return [c.strip() for c in line.strip().strip('|').split('|')]
+
+        headers = [h.lower().strip() for h in split_row(data_lines[0])]
+        records = []
+        for line in data_lines[1:]:
+            values = split_row(line)
+            row = dict(zip(headers, values))
+            r = self._normalize_import_row(row)
+            if r:
+                records.append(r)
+        return records
+
+    def _parse_dsv(self, content, delimiter=','):
+        reader = csv.DictReader(io.StringIO(content), delimiter=delimiter)
+        records = []
+        for row in reader:
+            normalized = {k.lower().strip(): (v or '').strip() for k, v in row.items()}
+            r = self._normalize_import_row(normalized)
+            if r:
+                records.append(r)
+        return records
+
+    def _normalize_import_row(self, row):
+        # Prefer AfbeeldingURL stem as name (matches photo filenames)
+        img = row.get('afbeeldingurl') or row.get('afbeelding') or ''
+        img = img.strip()
+        if img and img.lower() not in ('null', ''):
+            name = Path(img).stem
+        else:
+            voornaam = row.get('voornaam', '').strip()
+            achternaam = row.get('achternaam', '').strip()
+            name = (voornaam + achternaam).strip()
+
+        if not name or name.lower() == 'null':
+            return None
+
+        metadata = {}
+        for field in ('rating', 'decennia', 'kleur', 'grootte', 'voornaam', 'achternaam'):
+            val = row.get(field, '').strip()
+            if val and val.lower() != 'null':
+                metadata[field] = val
+
+        return {
+            'name': name,
+            'notes': json.dumps(metadata, ensure_ascii=False) if metadata else ''
+        }
 
     def refresh(self):
         folder = db.get_setting('photo_folder', '')
         if folder:
             self._scan_folder(folder)
+

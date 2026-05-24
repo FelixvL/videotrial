@@ -92,6 +92,13 @@ def set_setting(key, value):
 
 # ── Actors ────────────────────────────────────
 
+def get_actor_by_name(name):
+    conn = get_connection()
+    row = conn.execute("SELECT * FROM actors WHERE name=?", (name,)).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
 def get_or_create_actor_by_name(name):
     conn = get_connection()
     row = conn.execute("SELECT * FROM actors WHERE name=?", (name,)).fetchone()
@@ -104,6 +111,23 @@ def get_or_create_actor_by_name(name):
     conn.commit()
     conn.close()
     return {'id': actor_id, 'name': name, 'notes': ''}
+
+
+def import_actors_from_records(records):
+    conn = get_connection()
+    imported = 0
+    for r in records:
+        name = (r.get('name') or '').strip()
+        if not name:
+            continue
+        exists = conn.execute("SELECT id FROM actors WHERE name=?", (name,)).fetchone()
+        if not exists:
+            conn.execute("INSERT INTO actors (name, notes) VALUES (?, ?)",
+                         (name, r.get('notes', '')))
+            imported += 1
+    conn.commit()
+    conn.close()
+    return imported
 
 
 def create_actor(name, notes=''):
