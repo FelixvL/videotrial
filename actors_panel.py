@@ -1184,50 +1184,50 @@ class ActorsPanel(QWidget):
         v0.setContentsMargins(0, 0, 0, 0)
         v0.setSpacing(0)
 
-        # Row 1: title / folder / search / buttons
-        bar1 = QFrame()
-        bar1.setFixedHeight(44)
-        bar1.setStyleSheet("QFrame { background: #0d0d0d; border-bottom: 1px solid #1e1e1e; }")
-        b1 = QHBoxLayout(bar1)
-        b1.setContentsMargins(12, 0, 12, 0)
-        b1.setSpacing(10)
+        # ── Tab toolbar (lives in the main window corner) ──
+        self.tab_toolbar = QWidget()
+        self.tab_toolbar.setStyleSheet("background: transparent;")
+        tb = QHBoxLayout(self.tab_toolbar)
+        tb.setContentsMargins(0, 2, 0, 2)
+        tb.setSpacing(6)
 
-        lbl_title = QLabel("ACTEURS")
-        lbl_title.setStyleSheet("color: #555; font-size: 10px; letter-spacing: 4px;")
-        b1.addWidget(lbl_title)
-
-        self.lbl_folder = QLabel("Geen map geselecteerd")
-        self.lbl_folder.setStyleSheet("color: #383838; font-size: 10px;")
-        b1.addWidget(self.lbl_folder)
-        b1.addStretch()
+        self.lbl_folder = QLabel("—")
+        self.lbl_folder.setStyleSheet("color: #333; font-size: 10px;")
+        self.lbl_folder.setMaximumWidth(110)
+        tb.addWidget(self.lbl_folder)
 
         self.search_input = QLineEdit()
         self.search_input.setPlaceholderText("Zoeken...")
-        self.search_input.setFixedWidth(180)
+        self.search_input.setFixedWidth(160)
         self.search_input.textChanged.connect(self._apply_filters)
-        b1.addWidget(self.search_input)
+        tb.addWidget(self.search_input)
 
-        btn_folder = QPushButton("📁  Kies map")
+        btn_folder = QPushButton("📁  Map")
         btn_folder.setFixedHeight(28)
         btn_folder.clicked.connect(self._pick_folder)
-        b1.addWidget(btn_folder)
+        tb.addWidget(btn_folder)
 
-        btn_import = QPushButton("⬆  Importeer")
+        btn_import = QPushButton("⬆  Import")
         btn_import.setFixedHeight(28)
         btn_import.clicked.connect(self._import_actors)
-        b1.addWidget(btn_import)
+        tb.addWidget(btn_import)
 
         btn_zoom_out = QPushButton("−")
         btn_zoom_out.setFixedSize(28, 28)
+        btn_zoom_out.setAutoRepeat(True)
+        btn_zoom_out.setAutoRepeatDelay(400)
+        btn_zoom_out.setAutoRepeatInterval(100)
         btn_zoom_out.clicked.connect(self._zoom_out)
-        b1.addWidget(btn_zoom_out)
+        tb.addWidget(btn_zoom_out)
 
         btn_zoom_in = QPushButton("+")
         btn_zoom_in.setFixedSize(28, 28)
+        btn_zoom_in.setAutoRepeat(True)
+        btn_zoom_in.setAutoRepeatDelay(400)
+        btn_zoom_in.setAutoRepeatInterval(100)
         btn_zoom_in.clicked.connect(self._zoom_in)
-        b1.addWidget(btn_zoom_in)
-
-        v0.addWidget(bar1)
+        tb.addWidget(btn_zoom_in)
+        # tab_toolbar is NOT added to v0; player.py inserts it into the corner
 
         # Filter — 1 rij checkboxes
         filter_frame = QFrame()
@@ -1254,11 +1254,10 @@ class ActorsPanel(QWidget):
             [("9", "9"), ("8", "8"), ("7", "7"), ("6", "6"), ("5", "5")])
 
         self._cb_grootte = self._cb_group(row_f, "Grootte:",
-            [(str(i), str(i)) for i in range(1, 11)])
+            [(str(i), str(i)) for i in range(1, 6)])
 
         self._cb_dec = self._cb_group(row_f, "Dec:",
-            [(str(d), f"{d*10}") for d in range(6, 10)] +
-            [("0", "00"), ("1", "10"), ("2", "20")])
+            [("7", "70"), ("8", "80"), ("9", "90"), ("0", "00")])
 
         btn_reset = QPushButton("✕")
         btn_reset.setFixedSize(22, 22)

@@ -494,6 +494,7 @@ class CineMarker(QMainWindow):
         self.btn_fs.clicked.connect(self._toggle_fullscreen)
         _ch.addWidget(self.btn_fs)
         self.main_tabs.setCornerWidget(_corner, Qt.Corner.TopRightCorner)
+        self._corner_layout = _ch  # keep ref to insert actors toolbar later
 
         # Player tab container
         player_widget = QWidget()
@@ -546,6 +547,12 @@ class CineMarker(QMainWindow):
         self.actors_panel.scene_jump_requested.connect(self._on_scene_jump)
         self.main_tabs.addTab(self.actors_panel, "◉  ACTEURS")
 
+        # Insert actors toolbar into corner (hidden until acteurs tab active)
+        self._actors_tb = self.actors_panel.tab_toolbar
+        self._actors_tb.setVisible(False)
+        self._corner_layout.insertWidget(0, self._actors_tb)
+        self.main_tabs.currentChanged.connect(self._on_tab_changed)
+
         # Database tab
         self.db_panel = DatabasePanel()
         self.main_tabs.addTab(self.db_panel, "⊞  DATABASE")
@@ -558,6 +565,10 @@ class CineMarker(QMainWindow):
         self.status = QStatusBar()
         self.setStatusBar(self.status)
         self.status.showMessage("Open een videobestand om te beginnen  •  CineMarker")
+
+    def _on_tab_changed(self, idx):
+        actors_idx = self.main_tabs.indexOf(self.actors_panel)
+        self._actors_tb.setVisible(idx == actors_idx)
 
     def _toggle_fullscreen(self):
         if self.isFullScreen():
