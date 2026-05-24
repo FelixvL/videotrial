@@ -326,51 +326,74 @@ class _ActorLinkOverlay(QFrame):
 #  Actor photo search (inside panel overlay)
 # ─────────────────────────────────────────────
 
-class _ActorCard(QFrame):
-    clicked = pyqtSignal(dict)
+class _PhotoWidget(QWidget):
+    """Draws photo directly in paintEvent — bypasses all stylesheet cascade issues
+    that occur inside WA_TranslucentBackground top-level windows."""
 
-    PW, PH = 130, 158   # photo area
+    PW, PH = 130, 158
 
-    def __init__(self, actor: dict):
+    def __init__(self, photo_path: str):
         super().__init__()
-        self._actor = actor
-        self.setFixedWidth(148)
-        self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setStyleSheet(
-            "QFrame { background: rgba(22,22,22,210); border-radius: 4px; }"
-            "QFrame:hover { background: rgba(36,30,10,230); }"
-        )
-        v = QVBoxLayout(self)
-        v.setContentsMargins(4, 4, 4, 4)
-        v.setSpacing(3)
-
-        lbl_photo = QLabel()
-        lbl_photo.setFixedSize(self.PW, self.PH)
-        lbl_photo.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        lbl_photo.setStyleSheet("background: #111; border-radius: 2px;")
-
-        photos = db.get_actor_photos(actor['id'])
-        if photos:
-            pix = QPixmap(photos[0]['photo_path'])
-            if not pix.isNull():
-                pix = pix.scaled(
+        self.setFixedSize(self.PW, self.PH)
+        self._pix = None
+        if photo_path:
+            raw = QPixmap(photo_path)
+            if not raw.isNull():
+                scaled = raw.scaled(
                     self.PW, self.PH,
                     Qt.AspectRatioMode.KeepAspectRatioByExpanding,
                     Qt.TransformationMode.SmoothTransformation,
                 )
-                ox = (pix.width()  - self.PW) // 2
-                oy = (pix.height() - self.PH) // 2
-                lbl_photo.setPixmap(pix.copy(ox, oy, self.PW, self.PH))
+                ox = (scaled.width()  - self.PW) // 2
+                oy = (scaled.height() - self.PH) // 2
+                self._pix = scaled.copy(ox, oy, self.PW, self.PH)
 
-        v.addWidget(lbl_photo)
+    def paintEvent(self, _event):
+        from PyQt6.QtGui import QPainter
+        p = QPainter(self)
+        p.fillRect(self.rect(), QColor('#1a1a1a'))
+        if self._pix:
+            p.drawPixmap(0, 0, self._pix)
 
-        lbl_name = QLabel(actor.get('name', ''))
-        lbl_name.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        lbl_name.setWordWrap(True)
-        lbl_name.setStyleSheet(
-            "color: #bbb; font-size: 10px; background: transparent;"
-        )
-        v.addWidget(lbl_name)
+
+class _ActorCard(QWidget):
+    clicked = pyqtSignal(dict)
+
+    def __init__(self, actor: dict):
+        super().__init__()
+        self._actor = actor
+        self._hovered = False
+        self.setFixedWidth(148)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+        v = QVBoxLayout(self)
+        v.setContentsMargins(4, 4, 4, 4)
+        v.setSpacing(3)
+
+        photos = db.get_actor_photos(actor['id'])
+        path = photos[0]['photo_path'] if photos else ''
+        v.addWidget(_PhotoWidget(path))
+
+        lbl = QLabel(actor.get('name', ''))
+        lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lbl.setWordWrap(True)
+        lbl.setStyleSheet("QLabel { color: #bbb; font-size: 10px; background: transparent; }")
+        v.addWidget(lbl)
+
+    def paintEvent(self, _event):
+        from PyQt6.QtGui import QPainter
+        p = QPainter(self)
+        p.setRenderHint(p.RenderHint.Antialiasing)
+        color = QColor(36, 30, 10, 230) if self._hovered else QColor(22, 22, 22, 210)
+        p.setBrush(color)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.drawRoundedRect(self.rect(), 4, 4)
+
+    def enterEvent(self, _e):
+        self._hovered = True;  self.update()
+
+    def leaveEvent(self, _e):
+        self._hovered = False; self.update()
 
     def mousePressEvent(self, _event):
         self.clicked.emit(self._actor)
@@ -389,37 +412,33 @@ class _SearchPage(QWidget):
         self._scroll.setWidgetResizable(True)
         self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self._scroll.setStyleSheet(
-            "QScrollArea { border: none; background: transparent; }"
+            "QScrollArea, QScrollArea > QWidget > QWidget { background: transparent; border: none; }"
             "QScrollBar:vertical { background: transparent; width: 6px; }"
             "QScrollBar::handle:vertical { background: rgba(60,60,60,180); border-radius: 3px; }"
         )
         self._inner = QWidget()
-        self._grid  = None
+        self._inner.setStyleSheet("background: transparent;")
         self._scroll.setWidget(self._inner)
         v.addWidget(self._scroll)
 
     def update_results(self, actors: list):
-        # Remove old grid
-        old = self._inner.layout()
-        if old:
-            while old.count():
-                item = old.takeAt(0)
-                if item.widget():
-                    item.widget().deleteLater()
-            QWidget().setLayout(old)
+        # Swap inner widget to avoid layout-detach issues
+        old = self._inner
+        self._inner = QWidget()
+        self._inner.setStyleSheet("background: transparent;")
+        self._scroll.setWidget(self._inner)
+        old.deleteLater()
 
         from PyQt6.QtWidgets import QGridLayout
         grid = QGridLayout(self._inner)
         grid.setContentsMargins(6, 6, 6, 6)
         grid.setSpacing(6)
+        grid.setAlignment(Qt.AlignmentFlag.AlignTop)
 
         for i, actor in enumerate(actors[:24]):
             card = _ActorCard(actor)
             card.clicked.connect(self.actor_clicked)
             grid.addWidget(card, i // 2, i % 2)
-
-        # Push cards to top
-        grid.setRowStretch(grid.rowCount(), 1)
 
 
 # ─────────────────────────────────────────────
