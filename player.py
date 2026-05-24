@@ -36,15 +36,16 @@ try:
     import mpv
 except OSError:
     app = QApplication(sys.argv)
-    QMessageBox.critical(
-        None,
-        "mpv DLL niet gevonden",
-        "Kan mpv-2.dll niet vinden.\n\n"
-        "Download de Windows dev-build van mpv:\n"
-        "https://sourceforge.net/projects/mpv-player-windows/files/libmpv/\n\n"
-        "Pak mpv-2.dll uit en plaats hem in:\n"
-        r"  C:\mpv\  of naast player.py",
-    )
+    if sys.platform == 'win32':
+        detail = (
+            "Kan mpv-2.dll niet vinden.\n\n"
+            "Download de Windows dev-build van mpv:\n"
+            "https://sourceforge.net/projects/mpv-player-windows/files/libmpv/\n\n"
+            "Pak mpv-2.dll uit en plaats hem in C:\\mpv\\ of naast player.py"
+        )
+    else:
+        detail = "Installeer libmpv via je package manager:\n  sudo apt install libmpv-dev  (Debian/Ubuntu)\n  sudo dnf install mpv-libs     (Fedora)"
+    QMessageBox.critical(None, "mpv niet gevonden", detail)
     sys.exit(1)
 from actors_panel import ActorsPanel
 from films_panel import FilmsPanel
@@ -333,6 +334,8 @@ class _SelectableThumb(QWidget):
     toggled = _pyqtSignal(int, bool)   # actor_id, selected
 
     TW, TH = 52, 62
+    _STYLE_NORMAL   = "QWidget { background: #1a1a1a; border: 2px solid transparent; border-radius: 4px; }"
+    _STYLE_SELECTED = "QWidget { background: #3c3200; border: 2px solid #e8b86d;    border-radius: 4px; }"
 
     def __init__(self, actor: dict):
         super().__init__()
@@ -340,60 +343,40 @@ class _SelectableThumb(QWidget):
         self._selected = False
         self.setFixedSize(self.TW + 8, self.TH + 18)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
-        self._pix = None
+        self.setStyleSheet(self._STYLE_NORMAL)
+
+        v = QVBoxLayout(self)
+        v.setContentsMargins(3, 3, 3, 2)
+        v.setSpacing(2)
+
+        img = QLabel()
+        img.setFixedSize(self.TW, self.TH)
+        img.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        img.setStyleSheet("border: none; background: #2a2a2a; border-radius: 2px;")
         photos = db.get_actor_photos(actor['id'])
         path = photos[0]['photo_path'] if photos else ''
-        print(f"[thumb] {actor['name']} | photos={len(photos)} | path={path!r}")
         if path:
-            import os as _os
-            print(f"[thumb]   bestaat={_os.path.exists(path)}")
             raw = QPixmap(path)
-            print(f"[thumb]   pixmap null={raw.isNull()} size={raw.width()}x{raw.height()}")
             if not raw.isNull():
                 scaled = raw.scaled(self.TW, self.TH,
                     Qt.AspectRatioMode.KeepAspectRatioByExpanding,
                     Qt.TransformationMode.SmoothTransformation)
                 ox = (scaled.width()  - self.TW) // 2
                 oy = (scaled.height() - self.TH) // 2
-                self._pix = scaled.copy(ox, oy, self.TW, self.TH)
-                print(f"[thumb]   _pix={self._pix is not None}")
+                img.setPixmap(scaled.copy(ox, oy, self.TW, self.TH))
+        v.addWidget(img, alignment=Qt.AlignmentFlag.AlignHCenter)
 
-    def paintEvent(self, _event):
-        from PyQt6.QtGui import QPainter, QFont
-        p = QPainter(self)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        # card background
-        bg = QColor(60, 50, 10, 255) if self._selected else QColor(18, 18, 18, 255)
-        p.setBrush(bg)
-        p.setPen(Qt.PenStyle.NoPen)
-        p.drawRoundedRect(self.rect(), 4, 4)
-        # photo
-        ox = (self.width() - self.TW) // 2
-        if self._pix:
-            p.drawPixmap(ox, 2, self._pix)
-        else:
-            p.fillRect(ox, 2, self.TW, self.TH, QColor('#2a2a2a'))
-        # selection border
-        if self._selected:
-            pen = p.pen()
-            from PyQt6.QtGui import QPen
-            p.setPen(QPen(QColor('#e8b86d'), 2))
-            p.setBrush(Qt.BrushStyle.NoBrush)
-            p.drawRoundedRect(self.rect().adjusted(1, 1, -1, -1), 4, 4)
-            p.setPen(pen)
-        # name
-        p.setPen(QColor('#aaa') if self._selected else QColor('#666'))
-        f = p.font()
-        f.setPointSize(7)
-        p.setFont(f)
-        name_rect = self.rect().adjusted(0, self.TH + 4, 0, 0)
-        p.drawText(name_rect, Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop,
-                   self._actor.get('name', ''))
+        name_lbl = QLabel(actor.get('name', ''))
+        name_lbl.setFixedWidth(self.TW + 2)
+        name_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        name_lbl.setStyleSheet("color: #666; font-size: 8px; background: transparent; border: none;")
+        metrics = name_lbl.fontMetrics()
+        name_lbl.setText(metrics.elidedText(actor.get('name', ''), Qt.TextElideMode.ElideRight, self.TW + 2))
+        v.addWidget(name_lbl, alignment=Qt.AlignmentFlag.AlignHCenter)
 
     def mousePressEvent(self, _e):
         self._selected = not self._selected
-        self.update()
+        self.setStyleSheet(self._STYLE_SELECTED if self._selected else self._STYLE_NORMAL)
         self.toggled.emit(self._actor['id'], self._selected)
 
 
@@ -1567,8 +1550,9 @@ def main():
     except ImportError:
         missing.append("python-mpv  (pip install python-mpv)")
 
+    import shutil
     for tool in ['mpv', 'ffmpeg']:
-        if subprocess.run(['where', tool], capture_output=True, shell=True).returncode != 0:
+        if shutil.which(tool) is None:
             missing.append(f"{tool}  (installeer via package manager)")
 
     if missing:
