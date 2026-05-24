@@ -417,40 +417,30 @@ def auto_link_actor_photos():
     """Scan acteurfotos/ and link any photo whose stem matches an actor name."""
     import os
     folder = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'acteurfotos')
-    print(f"[auto_link] map: {folder}")
     if not os.path.isdir(folder):
-        print(f"[auto_link] MAP BESTAAT NIET — stop")
         return
     exts = {'.jpg', '.jpeg', '.png', '.webp', '.bmp', '.gif', '.tiff', '.tif'}
     photos_by_stem = {}
     for f in Path(folder).iterdir():
         if f.suffix.lower() in exts:
             photos_by_stem[f.stem.lower()] = str(f)
-    print(f"[auto_link] {len(photos_by_stem)} foto(s) gevonden: {list(photos_by_stem.keys())}")
 
     conn = get_connection()
     actors = conn.execute("SELECT id, name FROM actors").fetchall()
-    print(f"[auto_link] {len(actors)} acteur(s) in DB")
-    linked = 0
     for actor in actors:
         stem = actor['name'].lower()
-        photos = conn.execute(
-            "SELECT id, photo_path FROM actor_photos WHERE actor_id=?", (actor['id'],)
-        ).fetchall()
-        match = stem in photos_by_stem
-        print(f"[auto_link]   acteur '{actor['name']}' (id={actor['id']}) — foto match={match} — al {len(photos)} foto(s) in DB: {[p['photo_path'] for p in photos]}")
-        if not match:
+        if stem not in photos_by_stem:
             continue
-        if not photos:
+        existing = conn.execute(
+            "SELECT id FROM actor_photos WHERE actor_id=?", (actor['id'],)
+        ).fetchone()
+        if not existing:
             conn.execute(
                 "INSERT INTO actor_photos (actor_id, photo_path) VALUES (?, ?)",
                 (actor['id'], photos_by_stem[stem])
             )
-            print(f"[auto_link]     → gekoppeld: {photos_by_stem[stem]}")
-            linked += 1
     conn.commit()
     conn.close()
-    print(f"[auto_link] klaar — {linked} nieuw gekoppeld")
 
 
 auto_link_actor_photos()

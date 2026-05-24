@@ -344,8 +344,12 @@ class _SelectableThumb(QWidget):
         self._pix = None
         photos = db.get_actor_photos(actor['id'])
         path = photos[0]['photo_path'] if photos else ''
+        print(f"[thumb] {actor['name']} | photos={len(photos)} | path={path!r}")
         if path:
+            import os as _os
+            print(f"[thumb]   bestaat={_os.path.exists(path)}")
             raw = QPixmap(path)
+            print(f"[thumb]   pixmap null={raw.isNull()} size={raw.width()}x{raw.height()}")
             if not raw.isNull():
                 scaled = raw.scaled(self.TW, self.TH,
                     Qt.AspectRatioMode.KeepAspectRatioByExpanding,
@@ -353,6 +357,7 @@ class _SelectableThumb(QWidget):
                 ox = (scaled.width()  - self.TW) // 2
                 oy = (scaled.height() - self.TH) // 2
                 self._pix = scaled.copy(ox, oy, self.TW, self.TH)
+                print(f"[thumb]   _pix={self._pix is not None}")
 
     def paintEvent(self, _event):
         from PyQt6.QtGui import QPainter, QFont
