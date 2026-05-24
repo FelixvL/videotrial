@@ -74,10 +74,21 @@ class ActorCardDelegate(QStyledItemDelegate):
         '5': ('#FFFFFF', Qt.PenStyle.DashLine, 2),
     }
     TEXT_COLOR = {
-        '1': QColor('#FFFFFF'),
-        '2': QColor('#8B4513'),
-        '3': QColor('#000000'),
+        '1': QColor('#FFFFFF'),   # wit
+        '2': QColor('#000000'),   # zwart
+        '3': QColor('#8B4513'),   # bruin
     }
+    GLOW_COLOR = {
+        '1': QColor(0, 0, 0, 220),
+        '2': QColor(255, 255, 255, 220),
+        '3': QColor(0, 0, 0, 220),
+    }
+    GLOW_OFFSETS = [
+        (-1,-1),(0,-1),(1,-1),
+        (-1, 0),       (1, 0),
+        (-1, 1),(0, 1),(1, 1),
+        (-2, 0),(2, 0),(0,-2),(0, 2),
+    ]
 
     def __init__(self):
         super().__init__()
@@ -114,32 +125,35 @@ class ActorCardDelegate(QStyledItemDelegate):
         # Background
         painter.fillRect(r, QColor('#0d0d0d'))
 
-        # Photo (fills card, name bar overlaid at bottom)
-        name_h = 26
-        photo_area = inner.adjusted(0, 0, 0, 0)
-        pix = self._get_pix(data['photo_path'], photo_area.width(), photo_area.height())
+        # Photo — fills entire inner rect
+        pix = self._get_pix(data['photo_path'], inner.width(), inner.height())
         if not pix.isNull():
             px = inner.x() + (inner.width() - pix.width()) // 2
             py = inner.y() + (inner.height() - pix.height()) // 2
             painter.drawPixmap(px, py, pix)
 
-        # Name bar overlay
-        bar_rect = QRect(inner.x(), inner.bottom() - name_h, inner.width(), name_h)
-        painter.fillRect(bar_rect, QColor(0, 0, 0, 190))
-
-        voornaam = meta.get('voornaam', '')
+        # Name — glow text, no bar
+        voornaam  = meta.get('voornaam', '')
         achternaam = meta.get('achternaam', '')
         display = f"{voornaam} {achternaam}".strip() or data.get('stem', '')
 
         kleur = str(meta.get('kleur', '1'))
         text_col = self.TEXT_COLOR.get(kleur, QColor('#FFFFFF'))
+        glow_col = self.GLOW_COLOR.get(kleur, QColor(0, 0, 0, 220))
 
-        f = painter.font()
-        f.setPointSize(8)
-        f.setBold(True)
-        painter.setFont(f)
+        nf = painter.font()
+        nf.setPointSize(8)
+        nf.setBold(True)
+        painter.setFont(nf)
+
+        name_rect = QRect(inner.x() + 2, inner.bottom() - 22, inner.width() - 4, 20)
+        name_flags = Qt.AlignmentFlag.AlignCenter
+
+        painter.setPen(glow_col)
+        for dx, dy in self.GLOW_OFFSETS:
+            painter.drawText(name_rect.translated(dx, dy), name_flags, display)
         painter.setPen(text_col)
-        painter.drawText(bar_rect, Qt.AlignmentFlag.AlignCenter, display)
+        painter.drawText(name_rect, name_flags, display)
 
         # Stars — top right
         try:
@@ -895,13 +909,19 @@ class ActorsPanel(QWidget):
     scene_jump_requested = pyqtSignal(str, float)
 
     PHOTO_EXTS = {'.jpg', '.jpeg', '.png', '.webp', '.bmp', '.tiff', '.gif'}
-    CELL_W = 170
-    CELL_H = 220
+    ZOOM_STEPS = [(100,130),(130,168),(160,206),(200,258),(240,310)]
+    ZOOM_DEFAULT = 2
 
     def __init__(self, player):
         super().__init__()
         self.player = player
         self._all_items: list = []
+        self._zoom_idx = self.ZOOM_DEFAULT
+        self._cb_db: dict = {}
+        self._cb_kleur: dict = {}
+        self._cb_grootte: dict = {}
+        self._cb_rating: dict = {}
+        self._cb_dec: dict = {}
         self._build_ui()
         folder = db.get_setting('photo_folder', '')
         if folder:
@@ -946,71 +966,75 @@ class ActorsPanel(QWidget):
         btn_import.clicked.connect(self._import_actors)
         b1.addWidget(btn_import)
 
+        btn_zoom_out = QPushButton("−")
+        btn_zoom_out.setFixedSize(28, 28)
+        btn_zoom_out.clicked.connect(self._zoom_out)
+        b1.addWidget(btn_zoom_out)
+
+        btn_zoom_in = QPushButton("+")
+        btn_zoom_in.setFixedSize(28, 28)
+        btn_zoom_in.clicked.connect(self._zoom_in)
+        b1.addWidget(btn_zoom_in)
+
         v.addWidget(bar1)
 
-        # Row 2: filters
-        bar2 = QFrame()
-        bar2.setFixedHeight(38)
-        bar2.setStyleSheet("QFrame { background: #0a0a0a; border-bottom: 1px solid #161616; }")
-        b2 = QHBoxLayout(bar2)
-        b2.setContentsMargins(12, 0, 12, 0)
-        b2.setSpacing(8)
-
-        lbl_f = QLabel("Filter:")
-        lbl_f.setStyleSheet("color: #444; font-size: 10px;")
-        b2.addWidget(lbl_f)
-
-        self.cmb_db = self._make_combo([
-            ("Alle", ""),
-            ("In database", "in_db"),
-            ("Niet in database", "not_in_db"),
-        ])
-        b2.addWidget(self.cmb_db)
-
-        self.cmb_kleur = self._make_combo([
-            ("Kleur", ""),
-            ("Wit (1)", "1"),
-            ("Bruin (2)", "2"),
-            ("Zwart (3)", "3"),
-        ])
-        b2.addWidget(self.cmb_kleur)
-
-        self.cmb_grootte = self._make_combo(
-            [("Grootte", "")] +
-            [(f"{'★' * i} ({i})", str(i)) for i in range(1, 7)]
+        # Filter sectie — 2 rijen checkboxes
+        filter_frame = QFrame()
+        filter_frame.setStyleSheet(
+            "QFrame { background: #0a0a0a; border-bottom: 1px solid #161616; }"
+            "QCheckBox { color: #777; font-size: 10px; spacing: 3px; }"
+            "QCheckBox::indicator { width: 11px; height: 11px; }"
+            "QCheckBox:checked { color: #e8b86d; }"
         )
-        b2.addWidget(self.cmb_grootte)
+        fv = QVBoxLayout(filter_frame)
+        fv.setContentsMargins(12, 4, 12, 4)
+        fv.setSpacing(4)
 
-        self.cmb_rating = self._make_combo([
-            ("Rating", ""),
-            ("9 — Goud", "9"),
-            ("8 — Zilver", "8"),
-            ("7 — Brons", "7"),
-            ("6 — Geel stippel", "6"),
-            ("5 — Wit stippel", "5"),
-        ])
-        b2.addWidget(self.cmb_rating)
+        row_a = QHBoxLayout()
+        row_a.setSpacing(16)
+        row_b = QHBoxLayout()
+        row_b.setSpacing(16)
 
-        self.cmb_dec = self._make_combo(
-            [("Decennia", "")] +
-            [(f"{d * 10}s", str(d)) for d in range(3, 10)] +
-            [("00s", "0"), ("10s", "1"), ("20s", "2")]
-        )
-        b2.addWidget(self.cmb_dec)
+        # DB
+        self._cb_db = self._cb_group(row_a, "Database:",
+            [("in_db", "In DB"), ("not_in_db", "Niet in DB")])
 
-        btn_reset = QPushButton("✕ Reset")
-        btn_reset.setFixedHeight(26)
+        # Kleur
+        self._cb_kleur = self._cb_group(row_a, "Kleur:",
+            [("1", "Wit"), ("2", "Zwart"), ("3", "Bruin")])
+
+        # Rating
+        self._cb_rating = self._cb_group(row_a, "Rating:",
+            [("9", "9●"), ("8", "8●"), ("7", "7●"), ("6", "6--"), ("5", "5--")])
+
+        btn_reset = QPushButton("✕")
+        btn_reset.setFixedSize(22, 22)
+        btn_reset.setToolTip("Reset filters")
         btn_reset.clicked.connect(self._reset_filters)
-        b2.addWidget(btn_reset)
+        row_a.addStretch()
+        row_a.addWidget(btn_reset)
 
-        b2.addStretch()
-        v.addWidget(bar2)
+        # Grootte
+        self._cb_grootte = self._cb_group(row_b, "Grootte:",
+            [(str(i), "★" * i) for i in range(1, 7)])
+
+        # Decennia
+        self._cb_dec = self._cb_group(row_b, "Decennia:",
+            [(str(d), f"{d*10}s") for d in range(3, 10)] +
+            [("0", "00s"), ("1", "10s"), ("2", "20s")])
+
+        row_b.addStretch()
+
+        fv.addLayout(row_a)
+        fv.addLayout(row_b)
+        v.addWidget(filter_frame)
 
         # Photo grid
+        cw, ch = self.ZOOM_STEPS[self._zoom_idx]
         self.grid = QListWidget()
         self.grid.setViewMode(QListWidget.ViewMode.IconMode)
         self.grid.setIconSize(QSize(1, 1))
-        self.grid.setGridSize(QSize(self.CELL_W + 8, self.CELL_H + 8))
+        self.grid.setGridSize(QSize(cw + 8, ch + 8))
         self.grid.setResizeMode(QListWidget.ResizeMode.Adjust)
         self.grid.setMovement(QListWidget.Movement.Static)
         self.grid.setUniformItemSizes(True)
@@ -1023,13 +1047,19 @@ class ActorsPanel(QWidget):
         self.grid.itemClicked.connect(self._on_item_clicked)
         v.addWidget(self.grid)
 
-    def _make_combo(self, options: list) -> QComboBox:
-        cmb = QComboBox()
-        cmb.setFixedHeight(26)
-        for label, value in options:
-            cmb.addItem(label, value)
-        cmb.currentIndexChanged.connect(self._apply_filters)
-        return cmb
+    def _cb_group(self, layout: QHBoxLayout, label: str,
+                  options: list) -> dict:
+        from PyQt6.QtWidgets import QCheckBox
+        lbl = QLabel(label)
+        lbl.setStyleSheet("color: #444; font-size: 9px;")
+        layout.addWidget(lbl)
+        cbs = {}
+        for val, text in options:
+            cb = QCheckBox(text)
+            cb.stateChanged.connect(self._apply_filters)
+            layout.addWidget(cb)
+            cbs[val] = cb
+        return cbs
 
     # ── Folder ───────────────────────────────────
 
@@ -1062,16 +1092,18 @@ class ActorsPanel(QWidget):
 
         for photo_path in photos:
             actor = db.get_actor_by_name(photo_path.stem)
-            in_db = actor is not None
             meta = {}
-            if in_db and actor.get('notes'):
+            if actor and actor.get('notes'):
                 try:
                     meta = json.loads(actor['notes'])
                 except (ValueError, TypeError):
                     meta = {}
+            # in_db = heeft zinvolle metadata (voornaam of achternaam ingevuld)
+            in_db = bool(meta.get('voornaam') or meta.get('achternaam'))
 
+            cw, ch = self.ZOOM_STEPS[self._zoom_idx]
             item = QListWidgetItem()
-            item.setSizeHint(QSize(self.CELL_W, self.CELL_H))
+            item.setSizeHint(QSize(cw, ch))
             item.setData(Qt.ItemDataRole.UserRole, {
                 'photo_path': str(photo_path),
                 'stem': photo_path.stem,
@@ -1088,20 +1120,25 @@ class ActorsPanel(QWidget):
         self.search_input.blockSignals(True)
         self.search_input.clear()
         self.search_input.blockSignals(False)
-        for cmb in (self.cmb_db, self.cmb_kleur, self.cmb_grootte,
-                    self.cmb_rating, self.cmb_dec):
-            cmb.blockSignals(True)
-            cmb.setCurrentIndex(0)
-            cmb.blockSignals(False)
+        for group in (self._cb_db, self._cb_kleur, self._cb_grootte,
+                      self._cb_rating, self._cb_dec):
+            for cb in group.values():
+                cb.blockSignals(True)
+                cb.setChecked(False)
+                cb.blockSignals(False)
         self._apply_filters()
+
+    @staticmethod
+    def _active(cb_group: dict) -> set:
+        return {val for val, cb in cb_group.items() if cb.isChecked()}
 
     def _apply_filters(self):
         query     = self.search_input.text().lower()
-        f_db      = self.cmb_db.currentData()
-        f_kleur   = self.cmb_kleur.currentData()
-        f_grootte = self.cmb_grootte.currentData()
-        f_rating  = self.cmb_rating.currentData()
-        f_dec     = self.cmb_dec.currentData()
+        act_db    = self._active(self._cb_db)
+        act_kleur = self._active(self._cb_kleur)
+        act_groo  = self._active(self._cb_grootte)
+        act_rat   = self._active(self._cb_rating)
+        act_dec   = self._active(self._cb_dec)
 
         for item in self._all_items:
             data  = item.data(Qt.ItemDataRole.UserRole)
@@ -1120,20 +1157,41 @@ class ActorsPanel(QWidget):
                 if not name_match:
                     hide = True
 
-            if not hide and f_db == 'in_db' and not in_db:
+            if not hide and act_db:
+                db_val = 'in_db' if in_db else 'not_in_db'
+                if db_val not in act_db:
+                    hide = True
+
+            if not hide and act_kleur and str(meta.get('kleur', '')) not in act_kleur:
                 hide = True
-            if not hide and f_db == 'not_in_db' and in_db:
+            if not hide and act_groo and str(meta.get('grootte', '')) not in act_groo:
                 hide = True
-            if not hide and f_kleur and str(meta.get('kleur', '')) != f_kleur:
+            if not hide and act_rat and str(meta.get('rating', '')) not in act_rat:
                 hide = True
-            if not hide and f_grootte and str(meta.get('grootte', '')) != f_grootte:
-                hide = True
-            if not hide and f_rating and str(meta.get('rating', '')) != f_rating:
-                hide = True
-            if not hide and f_dec and str(meta.get('decennia', '')) != f_dec:
+            if not hide and act_dec and str(meta.get('decennia', '')) not in act_dec:
                 hide = True
 
             item.setHidden(hide)
+
+    # ── Zoom ─────────────────────────────────────
+
+    def _zoom_in(self):
+        if self._zoom_idx < len(self.ZOOM_STEPS) - 1:
+            self._zoom_idx += 1
+            self._apply_zoom()
+
+    def _zoom_out(self):
+        if self._zoom_idx > 0:
+            self._zoom_idx -= 1
+            self._apply_zoom()
+
+    def _apply_zoom(self):
+        cw, ch = self.ZOOM_STEPS[self._zoom_idx]
+        self.grid.setGridSize(QSize(cw + 8, ch + 8))
+        for item in self._all_items:
+            item.setSizeHint(QSize(cw, ch))
+        self._delegate._cache.clear()
+        self.grid.update()
 
     def _on_item_clicked(self, item):
         data = item.data(Qt.ItemDataRole.UserRole)
