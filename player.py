@@ -24,8 +24,8 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QSlider, QLabel, QFileDialog, QListWidget,
     QListWidgetItem, QLineEdit, QComboBox, QSpinBox,
-    QProgressBar, QTabWidget, QFrame, QMessageBox, QInputDialog,
-    QSizePolicy, QStatusBar, QStyle
+    QProgressBar, QTabWidget, QStackedWidget, QFrame, QMessageBox,
+    QInputDialog, QSizePolicy, QStatusBar, QScrollArea, QStyle
 )
 from PyQt6.QtCore import (
     Qt, QTimer, pyqtSignal, QObject, QThread, QSize, QEvent
@@ -323,6 +323,106 @@ class _ActorLinkOverlay(QFrame):
 
 
 # ─────────────────────────────────────────────
+#  Actor photo search (inside panel overlay)
+# ─────────────────────────────────────────────
+
+class _ActorCard(QFrame):
+    clicked = pyqtSignal(dict)
+
+    PW, PH = 130, 158   # photo area
+
+    def __init__(self, actor: dict):
+        super().__init__()
+        self._actor = actor
+        self.setFixedWidth(148)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setStyleSheet(
+            "QFrame { background: rgba(22,22,22,210); border-radius: 4px; }"
+            "QFrame:hover { background: rgba(36,30,10,230); }"
+        )
+        v = QVBoxLayout(self)
+        v.setContentsMargins(4, 4, 4, 4)
+        v.setSpacing(3)
+
+        lbl_photo = QLabel()
+        lbl_photo.setFixedSize(self.PW, self.PH)
+        lbl_photo.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lbl_photo.setStyleSheet("background: #111; border-radius: 2px;")
+
+        photos = db.get_actor_photos(actor['id'])
+        if photos:
+            pix = QPixmap(photos[0]['photo_path'])
+            if not pix.isNull():
+                pix = pix.scaled(
+                    self.PW, self.PH,
+                    Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+                ox = (pix.width()  - self.PW) // 2
+                oy = (pix.height() - self.PH) // 2
+                lbl_photo.setPixmap(pix.copy(ox, oy, self.PW, self.PH))
+
+        v.addWidget(lbl_photo)
+
+        lbl_name = QLabel(actor.get('name', ''))
+        lbl_name.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lbl_name.setWordWrap(True)
+        lbl_name.setStyleSheet(
+            "color: #bbb; font-size: 10px; background: transparent;"
+        )
+        v.addWidget(lbl_name)
+
+    def mousePressEvent(self, _event):
+        self.clicked.emit(self._actor)
+
+
+class _SearchPage(QWidget):
+    actor_clicked = pyqtSignal(dict)
+
+    def __init__(self):
+        super().__init__()
+        v = QVBoxLayout(self)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(0)
+
+        self._scroll = QScrollArea()
+        self._scroll.setWidgetResizable(True)
+        self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._scroll.setStyleSheet(
+            "QScrollArea { border: none; background: transparent; }"
+            "QScrollBar:vertical { background: transparent; width: 6px; }"
+            "QScrollBar::handle:vertical { background: rgba(60,60,60,180); border-radius: 3px; }"
+        )
+        self._inner = QWidget()
+        self._grid  = None
+        self._scroll.setWidget(self._inner)
+        v.addWidget(self._scroll)
+
+    def update_results(self, actors: list):
+        # Remove old grid
+        old = self._inner.layout()
+        if old:
+            while old.count():
+                item = old.takeAt(0)
+                if item.widget():
+                    item.widget().deleteLater()
+            QWidget().setLayout(old)
+
+        from PyQt6.QtWidgets import QGridLayout
+        grid = QGridLayout(self._inner)
+        grid.setContentsMargins(6, 6, 6, 6)
+        grid.setSpacing(6)
+
+        for i, actor in enumerate(actors[:24]):
+            card = _ActorCard(actor)
+            card.clicked.connect(self.actor_clicked)
+            grid.addWidget(card, i // 2, i % 2)
+
+        # Push cards to top
+        grid.setRowStretch(grid.rowCount(), 1)
+
+
+# ─────────────────────────────────────────────
 #  Right-panel overlay (floats over player)
 # ─────────────────────────────────────────────
 
@@ -378,8 +478,15 @@ class _PanelOverlay(QWidget):
         v = QVBoxLayout(self)
         v.setContentsMargins(0, 0, 0, 0)
         v.setSpacing(0)
-        self.tab_widget = QTabWidget()
-        v.addWidget(self.tab_widget)
+
+        self._stack = QStackedWidget()
+        self._stack.setStyleSheet("background: transparent;")
+        v.addWidget(self._stack)
+
+        self.tab_widget   = QTabWidget()
+        self._search_page = _SearchPage()
+        self._stack.addWidget(self.tab_widget)    # index 0
+        self._stack.addWidget(self._search_page)  # index 1
 
         main_win.installEventFilter(self)
 
@@ -407,6 +514,9 @@ class _PanelOverlay(QWidget):
             self.width(),
             vc.height(),
         )
+
+    def show_search(self, active: bool):
+        self._stack.setCurrentIndex(1 if active else 0)
 
 
 # ─────────────────────────────────────────────
@@ -590,7 +700,22 @@ class CineMarker(QMainWindow):
         self.btn_fs.clicked.connect(self._toggle_fullscreen)
         _ch.addWidget(self.btn_fs)
         self.main_tabs.setCornerWidget(_corner, Qt.Corner.TopRightCorner)
-        self._corner_layout = _ch  # keep ref to insert actors toolbar later
+        self._corner_layout = _ch
+
+        # Player search toolbar (hidden until SPELER tab active)
+        self._player_tb = QWidget()
+        self._player_tb.setStyleSheet("background: transparent;")
+        _ph = QHBoxLayout(self._player_tb)
+        _ph.setContentsMargins(0, 2, 0, 2)
+        _ph.setSpacing(4)
+        self._player_search = QLineEdit()
+        self._player_search.setPlaceholderText("Acteur zoeken…")
+        self._player_search.setFixedWidth(160)
+        self._player_search.setFixedHeight(26)
+        self._player_search.textChanged.connect(self._on_player_search)
+        _ph.addWidget(self._player_search)
+        self._player_tb.setVisible(False)
+        self._corner_layout.insertWidget(0, self._player_tb)
 
         # Player tab — video fills all, ultra-thin seekbar at bottom
         player_widget = QWidget()
@@ -616,6 +741,7 @@ class CineMarker(QMainWindow):
         self.tabs = self._panel.tab_widget
         self._build_markers_tab()
         self._build_converter_tab()
+        self._panel._search_page.actor_clicked.connect(self._link_actor_to_film)
         self._panel.hide()
 
         # Floating actor-link overlay (child of player_widget)
@@ -662,7 +788,23 @@ class CineMarker(QMainWindow):
         actors_idx = self.main_tabs.indexOf(self.actors_panel)
         self._actors_tb.setVisible(idx == actors_idx)
         player_idx = self.main_tabs.indexOf(self._player_widget)
-        self._panel.setVisible(idx == player_idx)
+        on_player = (idx == player_idx)
+        self._player_tb.setVisible(on_player)
+        self._panel.setVisible(on_player)
+        if not on_player:
+            self._player_search.clear()
+
+    def _on_player_search(self, text: str):
+        q = text.strip().lower()
+        if not q:
+            self._panel.show_search(False)
+            return
+        actors = [a for a in db.get_all_actors()
+                  if q in a.get('name', '').lower()]
+        self._panel._search_page.update_results(actors)
+        self._panel.show_search(True)
+        if not self._panel.isVisible():
+            self._panel.show()
 
     def _toggle_fullscreen(self):
         if self.isFullScreen():
