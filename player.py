@@ -25,12 +25,12 @@ from PyQt6.QtWidgets import (
     QPushButton, QSlider, QLabel, QFileDialog, QListWidget,
     QListWidgetItem, QLineEdit, QComboBox, QSpinBox,
     QProgressBar, QTabWidget, QStackedWidget, QFrame, QMessageBox,
-    QInputDialog, QSizePolicy, QStatusBar, QScrollArea, QStyle
+    QInputDialog, QSizePolicy, QStatusBar, QScrollArea, QStyle, QMenu
 )
 from PyQt6.QtCore import (
     Qt, QTimer, pyqtSignal, QObject, QThread, QSize, QEvent
 )
-from PyQt6.QtGui import QFont, QIcon, QKeySequence, QShortcut, QColor, QPalette, QPixmap
+from PyQt6.QtGui import QFont, QIcon, QKeySequence, QShortcut, QColor, QPalette, QPixmap, QCursor
 
 try:
     import mpv
@@ -332,38 +332,41 @@ from PyQt6.QtCore import pyqtSignal as _pyqtSignal
 
 class _FilmActorsOverlay(QWidget):
     """Floating overlay at bottom-left of video.
-    Draws actor thumbnails directly in paintEvent — no child widgets for photos,
-    which avoids all Qt stylesheet-cascade / top-level-window rendering issues."""
+    Row 1: actor thumbnails. Row 2: category icons.
+    Everything drawn in paintEvent — no child widgets for images."""
 
-    marker_requested    = _pyqtSignal(list)
+    marker_requested    = _pyqtSignal(list, list)   # actors, categories
     thumbnail_requested = _pyqtSignal()
 
-    TW, TH  = 52, 62    # thumb dimensions
-    SPACING = 6
-    PAD     = 6
-    BTN_W   = 36
+    TW, TH   = 52, 62   # actor thumb dims
+    CW, CH   = 42, 42   # category icon dims
+    SPACING  = 6
+    PAD      = 6
+    ROW_GAP  = 8
+    BTN_W    = 36
+    CELL_A   = TH + 16  # actor row height  (78)
+    CELL_C   = CH + 14  # category row height (56)
+    TOTAL_H  = PAD + CELL_A + ROW_GAP + CELL_C + PAD   # 154
 
     def __init__(self, main_win, video_container):
         super().__init__(main_win,
             Qt.WindowType.FramelessWindowHint | Qt.WindowType.Tool)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self._vc = video_container
-        self._actors:  list = []          # list of actor dicts
-        self._pixmaps: list = []          # parallel list of QPixmap|None
-        self._selected: set = set()       # actor ids
 
-        # Cell height = photo + name label
-        cell_h = self.TH + 16
-        total_h = cell_h + self.PAD * 2
+        self._actors:    list = []
+        self._pixmaps:   list = []
+        self._selected:  set  = set()   # actor ids
 
-        self.setFixedHeight(total_h)
+        self._cats:      list = []
+        self._cat_pixes: list = []
+        self._cat_sel:   set  = set()   # category ids
 
-        # Buttons (real widgets, right side)
-        btn_y = (total_h - self.BTN_W) // 2
+        self.setFixedHeight(self.TOTAL_H)
 
         self._btn_marker = QPushButton("◉", self)
         self._btn_marker.setFixedSize(self.BTN_W, self.BTN_W)
-        self._btn_marker.setToolTip("Marker met geselecteerde acteurs")
+        self._btn_marker.setToolTip("Marker met geselecteerde acteurs en categorieën")
         self._btn_marker.setStyleSheet(
             "QPushButton { background: #1a1000; border: 1px solid #6b4a00;"
             "  border-radius: 4px; color: #e8b86d; font-size: 16px; }"
@@ -371,7 +374,8 @@ class _FilmActorsOverlay(QWidget):
             "QPushButton:pressed { background: #e8b86d; color: #000; }"
         )
         self._btn_marker.clicked.connect(
-            lambda: self.marker_requested.emit(self.selected_actors()))
+            lambda: self.marker_requested.emit(
+                self.selected_actors(), self.selected_categories()))
 
         self._btn_thumb = QPushButton("⊡", self)
         self._btn_thumb.setFixedSize(self.BTN_W, self.BTN_W)
@@ -384,77 +388,146 @@ class _FilmActorsOverlay(QWidget):
         )
         self._btn_thumb.clicked.connect(self.thumbnail_requested)
 
+        self._btn_add_cat = QPushButton("+", self)
+        self._btn_add_cat.setFixedSize(self.BTN_W, self.BTN_W)
+        self._btn_add_cat.setToolTip("Categorie toevoegen")
+        self._btn_add_cat.setStyleSheet(
+            "QPushButton { background: #0a0a1a; border: 1px solid #2a2a6b;"
+            "  border-radius: 4px; color: #5555cc; font-size: 18px; font-weight: bold; }"
+            "QPushButton:hover { background: #10103a; border-color: #5555cc; color: #8888ff; }"
+            "QPushButton:pressed { background: #5555cc; color: #fff; }"
+        )
+        self._btn_add_cat.clicked.connect(self._add_category)
+
         self._place_buttons()
         main_win.installEventFilter(self)
 
-    def _place_buttons(self):
-        total_h = self.height()
-        btn_y = (total_h - self.BTN_W) // 2
-        photos_w = self._photos_width()
-        x = self.PAD + photos_w + self.SPACING
-        self._btn_marker.move(x, btn_y)
-        self._btn_thumb.move(x + self.BTN_W + 4, btn_y)
+    # ── Layout helpers ───────────────────────────
 
-    def _photos_width(self):
+    def _actor_row_width(self):
         n = len(self._actors)
         return n * (self.TW + self.SPACING) - (self.SPACING if n else 0)
 
+    def _cat_row_width(self):
+        n = len(self._cats)
+        return n * (self.CW + self.SPACING) - (self.SPACING if n else 0)
+
+    def _content_width(self):
+        return max(self._actor_row_width(), self._cat_row_width())
+
     def _total_width(self):
-        return self.PAD + self._photos_width() + self.SPACING + self.BTN_W * 2 + 4 + self.PAD
+        return self.PAD + self._content_width() + self.SPACING + self.BTN_W * 2 + 4 + self.PAD
+
+    def _place_buttons(self):
+        x = self.PAD + self._content_width() + self.SPACING
+        # ◉ and ⊡ side by side, centered in actor row
+        btn_y = self.PAD + (self.CELL_A - self.BTN_W) // 2
+        self._btn_marker.move(x, btn_y)
+        self._btn_thumb.move(x + self.BTN_W + 4, btn_y)
+        # + button centered in category row
+        cat_row_y = self.PAD + self.CELL_A + self.ROW_GAP
+        self._btn_add_cat.move(x, cat_row_y + (self.CELL_C - self.BTN_W) // 2)
+
+    # ── Paint ────────────────────────────────────
 
     def paintEvent(self, _event):
-        from PyQt6.QtGui import QPainter, QPen, QFont, QFontMetrics
+        from PyQt6.QtGui import QPainter, QPen, QFontMetrics
+        from PyQt6.QtCore import QRect as _R
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
-
         fm = QFontMetrics(p.font())
+
+        # ── Actor row ────────────────────────────
         x = self.PAD
-        for i, (actor, pix) in enumerate(zip(self._actors, self._pixmaps)):
+        for actor, pix in zip(self._actors, self._pixmaps):
             aid = actor['id']
-            selected = aid in self._selected
-
-            # card background
-            bg = QColor('#3c3200') if selected else QColor('#1e1e1e')
-            p.fillRect(x, self.PAD, self.TW, self.TH, bg)
-
-            # photo
+            sel = aid in self._selected
+            p.fillRect(x, self.PAD, self.TW, self.TH,
+                       QColor('#3c3200') if sel else QColor('#1e1e1e'))
             if pix and not pix.isNull():
                 p.drawPixmap(x, self.PAD, pix)
             else:
                 p.fillRect(x, self.PAD, self.TW, self.TH, QColor('#2a2a2a'))
-
-            # selection border
-            if selected:
-                pen = QPen(QColor('#e8b86d'), 2)
-                p.setPen(pen)
+            if sel:
+                from PyQt6.QtGui import QPen as _Pen
+                p.setPen(_Pen(QColor('#e8b86d'), 2))
                 p.setBrush(Qt.BrushStyle.NoBrush)
                 p.drawRect(x, self.PAD, self.TW - 1, self.TH - 1)
                 p.setPen(Qt.PenStyle.NoPen)
-
-            # name
-            p.setPen(QColor('#aaa') if selected else QColor('#555'))
-            name = fm.elidedText(actor.get('name', ''), Qt.TextElideMode.ElideRight, self.TW)
-            from PyQt6.QtCore import QRect as _QRect
-            p.drawText(_QRect(x, self.PAD + self.TH + 2, self.TW, 13),
-                       Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop, name)
+            p.setPen(QColor('#aaa') if sel else QColor('#555'))
+            p.drawText(_R(x, self.PAD + self.TH + 2, self.TW, 13),
+                       Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop,
+                       fm.elidedText(actor.get('name', ''), Qt.TextElideMode.ElideRight, self.TW))
             p.setPen(Qt.PenStyle.NoPen)
-
             x += self.TW + self.SPACING
+
+        # ── Category row ─────────────────────────
+        cat_y = self.PAD + self.CELL_A + self.ROW_GAP
+        x = self.PAD
+        for cat, cpix in zip(self._cats, self._cat_pixes):
+            cid = cat['id']
+            sel = cid in self._cat_sel
+            p.fillRect(x, cat_y, self.CW, self.CH,
+                       QColor('#001a3c') if sel else QColor('#141414'))
+            if cpix and not cpix.isNull():
+                p.drawPixmap(x, cat_y, cpix)
+            else:
+                p.fillRect(x, cat_y, self.CW, self.CH, QColor('#1a1a1a'))
+                p.setPen(QColor('#333'))
+                p.drawText(_R(x, cat_y, self.CW, self.CH), Qt.AlignmentFlag.AlignCenter, '?')
+                p.setPen(Qt.PenStyle.NoPen)
+            if sel:
+                from PyQt6.QtGui import QPen as _Pen
+                p.setPen(_Pen(QColor('#6db8e8'), 2))
+                p.setBrush(Qt.BrushStyle.NoBrush)
+                p.drawRect(x, cat_y, self.CW - 1, self.CH - 1)
+                p.setPen(Qt.PenStyle.NoPen)
+            p.setPen(QColor('#aaa') if sel else QColor('#555'))
+            p.drawText(_R(x, cat_y + self.CH + 2, self.CW, 12),
+                       Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop,
+                       fm.elidedText(cat.get('name', ''), Qt.TextElideMode.ElideRight, self.CW))
+            p.setPen(Qt.PenStyle.NoPen)
+            x += self.CW + self.SPACING
+
+    # ── Mouse ────────────────────────────────────
 
     def mousePressEvent(self, event):
+        # Actor row
         x = self.PAD
         for actor in self._actors:
-            if x <= event.pos().x() <= x + self.TW and \
-               self.PAD <= event.pos().y() <= self.PAD + self.TH:
-                aid = actor['id']
-                if aid in self._selected:
-                    self._selected.discard(aid)
-                else:
-                    self._selected.add(aid)
-                self.update()
+            if (x <= event.pos().x() <= x + self.TW and
+                    self.PAD <= event.pos().y() <= self.PAD + self.TH):
+                if event.button() == Qt.MouseButton.LeftButton:
+                    aid = actor['id']
+                    if aid in self._selected:
+                        self._selected.discard(aid)
+                    else:
+                        self._selected.add(aid)
+                    self.update()
                 return
             x += self.TW + self.SPACING
+
+        # Category row
+        cat_y = self.PAD + self.CELL_A + self.ROW_GAP
+        x = self.PAD
+        for cat in self._cats:
+            if (x <= event.pos().x() <= x + self.CW and
+                    cat_y <= event.pos().y() <= cat_y + self.CH):
+                if event.button() == Qt.MouseButton.LeftButton:
+                    cid = cat['id']
+                    if cid in self._cat_sel:
+                        self._cat_sel.discard(cid)
+                    else:
+                        self._cat_sel.add(cid)
+                    self.update()
+                elif event.button() == Qt.MouseButton.RightButton:
+                    self._delete_category_menu(cat)
+                return
+            x += self.CW + self.SPACING
+
         super().mousePressEvent(event)
+
+    # ── Event filter & reposition ────────────────
 
     def eventFilter(self, obj, event):
         if event.type() in (QEvent.Type.Resize, QEvent.Type.Move, QEvent.Type.Show):
@@ -468,15 +541,15 @@ class _FilmActorsOverlay(QWidget):
         tl = vc.mapToGlobal(vc.rect().topLeft())
         w = min(self._total_width(), vc.width() - 20)
         w = max(self.BTN_W * 2 + self.PAD * 2 + 4, w)
-        h = self.height()
         self.setFixedWidth(w)
         self._place_buttons()
-        self.move(tl.x() + 8, tl.y() + vc.height() - h - 8)
+        self.move(tl.x() + 8, tl.y() + vc.height() - self.TOTAL_H - 8)
+
+    # ── Data ─────────────────────────────────────
 
     def refresh(self, film_id: int | None):
-        self._actors.clear()
-        self._pixmaps.clear()
-        self._selected.clear()
+        self._actors.clear(); self._pixmaps.clear(); self._selected.clear()
+        self._cat_sel.clear()
 
         if film_id is None:
             self.hide()
@@ -498,13 +571,59 @@ class _FilmActorsOverlay(QWidget):
                     pix = scaled.copy(ox, oy, self.TW, self.TH)
             self._pixmaps.append(pix)
 
+        self._reload_categories()
         self._reposition()
         self.update()
         self.show()
         self.raise_()
 
+    def _reload_categories(self):
+        self._cats.clear(); self._cat_pixes.clear()
+        for cat in db.get_all_categories():
+            self._cats.append(cat)
+            path = cat.get('icon_path', '')
+            pix = None
+            if path:
+                raw = QPixmap(path)
+                if not raw.isNull():
+                    scaled = raw.scaled(self.CW, self.CH,
+                        Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                        Qt.TransformationMode.SmoothTransformation)
+                    ox = (scaled.width()  - self.CW) // 2
+                    oy = (scaled.height() - self.CH) // 2
+                    pix = scaled.copy(ox, oy, self.CW, self.CH)
+            self._cat_pixes.append(pix)
+
     def selected_actors(self) -> list:
         return [a for a in self._actors if a['id'] in self._selected]
+
+    def selected_categories(self) -> list:
+        return [c for c in self._cats if c['id'] in self._cat_sel]
+
+    # ── Category management ──────────────────────
+
+    def _add_category(self):
+        name, ok = QInputDialog.getText(self, "Categorie toevoegen", "Naam:")
+        if not ok or not name.strip():
+            return
+        icon_path, _ = QFileDialog.getOpenFileName(
+            self, "Kies icoon (optioneel)", "",
+            "Afbeeldingen (*.jpg *.jpeg *.png *.webp *.bmp *.gif *.tiff)"
+        )
+        db.create_category(name.strip(), icon_path)
+        self._reload_categories()
+        self._reposition()
+        self.update()
+
+    def _delete_category_menu(self, cat):
+        menu = QMenu(self)
+        act = menu.addAction(f"Verwijder  '{cat['name']}'")
+        if menu.exec(QCursor.pos()) == act:
+            db.delete_category(cat['id'])
+            self._cat_sel.discard(cat['id'])
+            self._reload_categories()
+            self._reposition()
+            self.update()
 
 
 # ─────────────────────────────────────────────
@@ -732,6 +851,12 @@ class CineMarker(QMainWindow):
         self._convert_worker = None
         self._thumb_worker = None
 
+        self._zoom_level = 0.0
+        self._pan_x = 0.0
+        self._pan_y = 0.0
+        self._drag_active = False
+        self._drag_last = None
+
         # Multi-tap seek state
         self._seek_count = 0
         self._seek_dir   = 0
@@ -823,7 +948,7 @@ class CineMarker(QMainWindow):
             QLineEdit:focus, QComboBox:focus { border-color: #e8b86d; }
             QComboBox::drop-down { border: none; }
             QComboBox::down-arrow { image: none; border: none; }
-            QTabWidget::pane { border: 1px solid #222; border-radius: 4px; }
+            QTabWidget::pane { border: none; }
             QTabBar::tab {
                 background: #1a1a1a;
                 padding: 6px 18px;
@@ -903,13 +1028,32 @@ class CineMarker(QMainWindow):
         self._player_tb.setStyleSheet("background: transparent;")
         _ph = QHBoxLayout(self._player_tb)
         _ph.setContentsMargins(0, 2, 0, 2)
-        _ph.setSpacing(4)
+        _ph.setSpacing(8)
+
+        self._lbl_time = QLabel("--:-- / --:--")
+        self._lbl_time.setStyleSheet(
+            "color: #555; font-size: 11px; font-family: 'Consolas', monospace;"
+        )
+        self._lbl_time.setFixedWidth(110)
+        _ph.addWidget(self._lbl_time)
+
+        btn_next = QPushButton("⏭")
+        btn_next.setFixedSize(26, 26)
+        btn_next.setToolTip("Volgende film in de lijst")
+        btn_next.setStyleSheet(
+            "QPushButton { background: transparent; border: none; color: #444; font-size: 14px; }"
+            "QPushButton:hover { color: #e8b86d; }"
+        )
+        btn_next.clicked.connect(self._next_film)
+        _ph.addWidget(btn_next)
+
         self._player_search = QLineEdit()
         self._player_search.setPlaceholderText("Acteur zoeken…")
         self._player_search.setFixedWidth(160)
         self._player_search.setFixedHeight(26)
         self._player_search.textChanged.connect(self._on_player_search)
         _ph.addWidget(self._player_search)
+
         self._player_tb.setVisible(False)
         self._corner_layout.insertWidget(0, self._player_tb)
 
@@ -1041,6 +1185,8 @@ class CineMarker(QMainWindow):
         self.video_container = QWidget()
         self.video_container.setStyleSheet("background: #000;")
         self.video_container.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.video_container.setMouseTracking(True)
+        self.video_container.installEventFilter(self)
         layout.addWidget(self.video_container, stretch=1)
 
         # Attach mpv to widget after show
@@ -1060,10 +1206,6 @@ class CineMarker(QMainWindow):
         v = QVBoxLayout(self.tabs)
         v.setContentsMargins(8, 8, 8, 8)
         v.setSpacing(6)
-
-        lbl = QLabel("MARKERS")
-        lbl.setObjectName("section")
-        v.addWidget(lbl)
 
         self.marker_list = QListWidget()
         self.marker_list.itemDoubleClicked.connect(self._on_marker_jump)
@@ -1171,10 +1313,13 @@ class CineMarker(QMainWindow):
     # ── Shortcuts ─────────────────────────────
 
     def _setup_shortcuts(self):
-        QShortcut(QKeySequence("Space"), self).activated.connect(self.toggle_play)
-        QShortcut(QKeySequence("Left"),  self).activated.connect(lambda: self._on_seek_key(-1))
-        QShortcut(QKeySequence("Right"), self).activated.connect(lambda: self._on_seek_key(1))
-        QShortcut(QKeySequence("M"), self).activated.connect(self.add_marker)
+        QShortcut(QKeySequence("Space"), self).activated.connect(self._shortcut_space)
+        QShortcut(QKeySequence("Left"),  self).activated.connect(self._shortcut_left)
+        QShortcut(QKeySequence("Right"), self).activated.connect(self._shortcut_right)
+        QShortcut(QKeySequence("M"), self).activated.connect(self._shortcut_m)
+        QShortcut(QKeySequence(Qt.Key.Key_Plus),  self).activated.connect(self._shortcut_plus)
+        QShortcut(QKeySequence(Qt.Key.Key_Minus), self).activated.connect(self._shortcut_minus)
+        QShortcut(QKeySequence(Qt.Key.Key_0), self).activated.connect(self._reset_zoom)
         QShortcut(QKeySequence("T"), self).activated.connect(self.export_thumbnail)
         QShortcut(QKeySequence("Ctrl+O"), self).activated.connect(self.open_file)
         QShortcut(QKeySequence("F11"),    self).activated.connect(self._toggle_fullscreen)
@@ -1200,6 +1345,7 @@ class CineMarker(QMainWindow):
                 self._updating_slider = True
                 self.timeline.setValue(int(pos / dur * 10000))
                 self._updating_slider = False
+                self._lbl_time.setText(f"{format_time(pos)} / {format_time(dur)}")
             if dur is not None and self._duration != dur:
                 self._duration = dur
         except Exception:
@@ -1216,7 +1362,10 @@ class CineMarker(QMainWindow):
             self._load_video(path)
 
     def _load_video(self, path):
+        self._reset_zoom()
         self._video_path = path
+        self._duration = 0
+        self._lbl_time.setText("--:-- / --:--")
         self._markers = load_markers(path)
         self._refresh_marker_list()
         self.player.play(path)
@@ -1229,6 +1378,40 @@ class CineMarker(QMainWindow):
         """Load video and switch to player tab"""
         self._load_video(path)
         self.main_tabs.setCurrentIndex(0)
+
+    def _next_film(self):
+        """Load the next film in the films panel list."""
+        film_list = self.films_panel.film_list
+        n = film_list.count()
+        if n == 0:
+            return
+        current_path = self._video_path or ''
+        # Find current index
+        current_idx = -1
+        for i in range(n):
+            item = film_list.item(i)
+            if item and not item.isHidden():
+                d = item.data(Qt.ItemDataRole.UserRole)
+                if d and d.get('path') == current_path:
+                    current_idx = i
+                    break
+        # Find next visible item
+        start = current_idx + 1
+        for i in range(start, n):
+            item = film_list.item(i)
+            if item and not item.isHidden():
+                d = item.data(Qt.ItemDataRole.UserRole)
+                if d:
+                    self._load_video(d['path'])
+                    return
+        # Wrap around
+        for i in range(0, start):
+            item = film_list.item(i)
+            if item and not item.isHidden():
+                d = item.data(Qt.ItemDataRole.UserRole)
+                if d:
+                    self._load_video(d['path'])
+                    return
 
     def _on_scene_jump(self, film_path, start_time):
         """Jump to a scene: load film if needed, seek to start"""
@@ -1321,23 +1504,30 @@ class CineMarker(QMainWindow):
         except Exception as e:
             self.status.showMessage(f"  Thumbnail mislukt: {e}")
 
-    def _quick_marker(self, actors: list):
-        """Create marker immediately with selected actors as name — no dialog."""
+    def _quick_marker(self, actors: list, categories: list):
+        """Create marker with selected actors and categories — no dialog."""
         if not self._video_path:
             return
         try:
             pos = self.player.time_pos or 0
         except Exception:
             pos = 0
-        if actors:
-            name = ', '.join(a['name'] for a in actors)
+        cat_names   = [c['name'] for c in categories]
+        actor_names = [a['name'] for a in actors]
+        if cat_names and actor_names:
+            name = ', '.join(cat_names) + ' — ' + ', '.join(actor_names)
+        elif cat_names:
+            name = ', '.join(cat_names)
+        elif actor_names:
+            name = ', '.join(actor_names)
         else:
             name = f"Marker {len(self._markers) + 1}"
         marker = {
-            'time': pos,
-            'name': name,
-            'actors': [a['id'] for a in actors],
-            'created': datetime.now().isoformat()
+            'time':       pos,
+            'name':       name,
+            'actors':     [a['id'] for a in actors],
+            'categories': [c['id'] for c in categories],
+            'created':    datetime.now().isoformat(),
         }
         self._markers.append(marker)
         self._markers.sort(key=lambda m: m['time'])
@@ -1345,9 +1535,104 @@ class CineMarker(QMainWindow):
         self._refresh_marker_list()
         self.status.showMessage(f"  Marker '{name}' op {format_time(pos)}")
 
-    def add_marker(self):
+    def _shortcut_space(self):
         if self.main_tabs.currentWidget() is self.sorter_panel:
-            return
+            self.sorter_panel._move_p()
+        else:
+            self.toggle_play()
+
+    def _shortcut_left(self):
+        if self.main_tabs.currentWidget() is self.sorter_panel:
+            self.sorter_panel._prev()
+        else:
+            self._on_seek_key(-1)
+
+    def _shortcut_right(self):
+        if self.main_tabs.currentWidget() is self.sorter_panel:
+            self.sorter_panel._next()
+        else:
+            self._on_seek_key(1)
+
+    def _shortcut_m(self):
+        if self.main_tabs.currentWidget() is self.sorter_panel:
+            self.sorter_panel._move_m()
+        else:
+            self.add_marker()
+
+    def _shortcut_plus(self):
+        if self.main_tabs.currentWidget() is self.sorter_panel:
+            self.sorter_panel._move_p()
+        else:
+            self._zoom_in_video()
+
+    def _shortcut_minus(self):
+        if self.main_tabs.currentWidget() is self.sorter_panel:
+            self.sorter_panel._move_m()
+        else:
+            self._zoom_out_video()
+
+    # ── Video zoom / pan ──────────────────────────
+
+    def _zoom_in_video(self):
+        self._zoom_level += 0.25
+        self._apply_zoom_pan()
+        self.video_container.setCursor(Qt.CursorShape.OpenHandCursor)
+
+    def _zoom_out_video(self):
+        self._zoom_level = max(0.0, self._zoom_level - 0.25)
+        if self._zoom_level == 0.0:
+            self._pan_x = 0.0
+            self._pan_y = 0.0
+            self.video_container.setCursor(Qt.CursorShape.ArrowCursor)
+        self._apply_zoom_pan()
+
+    def _reset_zoom(self):
+        self._zoom_level = 0.0
+        self._pan_x = 0.0
+        self._pan_y = 0.0
+        self._drag_active = False
+        self._apply_zoom_pan()
+        self.video_container.setCursor(Qt.CursorShape.ArrowCursor)
+
+    def _apply_zoom_pan(self):
+        try:
+            self.player['video-zoom']  = self._zoom_level
+            self.player['video-pan-x'] = self._pan_x
+            self.player['video-pan-y'] = self._pan_y
+        except Exception:
+            pass
+
+    def eventFilter(self, obj, event):
+        if obj is self.video_container:
+            t = event.type()
+            if t == QEvent.Type.MouseButtonPress:
+                if event.button() == Qt.MouseButton.LeftButton and self._zoom_level > 0:
+                    self._drag_active = True
+                    self._drag_last = event.pos()
+                    self.video_container.setCursor(Qt.CursorShape.ClosedHandCursor)
+                    return True
+            elif t == QEvent.Type.MouseMove:
+                if self._drag_active:
+                    delta = event.pos() - self._drag_last
+                    self._drag_last = event.pos()
+                    w = self.video_container.width()
+                    h = self.video_container.height()
+                    self._pan_x -= delta.x() / w
+                    self._pan_y -= delta.y() / h
+                    self._apply_zoom_pan()
+                    return True
+            elif t == QEvent.Type.MouseButtonRelease:
+                if event.button() == Qt.MouseButton.LeftButton and self._drag_active:
+                    self._drag_active = False
+                    self.video_container.setCursor(Qt.CursorShape.OpenHandCursor)
+                    return True
+            elif t == QEvent.Type.MouseButtonDblClick:
+                if event.button() == Qt.MouseButton.LeftButton and self._zoom_level > 0:
+                    self._reset_zoom()
+                    return True
+        return super().eventFilter(obj, event)
+
+    def add_marker(self):
         if not self._video_path:
             return
         try:

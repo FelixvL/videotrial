@@ -944,6 +944,7 @@ class ActorDetailView(QWidget):
     back_requested      = pyqtSignal()
     saved               = pyqtSignal()
     open_film_requested = pyqtSignal(str)
+    marker_jump_requested = pyqtSignal(str, float)
 
     KLEUR_OPTS   = [('', '—'), ('1', 'Wit'), ('2', 'Zwart'), ('3', 'Bruin')]
     GROOTTE_OPTS = [('', '—')] + [(str(i), '★' * i) for i in range(1, 11)]
@@ -1100,6 +1101,7 @@ class ActorDetailView(QWidget):
             "QListWidget::item { padding: 3px 4px; color: #777; font-size: 10px; }"
             "QListWidget::item:selected { background: #1e1600; color: #e8b86d; }"
         )
+        self.markers_list.itemDoubleClicked.connect(self._jump_to_marker)
         mv.addWidget(self.markers_list)
 
         fm_row = QHBoxLayout()
@@ -1146,6 +1148,11 @@ class ActorDetailView(QWidget):
         if f and f.get('file_path'):
             self.open_film_requested.emit(f['file_path'])
 
+    def _jump_to_marker(self, item):
+        d = item.data(Qt.ItemDataRole.UserRole)
+        if d and d.get('film_path'):
+            self.marker_jump_requested.emit(d['film_path'], float(d.get('time', 0)))
+
     def _refresh_films(self):
         self.films_list.clear()
         self.films_list.setIconSize(QSize(96, 54))
@@ -1169,11 +1176,22 @@ class ActorDetailView(QWidget):
         if not self._actor:
             return
         actor_id = self._actor['id']
+        cat_cache: dict = {}
         for film in db.get_films_for_actor(actor_id):
             for m in self._load_markers(film['file_path']):
                 if actor_id in (m.get('actors') or []):
                     t = self._fmt_time(m.get('time', 0))
-                    item = QListWidgetItem(f"{film['title']}  ·  {t}  —  {m.get('name', '')}")
+                    cat_ids = m.get('categories') or []
+                    if cat_ids:
+                        key = tuple(cat_ids)
+                        if key not in cat_cache:
+                            cat_cache[key] = db.get_categories_by_ids(cat_ids)
+                        cats = cat_cache[key]
+                        cat_str = ', '.join(c['name'] for c in cats)
+                        label = f"{film['title']}  ·  {t}  [{cat_str}]  {m.get('name', '')}"
+                    else:
+                        label = f"{film['title']}  ·  {t}  —  {m.get('name', '')}"
+                    item = QListWidgetItem(label)
                     item.setData(Qt.ItemDataRole.UserRole, {
                         'film_path': film['file_path'],
                         'time': m.get('time', 0),
@@ -1248,6 +1266,7 @@ class ActorsPanel(QWidget):
         self.player = player
         self._all_items: list = []
         self._zoom_level = self.ZOOM_DEFAULT_LEVEL
+        self._mode = 'in_db'
         self._cb_db: dict = {}
         self._cb_kleur: dict = {}
         self._cb_grootte: dict = {}
@@ -1291,6 +1310,20 @@ class ActorsPanel(QWidget):
         self.search_input.textChanged.connect(self._apply_filters)
         tb.addWidget(self.search_input)
 
+        self._btn_mode = QPushButton("BUITEN DB")
+        self._btn_mode.setCheckable(True)
+        self._btn_mode.setFixedHeight(28)
+        self._btn_mode.setStyleSheet(
+            "QPushButton { background: #0a0a0a; border: 1px solid #2a2a2a;"
+            "  border-radius: 4px; color: #444; font-size: 10px; padding: 0 8px; }"
+            "QPushButton:checked { background: #1a1a3a; border-color: #5555cc;"
+            "  color: #8888ff; }"
+            "QPushButton:hover { border-color: #555; color: #777; }"
+            "QPushButton:checked:hover { border-color: #8888ff; }"
+        )
+        self._btn_mode.toggled.connect(self._toggle_mode)
+        tb.addWidget(self._btn_mode)
+
         btn_folder = QPushButton("📁  Map")
         btn_folder.setFixedHeight(28)
         btn_folder.clicked.connect(self._pick_folder)
@@ -1333,8 +1366,15 @@ class ActorsPanel(QWidget):
         row_f = QHBoxLayout()
         row_f.setSpacing(10)
 
-        self._cb_db = self._cb_group(row_f, "DB:",
+        # DB group wrapped so it can be hidden in "buiten db" mode
+        self._db_group_widget = QWidget()
+        self._db_group_widget.setStyleSheet("background: transparent;")
+        _dbh = QHBoxLayout(self._db_group_widget)
+        _dbh.setContentsMargins(0, 0, 0, 0)
+        _dbh.setSpacing(6)
+        self._cb_db = self._cb_group(_dbh, "DB:",
             [("in_db", "✓"), ("not_in_db", "✗")])
+        row_f.addWidget(self._db_group_widget)
 
         self._cb_kleur = self._cb_group(row_f, "Kleur:",
             [("1", "Wit"), ("2", "Zwart"), ("3", "Bruin")])
@@ -1385,6 +1425,7 @@ class ActorsPanel(QWidget):
         self._detail_view.back_requested.connect(self._on_detail_back)
         self._detail_view.saved.connect(self._on_detail_saved)
         self._detail_view.open_film_requested.connect(self._on_detail_open_film)
+        self._detail_view.marker_jump_requested.connect(self.scene_jump_requested)
         self._stack.addWidget(self._detail_view)
 
     def _cb_group(self, layout: QHBoxLayout, label: str,
@@ -1396,7 +1437,7 @@ class ActorsPanel(QWidget):
         cbs = {}
         for val, text in options:
             cb = QCheckBox(text)
-            cb.stateChanged.connect(self._apply_filters)
+            cb.stateChanged.connect(self._on_filter_changed)
             layout.addWidget(cb)
             cbs[val] = cb
         return cbs
@@ -1457,6 +1498,38 @@ class ActorsPanel(QWidget):
 
         self._apply_filters()
 
+    def _toggle_mode(self, checked: bool):
+        self._mode = 'buiten_db' if checked else 'in_db'
+        self._db_group_widget.setVisible(not checked)
+        self._reset_filters()
+
+    def _on_filter_changed(self):
+        if self._mode == 'buiten_db':
+            sender = self.sender()
+            if sender and sender.isChecked():
+                # Radio behaviour: uncheck all other filter checkboxes
+                for group in (self._cb_kleur, self._cb_grootte,
+                               self._cb_rating, self._cb_dec):
+                    for cb in group.values():
+                        if cb is not sender:
+                            cb.blockSignals(True)
+                            cb.setChecked(False)
+                            cb.blockSignals(False)
+        self._apply_filters()
+
+    def _buiten_db_active(self):
+        """Return (category_key, value) of the single selected filter, or None."""
+        for cat_key, group in [
+            ('kleur',    self._cb_kleur),
+            ('grootte',  self._cb_grootte),
+            ('rating',   self._cb_rating),
+            ('decennia', self._cb_dec),
+        ]:
+            for val, cb in group.items():
+                if cb.isChecked():
+                    return cat_key, val
+        return None
+
     def _reset_filters(self):
         self.search_input.blockSignals(True)
         self.search_input.clear()
@@ -1474,6 +1547,10 @@ class ActorsPanel(QWidget):
         return {val for val, cb in cb_group.items() if cb.isChecked()}
 
     def _apply_filters(self):
+        if self._mode == 'buiten_db':
+            self._apply_filters_buiten_db()
+            return
+
         query     = self.search_input.text().lower()
         act_db    = self._active(self._cb_db)
         act_kleur = self._active(self._cb_kleur)
@@ -1514,6 +1591,32 @@ class ActorsPanel(QWidget):
 
             item.setHidden(hide)
 
+    def _apply_filters_buiten_db(self):
+        active = self._buiten_db_active()
+        query  = self.search_input.text().lower()
+        for item in self._all_items:
+            data = item.data(Qt.ItemDataRole.UserRole)
+            if not data:
+                item.setHidden(True)
+                continue
+            meta = data.get('meta', {})
+            stem = data.get('stem', '').lower()
+            hide = False
+            if query:
+                name_match = (
+                    query in stem or
+                    query in meta.get('voornaam', '').lower() or
+                    query in meta.get('achternaam', '').lower()
+                )
+                if not name_match:
+                    hide = True
+            if not hide and active:
+                cat_key, _ = active
+                # Show only actors that DON'T have this field set yet
+                if meta.get(cat_key, ''):
+                    hide = True
+            item.setHidden(hide)
+
     # ── Zoom ─────────────────────────────────────
 
     def _zoom_size(self):
@@ -1544,7 +1647,34 @@ class ActorsPanel(QWidget):
 
     def _on_item_clicked(self, item):
         data = item.data(Qt.ItemDataRole.UserRole)
-        if not data or not data.get('in_db'):
+        if not data:
+            return
+
+        if self._mode == 'buiten_db':
+            active = self._buiten_db_active()
+            if active is None:
+                return
+            cat_key, val = active
+            actor = data.get('actor')
+            if not actor:
+                actor_id = db.create_actor(data.get('stem', ''))
+                actor = db.get_actor(actor_id)
+                if not actor:
+                    return
+            meta = dict(data.get('meta', {}))
+            meta[cat_key] = val
+            db.update_actor_meta(actor['id'], meta)
+            # Update item so card re-renders and filter hides it
+            new_data = dict(data)
+            new_data['meta']   = meta
+            new_data['actor']  = actor
+            new_data['in_db']  = bool(meta.get('voornaam') or meta.get('achternaam'))
+            item.setData(Qt.ItemDataRole.UserRole, new_data)
+            self._apply_filters()
+            return
+
+        # in_db mode: copy full name to clipboard
+        if not data.get('in_db'):
             return
         meta = data.get('meta', {})
         voornaam   = meta.get('voornaam', '')

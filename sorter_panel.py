@@ -179,7 +179,7 @@ class SorterPanel(QWidget):
         foot.setStyleSheet("QFrame { background: #080808; border-top: 1px solid #141414; }")
         fh = QHBoxLayout(foot)
         fh.setContentsMargins(12, 0, 12, 0)
-        hint = QLabel("p of + of → of Spatie → map p     m of − of ← → map m")
+        hint = QLabel("← →  bladeren     p / + / Spatie → map p     m / − → map m")
         hint.setStyleSheet("color: #2a2a2a; font-size: 10px;")
         fh.addWidget(hint)
         fh.addStretch()
@@ -251,14 +251,31 @@ class SorterPanel(QWidget):
     def _move_m(self):
         self._move_to('m')
 
+    # ── Navigate ────────────────────────────────
+
+    def _prev(self):
+        if not self._photos:
+            return
+        self._index = (self._index - 1) % len(self._photos)
+        self._show_current()
+
+    def _next(self):
+        if not self._photos:
+            return
+        self._index = (self._index + 1) % len(self._photos)
+        self._show_current()
+
     # ── Keyboard ────────────────────────────────
 
     def keyPressEvent(self, event: QKeyEvent):
         k = event.key()
-        if k in (Qt.Key.Key_P, Qt.Key.Key_Plus, Qt.Key.Key_Right,
-                 Qt.Key.Key_Space, Qt.Key.Key_Return):
+        if k in (Qt.Key.Key_P, Qt.Key.Key_Plus, Qt.Key.Key_Space, Qt.Key.Key_Return):
             self._move_p()
-        elif k in (Qt.Key.Key_M, Qt.Key.Key_Minus, Qt.Key.Key_Left):
+        elif k in (Qt.Key.Key_M, Qt.Key.Key_Minus):
             self._move_m()
+        elif k == Qt.Key.Key_Right:
+            self._next()
+        elif k == Qt.Key.Key_Left:
+            self._prev()
         else:
             super().keyPressEvent(event)

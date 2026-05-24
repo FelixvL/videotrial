@@ -69,6 +69,12 @@ def init_db():
             film_id     INTEGER NOT NULL REFERENCES films(id) ON DELETE CASCADE,
             PRIMARY KEY (actor_id, film_id)
         );
+
+        CREATE TABLE IF NOT EXISTS categories (
+            id        INTEGER PRIMARY KEY AUTOINCREMENT,
+            name      TEXT NOT NULL,
+            icon_path TEXT DEFAULT ''
+        );
     """)
 
     # Migration: thumbnail column
@@ -391,6 +397,49 @@ def link_scene_actor(scene_id, actor_id):
 def unlink_scene_actor(scene_id, actor_id):
     conn = get_connection()
     conn.execute("DELETE FROM scene_actors WHERE scene_id=? AND actor_id=?", (scene_id, actor_id))
+    conn.commit()
+    conn.close()
+
+
+def get_all_categories():
+    conn = get_connection()
+    rows = conn.execute("SELECT * FROM categories ORDER BY name COLLATE NOCASE").fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def create_category(name, icon_path=''):
+    conn = get_connection()
+    c = conn.cursor()
+    c.execute("INSERT INTO categories (name, icon_path) VALUES (?, ?)", (name, icon_path))
+    cat_id = c.lastrowid
+    conn.commit()
+    conn.close()
+    return cat_id
+
+
+def get_categories_by_ids(ids: list) -> list:
+    if not ids:
+        return []
+    conn = get_connection()
+    placeholders = ','.join('?' for _ in ids)
+    rows = conn.execute(
+        f"SELECT * FROM categories WHERE id IN ({placeholders})", ids
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def update_category(cat_id, name, icon_path=''):
+    conn = get_connection()
+    conn.execute("UPDATE categories SET name=?, icon_path=? WHERE id=?", (name, icon_path, cat_id))
+    conn.commit()
+    conn.close()
+
+
+def delete_category(cat_id):
+    conn = get_connection()
+    conn.execute("DELETE FROM categories WHERE id=?", (cat_id,))
     conn.commit()
     conn.close()
 
