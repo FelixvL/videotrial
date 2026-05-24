@@ -330,21 +330,22 @@ class _PanelOverlay(QFrame):
     def __init__(self, parent):
         super().__init__(parent)
         self.setFixedWidth(320)
+        # Native window so it sits in the HWND z-order above mpv's surface
+        self.setAttribute(Qt.WidgetAttribute.WA_NativeWindow, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setAutoFillBackground(False)
-        self.setStyleSheet("""
-            QFrame#panelOverlay { background: transparent; border: none; }
-            QTabWidget#panelTabs { background: transparent; }
-            QTabWidget#panelTabs::pane { background: transparent; border: none; }
-        """)
+        self.setStyleSheet("background: transparent; border: none;")
         parent.installEventFilter(self)
         v = QVBoxLayout(self)
         v.setContentsMargins(0, 0, 0, 0)
         v.setSpacing(0)
         self.tab_widget = QTabWidget()
-        self.tab_widget.setObjectName("panelTabs")
         self.tab_widget.setAutoFillBackground(False)
+        self.tab_widget.setStyleSheet(
+            "QTabWidget { background: transparent; }"
+            "QTabWidget::pane { background: transparent; border: none; }"
+        )
         v.addWidget(self.tab_widget)
-        self.setObjectName("panelOverlay")
         self._reposition()
 
     def eventFilter(self, obj, event):
@@ -552,13 +553,13 @@ class CineMarker(QMainWindow):
         pv.addWidget(self.timeline)
 
         # Floating right panel (markers + converter)
-        self._panel = _PanelOverlay(player_widget)
+        self._panel = _PanelOverlay(self.video_container)
         self.tabs = self._panel.tab_widget
         self._build_markers_tab()
         self._build_converter_tab()
 
         # Floating actor-link overlay (positioned over player_widget)
-        self._actor_overlay = _ActorLinkOverlay(player_widget)
+        self._actor_overlay = _ActorLinkOverlay(self.video_container)
         self._actor_overlay.link_requested.connect(self._link_actor_to_film)
 
         self.main_tabs.addTab(player_widget, "▶  SPELER")
@@ -643,6 +644,7 @@ class CineMarker(QMainWindow):
     def _build_markers_tab(self):
         w = QWidget()
         w.setAutoFillBackground(False)
+        w.setStyleSheet("QWidget { background: transparent; }")
         v = QVBoxLayout(w)
         v.setContentsMargins(8, 8, 8, 8)
         v.setSpacing(6)
@@ -680,6 +682,7 @@ class CineMarker(QMainWindow):
     def _build_converter_tab(self):
         w = QWidget()
         w.setAutoFillBackground(False)
+        w.setStyleSheet("QWidget { background: transparent; }")
         v = QVBoxLayout(w)
         v.setContentsMargins(8, 8, 8, 8)
         v.setSpacing(8)
@@ -884,6 +887,8 @@ class CineMarker(QMainWindow):
     # ── Markers ───────────────────────────────
 
     def add_marker(self):
+        if self.main_tabs.currentWidget() is self.sorter_panel:
+            return
         if not self._video_path:
             return
         try:
