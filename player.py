@@ -422,12 +422,10 @@ class _SearchPage(QWidget):
         v.addWidget(self._scroll)
 
     def update_results(self, actors: list):
-        # Swap inner widget to avoid layout-detach issues
-        old = self._inner
+        # setWidget() deletes the previous widget automatically — don't call deleteLater
         self._inner = QWidget()
         self._inner.setStyleSheet("background: transparent;")
         self._scroll.setWidget(self._inner)
-        old.deleteLater()
 
         from PyQt6.QtWidgets import QGridLayout
         grid = QGridLayout(self._inner)
