@@ -396,3 +396,38 @@ def get_actors_for_scene(scene_id):
 
 # Initialize on import
 init_db()
+
+
+# ── Auto-link actor photos ────────────────────
+
+def auto_link_actor_photos():
+    """Scan acteurfotos/ and link any photo whose stem matches an actor name."""
+    import os
+    folder = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'acteurfotos')
+    if not os.path.isdir(folder):
+        return
+    exts = {'.jpg', '.jpeg', '.png', '.webp', '.bmp', '.gif', '.tiff', '.tif'}
+    photos_by_stem = {}
+    for f in Path(folder).iterdir():
+        if f.suffix.lower() in exts:
+            photos_by_stem[f.stem.lower()] = str(f)
+
+    conn = get_connection()
+    actors = conn.execute("SELECT id, name FROM actors").fetchall()
+    for actor in actors:
+        stem = actor['name'].lower()
+        if stem not in photos_by_stem:
+            continue
+        existing = conn.execute(
+            "SELECT id FROM actor_photos WHERE actor_id=?", (actor['id'],)
+        ).fetchone()
+        if not existing:
+            conn.execute(
+                "INSERT INTO actor_photos (actor_id, photo_path) VALUES (?, ?)",
+                (actor['id'], photos_by_stem[stem])
+            )
+    conn.commit()
+    conn.close()
+
+
+auto_link_actor_photos()
