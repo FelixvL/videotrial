@@ -26,7 +26,8 @@ from PyQt6.QtWidgets import (
     QPushButton, QSlider, QLabel, QFileDialog, QListWidget,
     QListWidgetItem, QLineEdit, QComboBox, QSpinBox,
     QProgressBar, QTabWidget, QStackedWidget, QFrame, QMessageBox,
-    QInputDialog, QSizePolicy, QStatusBar, QScrollArea, QStyle, QMenu
+    QInputDialog, QSizePolicy, QStatusBar, QScrollArea, QStyle, QMenu,
+    QDialog, QDialogButtonBox
 )
 from PyQt6.QtCore import (
     Qt, QTimer, pyqtSignal, QObject, QThread, QSize, QEvent
@@ -67,6 +68,16 @@ def format_time(seconds: float) -> str:
     s = int(seconds % 60)
     ms = int((seconds % 1) * 1000)
     return f"{h:02d}:{m:02d}:{s:02d}.{ms:03d}"
+
+
+def _fmt_hms(seconds: float) -> str:
+    """HH:MM:SS without milliseconds, for the player time label."""
+    if seconds is None or seconds < 0:
+        return "00:00:00"
+    h = int(seconds // 3600)
+    m = int((seconds % 3600) // 60)
+    s = int(seconds % 60)
+    return f"{h:02d}:{m:02d}:{s:02d}"
 
 
 def parse_time(time_str: str) -> float:
@@ -558,6 +569,7 @@ class _FilmActorsOverlay(QWidget):
 
         for actor in db.get_actors_for_film(film_id):
             self._actors.append(actor)
+            self._selected.add(actor['id'])   # pre-select all film actors
             photos = db.get_actor_photos(actor['id'])
             path = photos[0]['photo_path'] if photos else ''
             pix = None
@@ -1035,7 +1047,7 @@ class CineMarker(QMainWindow):
         self._lbl_time.setStyleSheet(
             "color: #555; font-size: 11px; font-family: 'Consolas', monospace;"
         )
-        self._lbl_time.setFixedWidth(110)
+        self._lbl_time.setFixedWidth(130)
         _ph.addWidget(self._lbl_time)
 
         btn_next = QPushButton("⏭")
@@ -1317,7 +1329,9 @@ class CineMarker(QMainWindow):
         QShortcut(QKeySequence("Space"), self).activated.connect(self._shortcut_space)
         QShortcut(QKeySequence("Left"),  self).activated.connect(self._shortcut_left)
         QShortcut(QKeySequence("Right"), self).activated.connect(self._shortcut_right)
-        QShortcut(QKeySequence("M"), self).activated.connect(self._shortcut_m)
+        QShortcut(QKeySequence("L"),     self).activated.connect(self._shortcut_l)
+        QShortcut(QKeySequence("M"),     self).activated.connect(self._shortcut_m)
+        QShortcut(QKeySequence("N"),     self).activated.connect(self._shortcut_n)
         QShortcut(QKeySequence(Qt.Key.Key_Plus),  self).activated.connect(self._shortcut_plus)
         QShortcut(QKeySequence(Qt.Key.Key_Minus), self).activated.connect(self._shortcut_minus)
         QShortcut(QKeySequence(Qt.Key.Key_0), self).activated.connect(self._reset_zoom)
@@ -1346,7 +1360,7 @@ class CineMarker(QMainWindow):
                 self._updating_slider = True
                 self.timeline.setValue(int(pos / dur * 10000))
                 self._updating_slider = False
-                self._lbl_time.setText(f"{format_time(pos)} / {format_time(dur)}")
+                self._lbl_time.setText(f"{_fmt_hms(pos)} / {_fmt_hms(dur)}")
             if dur is not None and self._duration != dur:
                 self._duration = dur
         except Exception:
@@ -1521,23 +1535,36 @@ class CineMarker(QMainWindow):
             self.status.showMessage(f"  Thumbnail mislukt: {e}")
 
     def _quick_marker(self, actors: list, categories: list):
-        """Create marker with selected actors and categories — no dialog."""
+        """Create marker — actor + category both required."""
         if not self._video_path:
             return
+
+        # ── Validate actor ───────────────────────
+        if not actors:
+            self.status.showMessage("  Selecteer eerst een acteur")
+            return
+
+        # ── Validate / pick category ─────────────
+        if not categories:
+            cats = db.get_all_categories()
+            if not cats:
+                self.status.showMessage("  Maak eerst een categorie aan in het database-tabblad")
+                return
+            chosen = self._pick_category_dialog(cats)
+            if chosen is None:
+                return          # user cancelled
+            categories = [chosen]
+            self._actors_overlay._cat_sel.add(chosen['id'])
+
         try:
             pos = self.player.time_pos or 0
         except Exception:
             pos = 0
+
         cat_names   = [c['name'] for c in categories]
         actor_names = [a['name'] for a in actors]
-        if cat_names and actor_names:
-            name = ', '.join(cat_names) + ' — ' + ', '.join(actor_names)
-        elif cat_names:
-            name = ', '.join(cat_names)
-        elif actor_names:
-            name = ', '.join(actor_names)
-        else:
-            name = f"Marker {len(self._markers) + 1}"
+        name = ', '.join(cat_names) + ' — ' + ', '.join(actor_names)
+
         marker = {
             'time':       pos,
             'name':       name,
@@ -1549,7 +1576,63 @@ class CineMarker(QMainWindow):
         self._markers.sort(key=lambda m: m['time'])
         save_markers(self._video_path, self._markers)
         self._refresh_marker_list()
+        self._actors_overlay._cat_sel.clear()
+        self._actors_overlay.update()
         self.status.showMessage(f"  Marker '{name}' op {format_time(pos)}")
+
+    def _pick_category_dialog(self, cats: list) -> dict | None:
+        """Small popup to pick one category. Returns the chosen dict or None."""
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Kies een categorie")
+        dlg.setModal(True)
+        dlg.setStyleSheet("""
+            QDialog { background: #111; }
+            QPushButton {
+                background: #1a1a1a;
+                border: 1px solid #333;
+                border-radius: 6px;
+                color: #ccc;
+                font-size: 13px;
+                padding: 8px 18px;
+                min-width: 120px;
+            }
+            QPushButton:hover  { background: #252525; border-color: #e8b86d; color: #e8b86d; }
+            QPushButton:pressed { background: #e8b86d; color: #000; }
+            QLabel { color: #666; font-size: 10px; letter-spacing: 3px; }
+        """)
+
+        v = QVBoxLayout(dlg)
+        v.setContentsMargins(20, 16, 20, 16)
+        v.setSpacing(10)
+
+        lbl = QLabel("CATEGORIE")
+        lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        v.addWidget(lbl)
+
+        chosen = [None]
+
+        for cat in cats:
+            icon_path = cat.get('icon_path', '')
+            label = cat['name']
+            btn = QPushButton(label)
+            if icon_path:
+                from PyQt6.QtGui import QIcon
+                ico = QIcon(icon_path)
+                if not ico.isNull():
+                    btn.setIcon(ico)
+            btn.clicked.connect(lambda _, c=cat: (chosen.__setitem__(0, c), dlg.accept()))
+            v.addWidget(btn)
+
+        cancel = QPushButton("Annuleren")
+        cancel.setStyleSheet(
+            "QPushButton { color: #444; border-color: #222; }"
+            "QPushButton:hover { color: #888; border-color: #444; }"
+        )
+        cancel.clicked.connect(dlg.reject)
+        v.addWidget(cancel)
+
+        dlg.exec()
+        return chosen[0]
 
     def _shortcut_space(self):
         if self.main_tabs.currentWidget() is self.sorter_panel:
@@ -1561,19 +1644,27 @@ class CineMarker(QMainWindow):
         if self.main_tabs.currentWidget() is self.sorter_panel:
             self.sorter_panel._prev()
         else:
-            self._on_seek_key(-1)
+            self.seek_relative(-5)
 
     def _shortcut_right(self):
         if self.main_tabs.currentWidget() is self.sorter_panel:
             self.sorter_panel._next()
         else:
+            self.seek_relative(5)
+
+    def _shortcut_l(self):
+        if self.main_tabs.currentWidget() is not self.sorter_panel:
             self._on_seek_key(1)
 
     def _shortcut_m(self):
         if self.main_tabs.currentWidget() is self.sorter_panel:
             self.sorter_panel._move_m()
         else:
-            self.add_marker()
+            self._on_seek_key(1)
+
+    def _shortcut_n(self):
+        if self.main_tabs.currentWidget() is not self.sorter_panel:
+            self._on_seek_key(-1)
 
     def _shortcut_plus(self):
         if self.main_tabs.currentWidget() is self.sorter_panel:
@@ -1674,9 +1765,42 @@ class CineMarker(QMainWindow):
 
     def _refresh_marker_list(self):
         self.marker_list.clear()
-        for m in self._markers:
-            item = QListWidgetItem(f"  {format_time(m['time'])}   {m['name']}")
+        for idx, m in enumerate(self._markers):
+            item = QListWidgetItem()
             self.marker_list.addItem(item)
+
+            row_w = QWidget()
+            row_w.setStyleSheet("background: transparent;")
+            rh = QHBoxLayout(row_w)
+            rh.setContentsMargins(6, 0, 4, 0)
+            rh.setSpacing(6)
+
+            lbl = QLabel(f"{format_time(m['time'])}   {m['name']}")
+            lbl.setStyleSheet("color: #ccc; font-size: 12px; background: transparent;")
+            rh.addWidget(lbl, stretch=1)
+
+            btn_del = QPushButton("✕")
+            btn_del.setFixedSize(20, 20)
+            btn_del.setStyleSheet("""
+                QPushButton {
+                    background: transparent;
+                    border: none;
+                    color: #444;
+                    font-size: 11px;
+                }
+                QPushButton:hover { color: #e05555; }
+            """)
+            btn_del.clicked.connect(lambda _, i=idx: self._delete_marker_by_index(i))
+            rh.addWidget(btn_del)
+
+            item.setSizeHint(row_w.sizeHint())
+            self.marker_list.setItemWidget(item, row_w)
+
+    def _delete_marker_by_index(self, idx: int):
+        if 0 <= idx < len(self._markers):
+            self._markers.pop(idx)
+            save_markers(self._video_path, self._markers)
+            self._refresh_marker_list()
 
     def _on_marker_jump(self, item=None):
         row = self.marker_list.currentRow()
