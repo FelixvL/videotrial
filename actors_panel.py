@@ -941,8 +941,9 @@ class ActorDetailPanel(QWidget):
 
 class ActorDetailView(QWidget):
 
-    back_requested = pyqtSignal()
-    saved          = pyqtSignal()
+    back_requested      = pyqtSignal()
+    saved               = pyqtSignal()
+    open_film_requested = pyqtSignal(str)
 
     KLEUR_OPTS   = [('', '—'), ('1', 'Wit'), ('2', 'Zwart'), ('3', 'Bruin')]
     GROOTTE_OPTS = [('', '—')] + [(str(i), '★' * i) for i in range(1, 11)]
@@ -1077,9 +1078,36 @@ class ActorDetailView(QWidget):
         fv.addLayout(fl_h)
 
         self.films_list = QListWidget()
+        self.films_list.itemDoubleClicked.connect(self._open_film)
         fv.addWidget(self.films_list)
 
-        right.addWidget(films_frame, stretch=1)
+        # Markers linked to this actor
+        markers_frame = QFrame()
+        markers_frame.setStyleSheet(
+            "QFrame { background: #111; border: 1px solid #1e1e1e; border-radius: 6px; }"
+        )
+        mv = QVBoxLayout(markers_frame)
+        mv.setContentsMargins(16, 12, 16, 12)
+        mv.setSpacing(6)
+
+        mk_lbl = QLabel("MARKERS")
+        mk_lbl.setStyleSheet("color: #444; font-size: 10px; letter-spacing: 3px;")
+        mv.addWidget(mk_lbl)
+
+        self.markers_list = QListWidget()
+        self.markers_list.setStyleSheet(
+            "QListWidget { background: #0d0d0d; border: none; }"
+            "QListWidget::item { padding: 3px 4px; color: #777; font-size: 10px; }"
+            "QListWidget::item:selected { background: #1e1600; color: #e8b86d; }"
+        )
+        mv.addWidget(self.markers_list)
+
+        fm_row = QHBoxLayout()
+        fm_row.setSpacing(12)
+        fm_row.addWidget(films_frame, stretch=1)
+        fm_row.addWidget(markers_frame, stretch=1)
+
+        right.addLayout(fm_row, stretch=1)
         ch.addLayout(right, stretch=1)
         v.addWidget(content, stretch=1)
 
@@ -1111,6 +1139,12 @@ class ActorDetailView(QWidget):
         self._set_combo(self.cmb_dec,     meta.get('decennia', ''))
 
         self._refresh_films()
+        self._refresh_markers()
+
+    def _open_film(self, item):
+        f = item.data(Qt.ItemDataRole.UserRole)
+        if f and f.get('file_path'):
+            self.open_film_requested.emit(f['file_path'])
 
     def _refresh_films(self):
         self.films_list.clear()
@@ -1129,6 +1163,41 @@ class ActorDetailView(QWidget):
                 item.setText(f"  {f['title']}")
                 item.setData(Qt.ItemDataRole.UserRole, f)
                 self.films_list.addItem(item)
+
+    def _refresh_markers(self):
+        self.markers_list.clear()
+        if not self._actor:
+            return
+        actor_id = self._actor['id']
+        for film in db.get_films_for_actor(actor_id):
+            for m in self._load_markers(film['file_path']):
+                if actor_id in (m.get('actors') or []):
+                    t = self._fmt_time(m.get('time', 0))
+                    item = QListWidgetItem(f"{film['title']}  ·  {t}  —  {m.get('name', '')}")
+                    item.setData(Qt.ItemDataRole.UserRole, {
+                        'film_path': film['file_path'],
+                        'time': m.get('time', 0),
+                    })
+                    self.markers_list.addItem(item)
+
+    @staticmethod
+    def _load_markers(video_path: str) -> list:
+        p = Path(video_path)
+        mf = p.parent / f".{p.stem}_markers.json"
+        if mf.exists():
+            try:
+                with open(str(mf), 'r') as f:
+                    return json.load(f)
+            except Exception:
+                return []
+        return []
+
+    @staticmethod
+    def _fmt_time(seconds: float) -> str:
+        s = int(seconds)
+        if s >= 3600:
+            return f"{s // 3600:02d}:{(s % 3600) // 60:02d}:{s % 60:02d}"
+        return f"{s // 60:02d}:{s % 60:02d}"
 
     def _set_combo(self, combo: QComboBox, value: str):
         for i in range(combo.count()):
@@ -1315,6 +1384,7 @@ class ActorsPanel(QWidget):
         self._detail_view = ActorDetailView()
         self._detail_view.back_requested.connect(self._on_detail_back)
         self._detail_view.saved.connect(self._on_detail_saved)
+        self._detail_view.open_film_requested.connect(self._on_detail_open_film)
         self._stack.addWidget(self._detail_view)
 
     def _cb_group(self, layout: QHBoxLayout, label: str,
@@ -1492,6 +1562,10 @@ class ActorsPanel(QWidget):
 
     def _on_detail_saved(self):
         self.refresh()
+
+    def _on_detail_open_film(self, path):
+        self.search_input.clear()
+        self.open_film_requested.emit(path)
 
     # ── Import ───────────────────────────────────
 

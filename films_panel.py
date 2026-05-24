@@ -3,6 +3,7 @@
 CineMarker — Films browser panel
 """
 
+import os
 from pathlib import Path
 
 from PyQt6.QtWidgets import (
@@ -11,7 +12,7 @@ from PyQt6.QtWidgets import (
     QFileDialog, QStyledItemDelegate, QStyle
 )
 from PyQt6.QtCore import Qt, QSize, QRect, pyqtSignal
-from PyQt6.QtGui import QColor, QFont, QPainter, QPen
+from PyQt6.QtGui import QColor, QFont, QPainter, QPen, QPixmap
 
 import database as db
 
@@ -28,6 +29,37 @@ VIDEO_EXTS = {
 # ─────────────────────────────────────────────
 
 class FilmDelegate(QStyledItemDelegate):
+
+    THUMB_W = 85
+    ROW_H   = 54
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._cache: dict = {}
+
+    def invalidate_cache(self):
+        self._cache.clear()
+
+    def _get_thumb(self, path: str) -> QPixmap | None:
+        if path in self._cache:
+            return self._cache[path]
+        if not path or not os.path.exists(path):
+            self._cache[path] = None
+            return None
+        raw = QPixmap(path)
+        if raw.isNull():
+            self._cache[path] = None
+            return None
+        scaled = raw.scaled(
+            self.THUMB_W, self.ROW_H,
+            Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        ox = (scaled.width()  - self.THUMB_W) // 2
+        oy = (scaled.height() - self.ROW_H)   // 2
+        pix = scaled.copy(ox, oy, self.THUMB_W, self.ROW_H)
+        self._cache[path] = pix
+        return pix
 
     def paint(self, painter, option, index):
         data = index.data(Qt.ItemDataRole.UserRole)
@@ -47,18 +79,24 @@ class FilmDelegate(QStyledItemDelegate):
         elif hovered:
             painter.fillRect(r, QColor('#111111'))
 
-        # Play icon column (left)
-        play_r = QRect(r.x(), r.y(), 48, r.height())
-        painter.fillRect(play_r, QColor('#0c0c0c'))
-        pf = QFont(painter.font())
-        pf.setPointSize(14)
-        painter.setFont(pf)
-        painter.setPen(QColor('#e8b86d') if selected else QColor('#2a2a2a'))
-        painter.drawText(play_r, Qt.AlignmentFlag.AlignCenter, '▶')
+        # Left column: thumbnail or play icon
+        thumb_r = QRect(r.x(), r.y(), self.THUMB_W, r.height())
+        pix = self._get_thumb(data.get('thumbnail', ''))
+        if pix:
+            painter.drawPixmap(r.x(), r.y() + (r.height() - pix.height()) // 2, pix)
+            if selected:
+                painter.fillRect(thumb_r, QColor(232, 184, 109, 40))
+        else:
+            painter.fillRect(thumb_r, QColor('#0c0c0c'))
+            pf = QFont(painter.font())
+            pf.setPointSize(14)
+            painter.setFont(pf)
+            painter.setPen(QColor('#e8b86d') if selected else QColor('#2a2a2a'))
+            painter.drawText(thumb_r, Qt.AlignmentFlag.AlignCenter, '▶')
 
         # Divider
         painter.setPen(QPen(QColor('#1a1a1a'), 1))
-        painter.drawLine(r.x() + 48, r.y(), r.x() + 48, r.bottom())
+        painter.drawLine(r.x() + self.THUMB_W, r.y(), r.x() + self.THUMB_W, r.bottom())
 
         # Film name
         nf = QFont(painter.font())
@@ -66,7 +104,7 @@ class FilmDelegate(QStyledItemDelegate):
         nf.setBold(False)
         painter.setFont(nf)
         painter.setPen(QColor('#e8b86d') if selected else QColor('#cccccc'))
-        name_r = QRect(r.x() + 60, r.y(), r.width() - 220, r.height())
+        name_r = QRect(r.x() + self.THUMB_W + 12, r.y(), r.width() - self.THUMB_W - 180, r.height())
         painter.drawText(
             name_r,
             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
@@ -87,12 +125,12 @@ class FilmDelegate(QStyledItemDelegate):
 
         # Bottom separator
         painter.setPen(QPen(QColor('#141414'), 1))
-        painter.drawLine(r.x() + 49, r.bottom(), r.right(), r.bottom())
+        painter.drawLine(r.x() + self.THUMB_W + 1, r.bottom(), r.right(), r.bottom())
 
         painter.restore()
 
     def sizeHint(self, option, index):
-        return QSize(max(option.rect.width(), 200), 48)
+        return QSize(max(option.rect.width(), 200), self.ROW_H)
 
 
 # ─────────────────────────────────────────────
@@ -210,10 +248,13 @@ class FilmsPanel(QWidget):
     def _scan_folder(self, folder):
         self.film_list.clear()
         self._all_items.clear()
+        self.film_list.itemDelegate().invalidate_cache()
 
         folder_path = Path(folder)
         if not folder_path.exists():
             return
+
+        film_thumbs = {f['file_path']: f.get('thumbnail', '') for f in db.get_all_films()}
 
         films = sorted(
             (f for f in folder_path.iterdir() if f.suffix.lower() in VIDEO_EXTS),
@@ -231,11 +272,12 @@ class FilmsPanel(QWidget):
             meta = f"{ext}  ·  {size_str}" if size_str else ext
 
             item = QListWidgetItem()
-            item.setSizeHint(QSize(100, 48))
+            item.setSizeHint(QSize(100, FilmDelegate.ROW_H))
             item.setData(Qt.ItemDataRole.UserRole, {
                 'path': str(fp),
                 'name': fp.stem,
                 'meta': meta,
+                'thumbnail': film_thumbs.get(str(fp), ''),
             })
             self.film_list.addItem(item)
             self._all_items.append(item)

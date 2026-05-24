@@ -686,7 +686,7 @@ class _PanelOverlay(QWidget):
         self._stack.setStyleSheet("background: transparent;")
         v.addWidget(self._stack)
 
-        self.tab_widget   = QTabWidget()
+        self.tab_widget   = QWidget()   # no tab bar — markers shown directly
         self._search_page = _SearchPage()
         self._stack.addWidget(self.tab_widget)    # index 0
         self._stack.addWidget(self._search_page)  # index 1
@@ -936,7 +936,6 @@ class CineMarker(QMainWindow):
         self._panel = _PanelOverlay(self, self.video_container)
         self.tabs = self._panel.tab_widget
         self._build_markers_tab()
-        self._build_converter_tab()
         self._panel._search_page.actor_clicked.connect(self._link_actor_to_film)
         self._panel.hide()
 
@@ -976,6 +975,9 @@ class CineMarker(QMainWindow):
         # Sorter tab
         self.sorter_panel = SorterPanel()
         self.main_tabs.addTab(self.sorter_panel, "⊕  SORTEREN")
+
+        self._build_converter_tab()
+        self.main_tabs.addTab(self._converter_widget, "⟳  CONVERTER")
 
         self.main_tabs.setCurrentIndex(1)  # default: FILMS
 
@@ -1055,8 +1057,7 @@ class CineMarker(QMainWindow):
         QTimer.singleShot(100, self._attach_mpv)
 
     def _build_markers_tab(self):
-        w = QWidget()
-        v = QVBoxLayout(w)
+        v = QVBoxLayout(self.tabs)
         v.setContentsMargins(8, 8, 8, 8)
         v.setSpacing(6)
 
@@ -1067,28 +1068,6 @@ class CineMarker(QMainWindow):
         self.marker_list = QListWidget()
         self.marker_list.itemDoubleClicked.connect(self._on_marker_jump)
         v.addWidget(self.marker_list)
-
-        row = QHBoxLayout()
-        btn_jump = QPushButton("↵ Spring")
-        btn_jump.clicked.connect(self._on_marker_jump_btn)
-        row.addWidget(btn_jump)
-
-        btn_rename = QPushButton("✎ Naam")
-        btn_rename.clicked.connect(self._on_marker_rename)
-        row.addWidget(btn_rename)
-
-        btn_del = QPushButton("✕ Verwijder")
-        btn_del.setObjectName("danger")
-        btn_del.clicked.connect(self._on_marker_delete)
-        row.addWidget(btn_del)
-
-        v.addLayout(row)
-
-        btn_export = QPushButton("⊡ Exporteer markers als CSV")
-        btn_export.clicked.connect(self._export_markers_csv)
-        v.addWidget(btn_export)
-
-        self.tabs.addTab(w, "Markers")
 
     def _build_converter_tab(self):
         w = QWidget()
@@ -1187,7 +1166,7 @@ class CineMarker(QMainWindow):
         self.btn_convert.clicked.connect(self.start_conversion)
         v.addWidget(self.btn_convert)
 
-        self.tabs.addTab(w, "Converter")
+        self._converter_widget = w
 
     # ── Shortcuts ─────────────────────────────
 
