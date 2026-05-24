@@ -49,6 +49,7 @@ except OSError:
 from actors_panel import ActorsPanel
 from films_panel import FilmsPanel
 from database_panel import DatabasePanel
+from sorter_panel import SorterPanel
 import database as db
 
 
@@ -579,6 +580,10 @@ class CineMarker(QMainWindow):
         # Database tab
         self.db_panel = DatabasePanel()
         self.main_tabs.addTab(self.db_panel, "⊞  DATABASE")
+
+        # Sorter tab
+        self.sorter_panel = SorterPanel()
+        self.main_tabs.addTab(self.sorter_panel, "⊕  SORTEREN")
 
         self.main_tabs.setCurrentIndex(1)  # default: FILMS
 
