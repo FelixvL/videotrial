@@ -323,6 +323,103 @@ class _ActorLinkOverlay(QFrame):
 
 
 # ─────────────────────────────────────────────
+#  Film actors bar (permanent small strip)
+# ─────────────────────────────────────────────
+
+class _FilmActorsBar(QWidget):
+    """Thin horizontal strip showing actors linked to the current film."""
+
+    TW, TH = 32, 38   # thumbnail size
+
+    def __init__(self):
+        super().__init__()
+        self.setFixedHeight(56)
+        self.setStyleSheet("background: #0a0a0a;")
+
+        outer = QHBoxLayout(self)
+        outer.setContentsMargins(6, 4, 6, 4)
+        outer.setSpacing(0)
+
+        self._scroll = QScrollArea()
+        self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._scroll.setWidgetResizable(True)
+        self._scroll.setStyleSheet(
+            "QScrollArea { border: none; background: transparent; }"
+            "QWidget     { background: transparent; }"
+        )
+        self._inner = QWidget()
+        self._row = QHBoxLayout(self._inner)
+        self._row.setContentsMargins(0, 0, 0, 0)
+        self._row.setSpacing(6)
+        self._row.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        self._scroll.setWidget(self._inner)
+        outer.addWidget(self._scroll)
+
+    def refresh(self, film_id: int | None):
+        # remove old widgets
+        while self._row.count():
+            item = self._row.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        if film_id is None:
+            return
+
+        actors = db.get_actors_for_film(film_id)
+        for actor in actors:
+            cell = QWidget()
+            cell.setFixedSize(self.TW + 4, self.TH + 16)
+            cv = QVBoxLayout(cell)
+            cv.setContentsMargins(0, 0, 0, 0)
+            cv.setSpacing(1)
+
+            # thumbnail
+            photos = db.get_actor_photos(actor['id'])
+            path = photos[0]['photo_path'] if photos else ''
+            thumb = _MiniThumb(path, self.TW, self.TH)
+            cv.addWidget(thumb, alignment=Qt.AlignmentFlag.AlignHCenter)
+
+            # name
+            lbl = QLabel(actor.get('name', ''))
+            lbl.setFixedWidth(self.TW + 4)
+            lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            lbl.setStyleSheet("color: #555; font-size: 8px;")
+            lbl.setWordWrap(False)
+            metrics = lbl.fontMetrics()
+            lbl.setText(metrics.elidedText(
+                actor.get('name', ''), Qt.TextElideMode.ElideRight, self.TW + 4
+            ))
+            cv.addWidget(lbl)
+
+            self._row.addWidget(cell)
+
+
+class _MiniThumb(QWidget):
+    def __init__(self, photo_path: str, w: int, h: int):
+        super().__init__()
+        self.setFixedSize(w, h)
+        self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
+        self._pix = None
+        if photo_path:
+            raw = QPixmap(photo_path)
+            if not raw.isNull():
+                scaled = raw.scaled(w, h,
+                    Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                    Qt.TransformationMode.SmoothTransformation)
+                ox = (scaled.width()  - w) // 2
+                oy = (scaled.height() - h) // 2
+                self._pix = scaled.copy(ox, oy, w, h)
+
+    def paintEvent(self, _event):
+        from PyQt6.QtGui import QPainter
+        p = QPainter(self)
+        p.fillRect(self.rect(), QColor('#1a1a1a'))
+        if self._pix:
+            p.drawPixmap(0, 0, self._pix)
+
+
+# ─────────────────────────────────────────────
 #  Actor photo search (inside panel overlay)
 # ─────────────────────────────────────────────
 
@@ -747,6 +844,10 @@ class CineMarker(QMainWindow):
         )
         pv.addWidget(self.timeline)
 
+        # Film actors bar — thin permanent strip below seekbar
+        self._actors_bar = _FilmActorsBar()
+        pv.addWidget(self._actors_bar)
+
         # Floating right panel — top-level transparent window
         self._panel = _PanelOverlay(self, self.video_container)
         self.tabs = self._panel.tab_widget
@@ -833,6 +934,7 @@ class CineMarker(QMainWindow):
             return
         film = db.get_or_create_film(self._video_path)
         db.link_actor_film(actor['id'], film['id'])
+        self._actors_bar.refresh(film['id'])
         self.status.showMessage(
             f"  {actor['name']} gekoppeld aan {Path(self._video_path).name}"
         )
@@ -1043,6 +1145,8 @@ class CineMarker(QMainWindow):
         self._markers = load_markers(path)
         self._refresh_marker_list()
         self.player.play(path)
+        film = db.get_or_create_film(path)
+        self._actors_bar.refresh(film['id'])
         self.status.showMessage(f"  {Path(path).name}  •  {path}")
         self.setWindowTitle(f"CineMarker  —  {Path(path).name}")
 
