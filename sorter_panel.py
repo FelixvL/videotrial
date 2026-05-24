@@ -20,6 +20,24 @@ import database as db
 IMAGE_EXTS = {'.jpg', '.jpeg', '.png', '.webp', '.bmp', '.gif', '.tiff', '.tif'}
 
 
+def _count_images(folder: Path) -> int:
+    if not folder.exists():
+        return 0
+    return sum(1 for f in folder.iterdir() if f.suffix.lower() in IMAGE_EXTS)
+
+
+def _already_sorted_names(folder: Path) -> set:
+    """Return set of filenames (e.g. 'foto.jpg') present in p/ or m/."""
+    names = set()
+    for sub in ('p', 'm'):
+        d = folder / sub
+        if d.exists():
+            for f in d.iterdir():
+                if f.suffix.lower() in IMAGE_EXTS:
+                    names.add(f.name)
+    return names
+
+
 class _PhotoView(QWidget):
 
     def __init__(self):
@@ -52,7 +70,6 @@ class SorterPanel(QWidget):
         self._folder: Path | None = None
         self._photos: list = []
         self._index: int = 0
-        self._sorted: set = set()   # paths handled this session
         self._build_ui()
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         folder = db.get_setting('sorter_folder', '')
@@ -86,6 +103,21 @@ class SorterPanel(QWidget):
 
         b.addStretch()
 
+        # p / m counters
+        self.lbl_p = QLabel("p: 0")
+        self.lbl_p.setStyleSheet(
+            "color: #2a6b2a; font-size: 11px; padding: 2px 8px;"
+            "background: #081808; border: 1px solid #1f4b1f; border-radius: 4px;"
+        )
+        b.addWidget(self.lbl_p)
+
+        self.lbl_m = QLabel("m: 0")
+        self.lbl_m.setStyleSheet(
+            "color: #6b2a2a; font-size: 11px; padding: 2px 8px;"
+            "background: #1a0808; border: 1px solid #4b1f1f; border-radius: 4px;"
+        )
+        b.addWidget(self.lbl_m)
+
         btn_folder = QPushButton("📁  Kies map")
         btn_folder.setFixedHeight(28)
         btn_folder.clicked.connect(self._pick_folder)
@@ -105,7 +137,7 @@ class SorterPanel(QWidget):
         bh.setContentsMargins(24, 12, 24, 12)
         bh.setSpacing(24)
 
-        self.btn_minus = QPushButton("−")
+        self.btn_minus = QPushButton("−  m")
         self.btn_minus.setFixedHeight(56)
         self.btn_minus.setStyleSheet("""
             QPushButton {
@@ -113,7 +145,7 @@ class SorterPanel(QWidget):
                 border: 2px solid #6b1f1f;
                 border-radius: 8px;
                 color: #e05555;
-                font-size: 32px;
+                font-size: 28px;
                 font-weight: bold;
             }
             QPushButton:hover { background: #2a1010; border-color: #e05555; }
@@ -122,7 +154,7 @@ class SorterPanel(QWidget):
         self.btn_minus.clicked.connect(self._move_m)
         bh.addWidget(self.btn_minus)
 
-        self.btn_plus = QPushButton("+")
+        self.btn_plus = QPushButton("+  p")
         self.btn_plus.setFixedHeight(56)
         self.btn_plus.setStyleSheet("""
             QPushButton {
@@ -130,7 +162,7 @@ class SorterPanel(QWidget):
                 border: 2px solid #1f6b1f;
                 border-radius: 8px;
                 color: #55e055;
-                font-size: 32px;
+                font-size: 28px;
                 font-weight: bold;
             }
             QPushButton:hover { background: #102a10; border-color: #55e055; }
@@ -147,7 +179,7 @@ class SorterPanel(QWidget):
         foot.setStyleSheet("QFrame { background: #080808; border-top: 1px solid #141414; }")
         fh = QHBoxLayout(foot)
         fh.setContentsMargins(12, 0, 12, 0)
-        hint = QLabel("+ of → of Spatie → map p     −  of ← → map m")
+        hint = QLabel("p of + of → of Spatie → map p     m of − of ← → map m")
         hint.setStyleSheet("color: #2a2a2a; font-size: 10px;")
         fh.addWidget(hint)
         fh.addStretch()
@@ -163,12 +195,14 @@ class SorterPanel(QWidget):
 
     def _load_folder(self, folder: str):
         self._folder = Path(folder)
+        already = _already_sorted_names(self._folder)
         self._photos = sorted(
             [f for f in self._folder.iterdir()
-             if f.suffix.lower() in IMAGE_EXTS and f not in self._sorted],
+             if f.suffix.lower() in IMAGE_EXTS and f.name not in already],
             key=lambda f: f.name.lower(),
         )
         self._index = 0
+        self._update_subcounts()
         self._show_current()
 
     # ── Display ─────────────────────────────────
@@ -176,13 +210,19 @@ class SorterPanel(QWidget):
     def _show_current(self):
         if not self._photos:
             self.photo_view.set_pixmap(None)
-            self.lbl_count.setText("Geen foto's meer")
+            self.lbl_count.setText("Klaar")
             self.lbl_name.setText("")
             return
         self.lbl_count.setText(f"  {self._index + 1} / {len(self._photos)}")
         fp = self._photos[self._index]
         self.lbl_name.setText(fp.name)
         self.photo_view.set_pixmap(QPixmap(str(fp)))
+
+    def _update_subcounts(self):
+        if self._folder is None:
+            return
+        self.lbl_p.setText(f"p: {_count_images(self._folder / 'p')}")
+        self.lbl_m.setText(f"m: {_count_images(self._folder / 'm')}")
 
     # ── Sort ────────────────────────────────────
 
@@ -199,10 +239,10 @@ class SorterPanel(QWidget):
                 dest = dest_dir / f"{fp.stem}_{i}{fp.suffix}"
                 i += 1
         shutil.copy2(str(fp), str(dest))
-        self._sorted.add(fp)
         self._photos.pop(self._index)
         if self._index >= len(self._photos) and self._index > 0:
             self._index -= 1
+        self._update_subcounts()
         self._show_current()
 
     def _move_p(self):
@@ -215,9 +255,10 @@ class SorterPanel(QWidget):
 
     def keyPressEvent(self, event: QKeyEvent):
         k = event.key()
-        if k in (Qt.Key.Key_Plus, Qt.Key.Key_Right, Qt.Key.Key_Space, Qt.Key.Key_Return):
+        if k in (Qt.Key.Key_P, Qt.Key.Key_Plus, Qt.Key.Key_Right,
+                 Qt.Key.Key_Space, Qt.Key.Key_Return):
             self._move_p()
-        elif k in (Qt.Key.Key_Minus, Qt.Key.Key_Left):
+        elif k in (Qt.Key.Key_M, Qt.Key.Key_Minus, Qt.Key.Key_Left):
             self._move_m()
         else:
             super().keyPressEvent(event)

@@ -330,18 +330,20 @@ class _PanelOverlay(QFrame):
     def __init__(self, parent):
         super().__init__(parent)
         self.setFixedWidth(320)
+        self.setAutoFillBackground(False)
         self.setStyleSheet("""
-            QFrame {
-                background: #0d0d0d;
-                border-left: 1px solid #222;
-            }
+            QFrame#panelOverlay { background: transparent; border: none; }
+            QTabWidget#panelTabs { background: transparent; }
+            QTabWidget#panelTabs::pane { background: transparent; border: none; }
         """)
         parent.installEventFilter(self)
         v = QVBoxLayout(self)
         v.setContentsMargins(0, 0, 0, 0)
         v.setSpacing(0)
         self.tab_widget = QTabWidget()
+        self.tab_widget.setObjectName("panelTabs")
         v.addWidget(self.tab_widget)
+        self.setObjectName("panelOverlay")
         self._reposition()
 
     def eventFilter(self, obj, event):
