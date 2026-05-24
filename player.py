@@ -1326,6 +1326,7 @@ class CineMarker(QMainWindow):
     # ── Shortcuts ─────────────────────────────
 
     def _setup_shortcuts(self):
+        QShortcut(QKeySequence("Escape"), self).activated.connect(self._shortcut_esc)
         QShortcut(QKeySequence("Space"), self).activated.connect(self._shortcut_space)
         QShortcut(QKeySequence("Left"),  self).activated.connect(self._shortcut_left)
         QShortcut(QKeySequence("Right"), self).activated.connect(self._shortcut_right)
@@ -1633,6 +1634,17 @@ class CineMarker(QMainWindow):
 
         dlg.exec()
         return chosen[0]
+
+    def _shortcut_esc(self):
+        # Deselect categories, leave actors untouched
+        self._actors_overlay._cat_sel.clear()
+        self._actors_overlay.update()
+        # Hide search / panel overlay
+        self._panel.show_search(False)
+        self._panel.hide()
+        self._player_search.clear()
+        # Return keyboard focus to the main window so shortcuts work
+        self.setFocus()
 
     def _shortcut_space(self):
         if self.main_tabs.currentWidget() is self.sorter_panel:
