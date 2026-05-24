@@ -7,6 +7,7 @@ Requires: mpv and ffmpeg installed on system
 
 import sys
 import os
+import re
 import json
 import subprocess
 import threading
@@ -1373,6 +1374,21 @@ class CineMarker(QMainWindow):
         self._actors_overlay.refresh(film['id'])
         self.status.showMessage(f"  {Path(path).name}  •  {path}")
         self.setWindowTitle(f"CineMarker  —  {Path(path).name}")
+        self._suggest_actors_from_filename(path)
+
+    def _suggest_actors_from_filename(self, path: str):
+        stem = Path(path).stem
+        normalized = re.sub(r'([a-z])([A-Z])', r'\1 \2', stem)
+        normalized = re.sub(r'[_\-\.\s,()[\]{}]+', ' ', normalized).lower()
+        matches = [a for a in db.get_all_actors()
+                   if a.get('name', '').lower() in normalized]
+        if matches:
+            self._panel._search_page.update_results(matches)
+            self._panel.show_search(True)
+            if not self._panel.isVisible():
+                self._panel.show()
+        else:
+            self._panel.show_search(False)
 
     def _load_video_and_switch(self, path):
         """Load video and switch to player tab"""
