@@ -52,6 +52,7 @@ class SorterPanel(QWidget):
         self._folder: Path | None = None
         self._photos: list = []
         self._index: int = 0
+        self._sorted: set = set()   # paths handled this session
         self._build_ui()
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         folder = db.get_setting('sorter_folder', '')
@@ -163,7 +164,8 @@ class SorterPanel(QWidget):
     def _load_folder(self, folder: str):
         self._folder = Path(folder)
         self._photos = sorted(
-            [f for f in self._folder.iterdir() if f.suffix.lower() in IMAGE_EXTS],
+            [f for f in self._folder.iterdir()
+             if f.suffix.lower() in IMAGE_EXTS and f not in self._sorted],
             key=lambda f: f.name.lower(),
         )
         self._index = 0
@@ -196,7 +198,8 @@ class SorterPanel(QWidget):
             while dest.exists():
                 dest = dest_dir / f"{fp.stem}_{i}{fp.suffix}"
                 i += 1
-        shutil.move(str(fp), str(dest))
+        shutil.copy2(str(fp), str(dest))
+        self._sorted.add(fp)
         self._photos.pop(self._index)
         if self._index >= len(self._photos) and self._index > 0:
             self._index -= 1
