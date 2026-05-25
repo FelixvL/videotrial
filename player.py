@@ -1681,9 +1681,14 @@ class CineMarker(QMainWindow):
         self._markers = load_markers(path)
         self._refresh_marker_list()   # also calls _refresh_timeline_zones
         if start_time is not None and start_time > 0:
-            # Geef mpv de startpositie mee bij het openen — geen poll-loop nodig
-            self.player.command('loadfile', path, 'replace',
-                                f'start={start_time:.3f}')
+            try:
+                # Moderne mpv: options als dict (node map), geen string
+                self.player.command('loadfile', path, 'replace', 0,
+                                    {'start': str(round(start_time, 3))})
+            except Exception:
+                # Fallback: laad normaal en zoek zodra mpv klaar is
+                self.player.play(path)
+                QTimer.singleShot(0, lambda st=start_time: self._seek_when_ready(st))
         else:
             self.player.play(path)
         self.player.pause = False   # always start playing, even if previously paused
@@ -1928,9 +1933,9 @@ class CineMarker(QMainWindow):
             item.setSizeHint(QSize(0, ROW_H))
             self.marker_list.setItemWidget(item, row_w)
 
-    def _seek_when_ready(self, target: float, attempts: int = 30):
+    def _seek_when_ready(self, target: float, attempts: int = 60):
         """Seek to target once mpv has finished loading (duration > 0).
-        Retries every 150 ms for up to ~4.5 seconds before giving up."""
+        Retries every 50 ms for up to ~3 seconds before giving up."""
         try:
             dur = self.player.duration
             if dur and dur > 0:
@@ -1939,7 +1944,7 @@ class CineMarker(QMainWindow):
         except Exception:
             pass
         if attempts > 0:
-            QTimer.singleShot(150, lambda: self._seek_when_ready(target, attempts - 1))
+            QTimer.singleShot(50, lambda: self._seek_when_ready(target, attempts - 1))
 
     def toggle_play(self):
         if not self._video_path:
