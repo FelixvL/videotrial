@@ -6,6 +6,7 @@ CineMarker — Films browser panel  (grid view, sortable)
 import os
 import json
 import random
+import time
 from pathlib import Path
 
 from PyQt6.QtWidgets import (
@@ -131,11 +132,14 @@ class FilmGridDelegate(QStyledItemDelegate):
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
 
-        # Thumbnail — cycle through all thumbnails with per-item phase offset
+        # Thumbnail — elke film heeft z'n eigen tijdsfase zodat switches gespreid zijn
         thumbs = data.get('thumbnails', [])
-        if thumbs:
-            offset     = data.get('thumb_offset', 0)
-            thumb_path = thumbs[(self._tick + offset) % len(thumbs)]
+        if len(thumbs) > 1:
+            phase      = data.get('thumb_phase', 0.0)
+            idx        = int((time.time() + phase) / 2.0) % len(thumbs)
+            thumb_path = thumbs[idx]
+        elif thumbs:
+            thumb_path = thumbs[0]
         else:
             thumb_path = data.get('thumbnail', '')
         pix = self._thumb(thumb_path, w, h)
@@ -388,10 +392,11 @@ class FilmsPanel(QWidget):
         self.film_list.customContextMenuRequested.connect(self._show_context_menu)
         v.addWidget(self.film_list, stretch=1)
 
-        # Animation timer — advances thumbnail frame every 2 s
+        # Animation timer — hertekent de viewport zodat gestaggerde
+        # per-item thumbnail-wissels (elke ~2s, eigen fase) zichtbaar worden
         self._tick = 0
         self._anim_timer = QTimer(self)
-        self._anim_timer.setInterval(2000)
+        self._anim_timer.setInterval(500)
         self._anim_timer.timeout.connect(self._anim_tick)
         self._anim_timer.start()
 
@@ -563,7 +568,7 @@ class FilmsPanel(QWidget):
                 'neg_markers':  neg_markers,
                 'duration':     duration,
                 'cell_size':    QSize(cw, ch),
-                'thumb_offset': random.randint(0, 99),
+                'thumb_phase':  random.uniform(0.0, 2.0),
             })
             self.film_list.addItem(item)
             self._all_items.append(item)
