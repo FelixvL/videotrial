@@ -328,10 +328,13 @@ class FilmsPanel(QWidget):
         return 0
 
     def _sort_and_repopulate(self):
-        items = list(self._all_items)
+        # takeItem removes items from the list without deleting the C++ objects
+        items = []
+        while self.film_list.count():
+            items.append(self.film_list.takeItem(0))
+
         items.sort(key=self._sort_key_fn, reverse=not self._sort_asc)
 
-        self.film_list.clear()
         for item in items:
             self.film_list.addItem(item)
         self._all_items = items
