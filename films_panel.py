@@ -12,7 +12,7 @@ from PyQt6.QtWidgets import (
     QListWidget, QListWidgetItem, QLineEdit, QFrame,
     QFileDialog, QStyledItemDelegate, QStyle, QListView
 )
-from PyQt6.QtCore import Qt, QSize, QRect, pyqtSignal
+from PyQt6.QtCore import Qt, QSize, QRect, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QFont, QPainter, QPen, QPixmap
 
 import database as db
