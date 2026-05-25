@@ -1070,6 +1070,7 @@ class CineMarker(QMainWindow):
         self._drag_last = None
         self._current_speed = 1.0
         self._selection_entries: list = []   # cross-film afspeellijst vanuit markers-tab
+        self._current_marker_row: int = -1  # blijft bewaard over list-rebuilds heen
 
         # Multi-tap seek state
         self._seek_count = 0
@@ -1670,6 +1671,7 @@ class CineMarker(QMainWindow):
         )
         if path:
             self._selection_entries.clear()
+            self._current_marker_row = -1
             self._load_video(path)
 
     def _load_video(self, path, start_time: float | None = None):
@@ -1723,12 +1725,14 @@ class CineMarker(QMainWindow):
     def _load_video_and_switch(self, path):
         """Load video and switch to player tab"""
         self._selection_entries.clear()
+        self._current_marker_row = -1
         self._load_video(path)
         self.main_tabs.setCurrentIndex(0)
 
     def _next_film(self):
         """Load the next film in the films panel list."""
         self._selection_entries.clear()
+        self._current_marker_row = -1
         film_list = self.films_panel.film_list
         n = film_list.count()
         if n == 0:
@@ -1834,6 +1838,7 @@ class CineMarker(QMainWindow):
     def _refresh_selection_markers(self):
         """Bouw de marker-list op uit self._selection_entries (meerdere films)."""
         self.marker_list.clear()
+        # _current_marker_row wordt na het vullen hersteld (zie einde methode)
         SZ_A  = 26
         SZ_C  = 22
         ROW_H = 34
@@ -1932,6 +1937,10 @@ class CineMarker(QMainWindow):
 
             item.setSizeHint(QSize(0, ROW_H))
             self.marker_list.setItemWidget(item, row_w)
+
+        # Herstel de selectie na de rebuild
+        if 0 <= self._current_marker_row < self.marker_list.count():
+            self.marker_list.setCurrentRow(self._current_marker_row)
 
     def _seek_when_ready(self, target: float, attempts: int = 60):
         """Seek to target once mpv has finished loading (duration > 0).
@@ -2266,8 +2275,9 @@ class CineMarker(QMainWindow):
         if not self._panel.isVisible():
             self._panel.show()
         self._panel.show_search(False)
-        cur = self.marker_list.currentRow()
-        next_row = (cur + 1) % n   # cur == -1 → 0 (eerste marker)
+        # Gebruik de eigen teller — currentRow() wordt gereset door list-rebuilds
+        next_row = (self._current_marker_row + 1) % n
+        self._current_marker_row = next_row
         self.marker_list.setCurrentRow(next_row)
         self._on_marker_jump()
 
@@ -2437,6 +2447,8 @@ class CineMarker(QMainWindow):
         if self._selection_entries:
             self._refresh_selection_markers()
             return
+        # Normale modus: nieuwe film → teller resetten
+        self._current_marker_row = -1
         self.marker_list.clear()
         SZ_A = 26   # actor photo size
         SZ_C = 22   # category icon size

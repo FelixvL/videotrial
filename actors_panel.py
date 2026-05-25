@@ -1808,6 +1808,9 @@ class ActorsPanel(QWidget):
         self._cb_grootte: dict = {}
         self._cb_rating: dict = {}
         self._cb_dec: dict = {}
+        self._sort_key: str = ''
+        self._sort_reverse: bool = False
+        self._sort_btns: dict = {}
         self._build_ui()
         folder = db.get_setting('photo_folder', '')
         if folder:
@@ -1932,6 +1935,46 @@ class ActorsPanel(QWidget):
         row_f.addWidget(btn_reset)
 
         fv.addLayout(row_f)
+
+        # Sorteer-rij
+        row_s = QHBoxLayout()
+        row_s.setSpacing(5)
+
+        lbl_sort = QLabel("Sorteer:")
+        lbl_sort.setStyleSheet("color: #444; font-size: 9px;")
+        row_s.addWidget(lbl_sort)
+
+        _sort_defs = [
+            ('decennia', 'Decennia'),
+            ('grootte',  'Grootte'),
+            ('kleur',    'Kleur'),
+            ('markers',  'Markers'),
+            ('films',    'Films'),
+        ]
+        for key, label in _sort_defs:
+            btn = QPushButton(label)
+            btn.setFixedHeight(20)
+            btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            btn.setStyleSheet(self._sort_btn_style(False, False))
+            btn.clicked.connect(lambda _, k=key: self._sort_by(k))
+            row_s.addWidget(btn)
+            self._sort_btns[key] = btn
+
+        row_s.addStretch()
+
+        btn_sort_reset = QPushButton("↺")
+        btn_sort_reset.setFixedSize(22, 20)
+        btn_sort_reset.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        btn_sort_reset.setToolTip("Volgorde resetten")
+        btn_sort_reset.setStyleSheet(
+            "QPushButton { background: transparent; border: 1px solid #252525;"
+            "  border-radius: 3px; color: #444; font-size: 11px; }"
+            "QPushButton:hover { border-color: #e8b86d; color: #e8b86d; }"
+        )
+        btn_sort_reset.clicked.connect(self._reset_sort)
+        row_s.addWidget(btn_sort_reset)
+
+        fv.addLayout(row_s)
         v0.addWidget(filter_frame)
 
         # Photo grid
@@ -2161,6 +2204,96 @@ class ActorsPanel(QWidget):
                 if meta.get(cat_key, ''):
                     hide = True
             item.setHidden(hide)
+
+    # ── Sorteren ─────────────────────────────────
+
+    @staticmethod
+    def _sort_btn_style(active: bool, reverse: bool) -> str:
+        if active:
+            arrow = ' ↓' if reverse else ' ↑'
+            return (
+                f"QPushButton {{ background: #1a1500; border: 1px solid #e8b86d;"
+                f"  border-radius: 3px; color: #e8b86d; font-size: 9px;"
+                f"  padding: 0 6px; }}"
+                f"QPushButton:hover {{ background: #2a2200; }}"
+            )
+        return (
+            "QPushButton { background: transparent; border: 1px solid #252525;"
+            "  border-radius: 3px; color: #555; font-size: 9px; padding: 0 6px; }"
+            "QPushButton:hover { border-color: #666; color: #999; }"
+        )
+
+    def _sort_by(self, key: str):
+        if self._sort_key == key:
+            self._sort_reverse = not self._sort_reverse
+        else:
+            self._sort_key = key
+            # Markers en films standaard aflopend (meeste eerst)
+            self._sort_reverse = key in ('markers', 'films')
+        self._apply_sort()
+        self._update_sort_buttons()
+
+    def _reset_sort(self):
+        self._sort_key = ''
+        self._sort_reverse = False
+        self._apply_sort()
+        self._update_sort_buttons()
+
+    def _update_sort_buttons(self):
+        for key, btn in self._sort_btns.items():
+            active = (key == self._sort_key)
+            label = {'decennia': 'Decennia', 'grootte': 'Grootte',
+                     'kleur': 'Kleur', 'markers': 'Markers',
+                     'films': 'Films'}[key]
+            arrow = (' ↓' if self._sort_reverse else ' ↑') if active else ''
+            btn.setText(label + arrow)
+            btn.setStyleSheet(self._sort_btn_style(active, self._sort_reverse))
+
+    def _item_sort_key(self, item):
+        d = item.data(Qt.ItemDataRole.UserRole) or {}
+        meta = d.get('meta', {})
+        key = self._sort_key
+
+        if key == 'decennia':
+            v = str(meta.get('decennia', ''))
+            return (0 if v else 1, v)
+        if key == 'grootte':
+            v = meta.get('grootte', '')
+            try:
+                return (0 if v else 1, int(v))
+            except (ValueError, TypeError):
+                return (1, 0)
+        if key == 'kleur':
+            v = str(meta.get('kleur', ''))
+            return (0 if v else 1, v)
+        if key == 'markers':
+            return (0, -(d.get('marker_count', 0)))
+        if key == 'films':
+            return (0, -(d.get('film_count', 0)))
+        # Fallback: alfabetisch op naam
+        return (0, d.get('stem', '').lower())
+
+    def _apply_sort(self):
+        n = self.grid.count()
+        if n == 0:
+            return
+        # takeItem verwijdert het item uit de widget maar houdt het in Python geldig
+        items = [self.grid.takeItem(0) for _ in range(n)]
+
+        if self._sort_key:
+            items.sort(key=self._item_sort_key, reverse=self._sort_reverse)
+        else:
+            # Zonder sortering: alfabetisch op bestandsnaam
+            items.sort(key=lambda it: (
+                it.data(Qt.ItemDataRole.UserRole) or {}
+            ).get('stem', '').lower())
+
+        self._all_items = items
+        for item in items:
+            self.grid.addItem(item)
+
+        # Filter opnieuw toepassen zodat verborgen items verborgen blijven
+        self._apply_filters()
 
     # ── Zoom ─────────────────────────────────────
 
