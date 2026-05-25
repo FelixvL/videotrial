@@ -215,6 +215,8 @@ class TimelineSlider(QSlider):
         self.setRange(0, 10000)
         self._markers  = []
         self._neg_zones: list = []   # [(start_frac, end_frac), ...]
+        # NoFocus: slider should never steal keyboard focus (shortcuts handle seeking)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
 
     def set_neg_zones(self, zones: list):
         self._neg_zones = zones
@@ -259,7 +261,7 @@ class TimelineSlider(QSlider):
             x0 = int(start_f * w)
             x1 = int(end_f   * w)
             if x1 > x0:
-                p.fillRect(x0, 0, max(2, x1 - x0), h, QColor('#8b2020'))
+                p.fillRect(x0, 0, max(3, x1 - x0), h, QColor('#cc2222'))
 
         p.end()
 
@@ -1183,7 +1185,7 @@ class CineMarker(QMainWindow):
 
         self.timeline = TimelineSlider()
         self.timeline.seeked.connect(self._on_timeline_seek)
-        self.timeline.setFixedHeight(6)   # slightly taller so neg-zones are visible
+        self.timeline.setFixedHeight(8)   # tall enough for neg-zone color to be visible
         self.timeline.setStyleSheet("")    # paintEvent handles all drawing
         pv.addWidget(self.timeline)
 
@@ -1256,7 +1258,11 @@ class CineMarker(QMainWindow):
             self._actors_overlay.raise_()
         else:
             self._actors_overlay.hide()
-        if not on_player:
+        if on_player:
+            # Give focus to video_container so no text field is active on entry
+            QTimer.singleShot(0, lambda: self.video_container.setFocus(
+                Qt.FocusReason.OtherFocusReason))
+        else:
             self._player_search.clear()
 
     def _on_player_search(self, text: str):
@@ -1298,6 +1304,8 @@ class CineMarker(QMainWindow):
         self.video_container.setStyleSheet("background: #000;")
         self.video_container.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.video_container.setMouseTracking(True)
+        # ClickFocus: clicking anywhere on the video steals focus from _player_search
+        self.video_container.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
         self.video_container.installEventFilter(self)
         layout.addWidget(self.video_container, stretch=1)
 
@@ -1923,6 +1931,9 @@ class CineMarker(QMainWindow):
         if obj is self.video_container:
             t = event.type()
             if t == QEvent.Type.MouseButtonPress:
+                # Any click on the video area reclaims focus from _player_search
+                # (or any other text field that may have retained it)
+                self.video_container.setFocus(Qt.FocusReason.MouseFocusReason)
                 if event.button() == Qt.MouseButton.LeftButton and self._zoom_level > 0:
                     self._drag_active = True
                     self._drag_last = event.pos()
@@ -2023,6 +2034,10 @@ class CineMarker(QMainWindow):
         self._markers.sort(key=lambda m: m['time'])
         save_markers(self._video_path, self._markers)
         self._refresh_marker_list()
+        # Switch panel back to markers view so the new negative marker is visible
+        self._panel.show_search(False)
+        if not self._panel.isVisible():
+            self._panel.show()
         self.status.showMessage(f"  Negatieve marker gezet op {_fmt_hms(pos)}")
 
     def _toggle_skip_negative(self):
@@ -2156,6 +2171,9 @@ class CineMarker(QMainWindow):
         if 0 <= row < len(self._markers):
             t = self._markers[row]['time']
             self.player.seek(t, 'absolute+exact')
+        # Panel is a separate top-level window; return keyboard focus to main window
+        self.activateWindow()
+        self.video_container.setFocus(Qt.FocusReason.OtherFocusReason)
 
     def _on_marker_jump_btn(self):
         self._on_marker_jump()

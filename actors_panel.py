@@ -1528,14 +1528,17 @@ class ActorDetailView(QWidget):
                 except OSError:
                     pass
 
-            # Marker count
-            markers = 0
+            # Marker count (total and negative)
+            markers     = 0
+            neg_markers = 0
             if fp:
-                p = Path(fp)
-                mf = p.parent / f".{p.stem}_markers.json"
-                if mf.exists():
+                _mp = Path(fp)
+                _mf = _mp.parent / f".{_mp.stem}_markers.json"
+                if _mf.exists():
                     try:
-                        markers = len(json.loads(mf.read_text('utf-8')))
+                        _ms = json.loads(_mf.read_text('utf-8'))
+                        markers     = len(_ms)
+                        neg_markers = sum(1 for m in _ms if m.get('negative'))
                     except Exception:
                         pass
 
@@ -1543,17 +1546,18 @@ class ActorDetailView(QWidget):
             item.setSizeHint(QSize(cw, ch))
             item.setToolTip(f.get('title', ''))
             item.setData(Qt.ItemDataRole.UserRole, {
-                'path':       fp,
-                'file_path':  fp,
-                'name':       f.get('title', ''),
-                'thumbnail':  f.get('thumbnail', ''),
-                'thumbnails': thumbnails,
-                'film_id':    film_id,
-                'size':       size,
-                'date':       0,
-                'markers':    markers,
-                'duration':   f.get('duration', 0) or 0,
-                'cell_size':  QSize(cw, ch),
+                'path':        fp,
+                'file_path':   fp,
+                'name':        f.get('title', ''),
+                'thumbnail':   f.get('thumbnail', ''),
+                'thumbnails':  thumbnails,
+                'film_id':     film_id,
+                'size':        size,
+                'date':        0,
+                'markers':     markers,
+                'neg_markers': neg_markers,
+                'duration':    f.get('duration', 0) or 0,
+                'cell_size':   QSize(cw, ch),
             })
             self.films_list.addItem(item)
             self._films_all_items.append(item)

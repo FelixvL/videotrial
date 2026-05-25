@@ -51,6 +51,18 @@ def _count_film_markers(file_path: str) -> int:
         return 0
 
 
+def _count_neg_film_markers(file_path: str) -> int:
+    """Count markers with negative=True in the film's markers JSON."""
+    p = Path(file_path)
+    mf = p.parent / f".{p.stem}_markers.json"
+    if not mf.exists():
+        return 0
+    try:
+        return sum(1 for m in json.loads(mf.read_text('utf-8')) if m.get('negative'))
+    except Exception:
+        return 0
+
+
 # ─────────────────────────────────────────────
 #  Delegate
 # ─────────────────────────────────────────────
@@ -170,12 +182,21 @@ class FilmGridDelegate(QStyledItemDelegate):
                     Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
                     dur_str)
 
-            # Marker count — left-aligned
+            # Marker count (blue) + negative count (red) — left-aligned
+            neg_markers = data.get('neg_markers', 0) or 0
+            x_off = 5
             if markers > 0:
+                txt_m = f'◉{markers}'
                 painter.setPen(QColor('#6db8e8'))
-                painter.drawText(bar_r.adjusted(5, 0, 0, 0),
+                painter.drawText(bar_r.adjusted(x_off, 0, 0, 0),
                     Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-                    f'◉{markers}')
+                    txt_m)
+                x_off += painter.fontMetrics().horizontalAdvance(txt_m) + 4
+            if neg_markers > 0:
+                painter.setPen(QColor('#cc3333'))
+                painter.drawText(bar_r.adjusted(x_off, 0, 0, 0),
+                    Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                    f'⊘{neg_markers}')
 
         # Actor photos (bottom-left, above the info bar)
         film_id = data.get('film_id')
@@ -521,23 +542,25 @@ class FilmsPanel(QWidget):
                 size = 0
                 date = 0
 
-            markers = _count_film_markers(str(fp))
+            markers     = _count_film_markers(str(fp))
+            neg_markers = _count_neg_film_markers(str(fp))
 
             cw, ch = self._zoom_size()
             item = QListWidgetItem()
             item.setSizeHint(QSize(cw, ch))
             item.setToolTip(fp.stem)
             item.setData(Qt.ItemDataRole.UserRole, {
-                'path':       str(fp),
-                'name':       fp.stem,
-                'thumbnail':  thumbnail,
-                'thumbnails': thumbnails,
-                'film_id':    film_id,
-                'size':       size,
-                'date':       date,
-                'markers':    markers,
-                'duration':   duration,
-                'cell_size':  QSize(cw, ch),
+                'path':        str(fp),
+                'name':        fp.stem,
+                'thumbnail':   thumbnail,
+                'thumbnails':  thumbnails,
+                'film_id':     film_id,
+                'size':        size,
+                'date':        date,
+                'markers':     markers,
+                'neg_markers': neg_markers,
+                'duration':    duration,
+                'cell_size':   QSize(cw, ch),
             })
             self.film_list.addItem(item)
             self._all_items.append(item)
