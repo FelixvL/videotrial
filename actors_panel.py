@@ -96,29 +96,34 @@ class FrameExtractWorker(QThread):
     def stop(self):
         self._stop = True
 
+    # Target resolution for extracted frames — wide enough for all zoom levels
+    THUMB_W = 320
+    THUMB_H = 180
+
     def run(self):
         for row_idx, film_path, time_sec, cache_path in self._tasks:
             if self._stop:
                 break
             if not os.path.exists(cache_path):
                 try:
+                    scale = f"scale={self.THUMB_W}:{self.THUMB_H}"
                     result = subprocess.run([
                         'ffmpeg', '-y',
                         '-ss', str(time_sec),
                         '-i', film_path,
                         '-frames:v', '1',
-                        '-vf', 'scale=80:45',
-                        '-q:v', '3',
+                        '-vf', scale,
+                        '-q:v', '2',
                         cache_path,
                     ], capture_output=True, timeout=30)
-                    # If scale=80:45 failed try without any filter (raw frame)
+                    # Fallback: extract without scale filter (handles unusual formats)
                     if result.returncode != 0 or not os.path.exists(cache_path):
                         subprocess.run([
                             'ffmpeg', '-y',
                             '-ss', str(time_sec),
                             '-i', film_path,
                             '-frames:v', '1',
-                            '-q:v', '3',
+                            '-q:v', '2',
                             cache_path,
                         ], capture_output=True, timeout=30)
                 except Exception:
@@ -1167,6 +1172,7 @@ class ActorDetailView(QWidget):
         self._films_all_items:    list = []
         self._markers_zoom_level: int  = int(db.get_setting('zoom_detail_markers', '0') or '0')
         self._markers_all_items:  list = []
+        self._markers_cat_filter: set  = set()   # cat IDs to filter by; empty = show all
         self._build_ui()
 
     def _build_ui(self):
@@ -1358,6 +1364,16 @@ class ActorDetailView(QWidget):
         mk_h.addWidget(btn_mzi)
         mv.addLayout(mk_h)
 
+        # Category filter buttons — populated dynamically in _refresh_markers()
+        self._cat_filter_row = QWidget()
+        self._cat_filter_row.setStyleSheet("background: transparent;")
+        _cfl = QHBoxLayout(self._cat_filter_row)
+        _cfl.setContentsMargins(0, 1, 0, 1)
+        _cfl.setSpacing(3)
+        _cfl.addStretch()
+        self._cat_filter_row.setVisible(False)
+        mv.addWidget(self._cat_filter_row)
+
         mcw, mch = self._markers_zoom_size()
         self.markers_list = QListWidget()
         self.markers_list.setMouseTracking(True)
@@ -1418,6 +1434,7 @@ class ActorDetailView(QWidget):
         self._set_combo(self.cmb_dec,     meta.get('decennia', ''))
 
         self._refresh_films()
+        self._markers_cat_filter = set()   # reset filter for new actor
         self._refresh_markers()
 
     def _open_film(self, item):
@@ -1573,8 +1590,9 @@ class ActorDetailView(QWidget):
         if not self._actor:
             return
 
-        actor_id  = self._actor['id']
-        cat_cache: dict = {}
+        actor_id   = self._actor['id']
+        cat_cache:  dict = {}   # cid -> QPixmap | None
+        cats_info:  dict = {}   # cid -> full cat dict (for filter buttons)
         tasks: list = []
 
         thumb_dir = Path(__file__).parent / 'thumbnails' / 'markers'
@@ -1591,13 +1609,17 @@ class ActorDetailView(QWidget):
                 s = int(time_val)
                 time_str = f"{s // 60:02d}:{s % 60:02d}"
 
-                # Category pixmaps (pre-load full QPixmap into item data; delegate scales)
+                # Category pixmaps + info
                 cat_ids  = m.get('categories') or []
                 cat_pixs = []
                 for cid in cat_ids:
                     if cid not in cat_cache:
-                        cats = db.get_categories_by_ids([cid])
-                        ip   = cats[0].get('icon_path', '') if cats else ''
+                        db_cats = db.get_categories_by_ids([cid])
+                        if db_cats:
+                            cats_info[cid] = db_cats[0]
+                            ip = db_cats[0].get('icon_path', '')
+                        else:
+                            ip = ''
                         if ip and os.path.exists(ip):
                             p = QPixmap(ip)
                             cat_cache[cid] = p if not p.isNull() else None
@@ -1606,9 +1628,11 @@ class ActorDetailView(QWidget):
                     if cat_cache[cid]:
                         cat_pixs.append(cat_cache[cid])
 
-                # Frame cache path
+                # Frame cache path — filename encodes resolution so old low-res
+                # files are automatically bypassed when the target size changes
                 time_ms    = int(time_val * 1000)
-                cache_name = f"{Path(film['file_path']).stem}_{time_ms}.jpg"
+                cache_name = (f"{Path(film['file_path']).stem}_{time_ms}"
+                              f"_w{FrameExtractWorker.THUMB_W}.jpg")
                 cache_path = str(thumb_dir / cache_name)
 
                 row_idx = len(self._markers_all_items)
@@ -1620,6 +1644,7 @@ class ActorDetailView(QWidget):
                     'time_str':    time_str,
                     'cache_path':  cache_path,
                     'cat_pixmaps': cat_pixs,
+                    'cat_ids':     cat_ids,    # needed for filter logic
                     'cell_size':   QSize(cw, ch),
                 })
                 self.markers_list.addItem(item)
@@ -1627,6 +1652,10 @@ class ActorDetailView(QWidget):
 
                 if not os.path.exists(cache_path):
                     tasks.append((row_idx, film['file_path'], time_val, cache_path))
+
+        # Rebuild category filter buttons and apply current filter
+        self._rebuild_cat_filter_buttons(list(cats_info.values()))
+        self._markers_apply_cat_filter()
 
         # Start background extraction for missing frames
         if tasks:
@@ -1638,6 +1667,69 @@ class ActorDetailView(QWidget):
         # Delegate's _get_pix only caches successes, so just refresh the
         # viewport — next repaint will pick up the newly extracted file.
         self.markers_list.viewport().update()
+
+    # ── Category filter ───────────────────────────
+
+    def _rebuild_cat_filter_buttons(self, cats: list):
+        """Rebuild the category filter row with toggle buttons for each category."""
+        layout = self._cat_filter_row.layout()
+        # Remove all existing widgets (leave the trailing stretch)
+        while layout.count():
+            child = layout.takeAt(0)
+            w = child.widget()
+            if w:
+                w.deleteLater()
+
+        if not cats:
+            self._cat_filter_row.setVisible(False)
+            return
+
+        self._cat_filter_row.setVisible(True)
+
+        for cat in sorted(cats, key=lambda c: c.get('name', '').lower()):
+            btn = QPushButton()
+            btn.setFixedSize(26, 26)
+            btn.setCheckable(True)
+            btn.setChecked(cat['id'] in self._markers_cat_filter)
+            btn.setToolTip(cat.get('name', ''))
+            btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+
+            ip = cat.get('icon_path', '')
+            if ip and os.path.exists(ip):
+                btn.setIcon(QIcon(QPixmap(ip)))
+                btn.setIconSize(QSize(20, 20))
+            else:
+                btn.setText(cat.get('name', '?')[:2])
+
+            cid = cat['id']
+            btn.toggled.connect(lambda checked, c=cid: self._markers_toggle_cat(c, checked))
+            btn.setStyleSheet(
+                "QPushButton { background: #111; border: 1px solid #252525;"
+                "  border-radius: 3px; padding: 1px; }"
+                "QPushButton:checked { border: 2px solid #e8b86d; background: #1a1400; }"
+                "QPushButton:hover { border-color: #555; }"
+                "QPushButton:checked:hover { border-color: #f0ca8a; }"
+            )
+            layout.addWidget(btn)
+
+        layout.addStretch()
+
+    def _markers_toggle_cat(self, cat_id: int, checked: bool):
+        if checked:
+            self._markers_cat_filter.add(cat_id)
+        else:
+            self._markers_cat_filter.discard(cat_id)
+        self._markers_apply_cat_filter()
+
+    def _markers_apply_cat_filter(self):
+        """Show/hide marker items based on the active category filter."""
+        for item in self._markers_all_items:
+            d = item.data(Qt.ItemDataRole.UserRole)
+            item_cats = set(d.get('cat_ids', []) if d else [])
+            if not self._markers_cat_filter:
+                item.setHidden(False)
+            else:
+                item.setHidden(not bool(item_cats & self._markers_cat_filter))
 
     @staticmethod
     def _load_markers(video_path: str) -> list:
