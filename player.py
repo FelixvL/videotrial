@@ -1083,6 +1083,16 @@ class CineMarker(QMainWindow):
         _ph.setContentsMargins(0, 2, 0, 2)
         _ph.setSpacing(8)
 
+        btn_del_film = QPushButton("🗑")
+        btn_del_film.setFixedSize(26, 26)
+        btn_del_film.setToolTip("Verplaats huidige film naar map 'deleted'")
+        btn_del_film.setStyleSheet(
+            "QPushButton { background: transparent; border: none; color: #443333; font-size: 14px; }"
+            "QPushButton:hover { color: #cc4444; }"
+        )
+        btn_del_film.clicked.connect(self._delete_current_film)
+        _ph.addWidget(btn_del_film)
+
         self._lbl_time = QLabel("--:-- / --:--")
         self._lbl_time.setStyleSheet(
             "color: #555; font-size: 11px; font-family: 'Consolas', monospace;"
@@ -1099,16 +1109,6 @@ class CineMarker(QMainWindow):
         )
         btn_next.clicked.connect(self._next_film)
         _ph.addWidget(btn_next)
-
-        btn_del_film = QPushButton("🗑")
-        btn_del_film.setFixedSize(26, 26)
-        btn_del_film.setToolTip("Verplaats huidige film naar map 'deleted'")
-        btn_del_film.setStyleSheet(
-            "QPushButton { background: transparent; border: none; color: #443333; font-size: 14px; }"
-            "QPushButton:hover { color: #cc4444; }"
-        )
-        btn_del_film.clicked.connect(self._delete_current_film)
-        _ph.addWidget(btn_del_film)
 
         self._player_search = QLineEdit()
         self._player_search.setPlaceholderText("Acteur zoeken…")
@@ -1566,12 +1566,14 @@ class CineMarker(QMainWindow):
         self.player.seek(seconds, 'relative+exact')
 
     def seek_frames(self, n):
+        """Step n frames forward (n>0) or backward (n<0)."""
         if not self._video_path:
             return
-        if n > 0:
-            self.player.frame_step()
-        else:
-            self.player.frame_back_step()
+        for _ in range(abs(n)):
+            if n > 0:
+                self.player.frame_step()
+            else:
+                self.player.frame_back_step()
 
     def go_to_start(self):
         if self._video_path:
@@ -1613,10 +1615,15 @@ class CineMarker(QMainWindow):
         except Exception:
             paused = False
         if paused:
+            # 1 press → 1 frame,  2 → 5 frames,  3 → 1 s,  4 → 5 s
             if n == 1:
                 self.seek_frames(d)
+            elif n == 2:
+                self.seek_frames(d * 5)
+            elif n == 3:
+                self.seek_relative(d * 1)
             else:
-                self.seek_relative(d * self._SEEK_PAUSE[n])
+                self.seek_relative(d * 5)
         else:
             self.seek_relative(d * self._SEEK_PLAY[n])
 
@@ -1632,7 +1639,22 @@ class CineMarker(QMainWindow):
         ts   = int(_time.time() * 1000)
         path = str(thumb_dir / f"{film['id']}_thumb_{ts}.jpg")
         try:
-            self.player.command('screenshot-to-file', path, 'video')
+            # 'window' mode captures what is actually rendered on screen —
+            # i.e. the zoomed/panned view the user is looking at, not the raw frame.
+            # Temporarily mute OSD so the time display is not baked into the thumbnail.
+            try:
+                old_osd = self.player.osd_level
+                self.player.osd_level = 0
+            except Exception:
+                old_osd = None
+            try:
+                self.player.command('screenshot-to-file', path, 'window')
+            finally:
+                if old_osd is not None:
+                    try:
+                        self.player.osd_level = old_osd
+                    except Exception:
+                        pass
             db.add_film_thumbnail(film['id'], path)
             db.set_film_thumbnail(film['id'], path)   # keep backward-compat primary
             # Reload overlay with full thumbnail list so it starts cycling
