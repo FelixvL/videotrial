@@ -143,10 +143,11 @@ _HELP_HTML = """
 <table>
 <tr><td>Spatie</td><td>Afspelen / pauzeren</td></tr>
 <tr><td>← →</td><td>5 seconden terug / vooruit</td></tr>
-<tr><td>L &nbsp;of&nbsp; M</td><td>Multi-tap vooruit — 1×=5s · 2×=30s · 3×=5min · 4×=30min</td></tr>
+<tr><td>L</td><td>Multi-tap vooruit — 1×=5s · 2×=30s · 3×=5min · 4×=30min</td></tr>
 <tr><td>N</td><td>Multi-tap achteruit — zelfde stappen</td></tr>
-<tr><td>L / M / N &nbsp;<span class="dim">(gepauzeerd)</span></td><td>1×=1 frame · 2×=5 frames · 3×=1s · 4×=5s</td></tr>
+<tr><td>L / N &nbsp;<span class="dim">(gepauzeerd)</span></td><td>1×=1 frame · 2×=5 frames · 3×=1s · 4×=5s</td></tr>
 <tr><td>Home / End</td><td>Naar begin / einde springen</td></tr>
+<tr><td>O</td><td>Vorige marker in de lijst (wraps rond)</td></tr>
 <tr><td>P</td><td>Volgende marker in de lijst (wraps rond)</td></tr>
 <tr><td>X</td><td>Negatieve marker zetten op huidige positie</td></tr>
 <tr><td>[ &nbsp;/&nbsp; ]</td><td>Afspeelsnelheid omlaag / omhoog (0.25 → 0.5 → 0.75 → 1 → 1.25 → 1.5 → 2 → 3)</td></tr>
@@ -195,20 +196,25 @@ _HELP_HTML = """
 <tr><td>↻</td><td>Filmmap herladen</td></tr>
 <tr><td>📁 Kies map</td><td>Andere filmmap instellen</td></tr>
 <tr><td>− / +</td><td>Thumbnail-formaat aanpassen</td></tr>
-<tr><td>Genre-chips</td><td>Films filteren op genre</td></tr>
+<tr><td>Zoekbalk</td><td>Films filteren op naam</td></tr>
+<tr><td>Naam / Grootte / Datum / Markers / Duur</td><td>Sorteren (klik nogmaals = omgekeerd)</td></tr>
 <tr><td>Dubbelklik op film</td><td>Film laden en naar Speler-tab gaan</td></tr>
+<tr><td>Rechtermuisklik op film</td><td>Film afspelen of naar deleted/ verplaatsen</td></tr>
 </table>
 
 <h2>◉ ACTEURS</h2>
 <table>
 <tr><td>Zoekbalk <span class="dim">(auto-focus)</span></td><td>Acteurs zoeken / filteren</td></tr>
-<tr><td>BUITEN DB knop</td><td>Wisselen tussen database-modus en map-modus</td></tr>
+<tr><td>Kleur / Rating / Grootte / Dec filters</td><td>Acteurs filteren op eigenschap (meerdere tegelijk)</td></tr>
+<tr><td>Decennia / Grootte / Kleur / Markers / Films</td><td>Sorteren — eerste klik hoog→laag · tweede klik omgekeerd · ↺ reset</td></tr>
+<tr><td>BUITEN DB knop</td><td>Wisselen naar map-modus: klik acteur om eigenschap direct in te stellen</td></tr>
 <tr><td>📁 Map</td><td>Acteur-fotomap instellen</td></tr>
-<tr><td>⬆ Import</td><td>Acteurs importeren uit CSV</td></tr>
+<tr><td>⬆ Import</td><td>Acteurs importeren uit CSV / TSV</td></tr>
 <tr><td>− / + <span class="dim">(foto-grid)</span></td><td>Thumbnail-formaat aanpassen</td></tr>
+<tr><td>› pijltje <span class="dim">(rechtsonder kaart)</span></td><td>Acteur-detailpagina openen</td></tr>
 <tr><td>Categorie-chips <span class="dim">(detail)</span></td><td>Markers filteren op categorie</td></tr>
 <tr><td>← Terug</td><td>Terug naar acteuroverzicht</td></tr>
-<tr><td>✎ Bewerken</td><td>Acteurgegevens bewerken</td></tr>
+<tr><td>✎ Bewerken</td><td>Acteurgegevens bewerken en opslaan</td></tr>
 <tr><td>+ Koppel film</td><td>Film handmatig koppelen aan acteur</td></tr>
 <tr><td>▶ Open</td><td>Film laden in de Speler</td></tr>
 <tr><td>✕ Ontkoppel</td><td>Film loskoppelen van acteur</td></tr>
@@ -219,8 +225,8 @@ _HELP_HTML = """
 <h2>⊕ SORTEREN</h2>
 <table>
 <tr><td>← →</td><td>Vorige / volgende foto</td></tr>
-<tr><td>Spatie &nbsp;/&nbsp; + &nbsp;/&nbsp; P</td><td>Foto naar map p verplaatsen</td></tr>
-<tr><td>M &nbsp;/&nbsp; −</td><td>Foto naar map m verplaatsen</td></tr>
+<tr><td>Spatie</td><td>Foto naar map p verplaatsen</td></tr>
+<tr><td>M</td><td>Foto naar map m verplaatsen</td></tr>
 <tr><td>📁 Kies map</td><td>Fotomap instellen</td></tr>
 </table>
 
@@ -1196,6 +1202,8 @@ class CineMarker(QMainWindow):
         self.player = mpv.MPV(
             log_handler=self._mpv_log,
             loglevel='error',
+            input_default_bindings=False,      # mpv's eigen sneltoetsen uitzetten
+            input_vo_keyboard_shortcuts=False,  # ook via video-output geen toetsen
         )
         self.player['keep-open'] = True
         self.player['hr-seek'] = True  # frame-accurate seeking
@@ -2258,8 +2266,6 @@ class CineMarker(QMainWindow):
     def _shortcut_m(self):
         if self.main_tabs.currentWidget() is self.sorter_panel:
             self.sorter_panel._move_m()
-        else:
-            self._on_seek_key(1)
 
     def _shortcut_n(self):
         if self.main_tabs.currentWidget() is not self.sorter_panel:
@@ -2267,6 +2273,8 @@ class CineMarker(QMainWindow):
 
     def _shortcut_p(self):
         """Ga naar de volgende marker in de lijst (wraps rond)."""
+        if self.main_tabs.currentWidget() is self.sorter_panel:
+            return
         if not self._video_path:
             return
         n = self.marker_list.count()
@@ -2282,6 +2290,8 @@ class CineMarker(QMainWindow):
 
     def _shortcut_o(self):
         """Ga naar de vorige marker in de lijst (wraps rond)."""
+        if self.main_tabs.currentWidget() is self.sorter_panel:
+            return
         if not self._video_path:
             return
         n = self.marker_list.count()
@@ -2296,16 +2306,10 @@ class CineMarker(QMainWindow):
         self._on_marker_jump()
 
     def _shortcut_plus(self):
-        if self.main_tabs.currentWidget() is self.sorter_panel:
-            self.sorter_panel._move_p()
-        else:
-            self._zoom_in_video()
+        self._zoom_in_video()
 
     def _shortcut_minus(self):
-        if self.main_tabs.currentWidget() is self.sorter_panel:
-            self.sorter_panel._move_m()
-        else:
-            self._zoom_out_video()
+        self._zoom_out_video()
 
     # ── Video zoom / pan ──────────────────────────
 
