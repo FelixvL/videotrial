@@ -1202,8 +1202,7 @@ class CineMarker(QMainWindow):
         self.player = mpv.MPV(
             log_handler=self._mpv_log,
             loglevel='error',
-            input_default_bindings=False,      # mpv's eigen sneltoetsen uitzetten
-            input_vo_keyboard_shortcuts=False,  # ook via video-output geen toetsen
+            input_default_bindings=False,   # mpv's eigen sneltoetsen uitzetten
         )
         self.player['keep-open'] = True
         self.player['hr-seek'] = True  # frame-accurate seeking
