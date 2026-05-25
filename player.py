@@ -53,6 +53,7 @@ from actors_panel import ActorsPanel
 from films_panel import FilmsPanel
 from database_panel import DatabasePanel
 from sorter_panel import SorterPanel
+from markers_panel import MarkersPanel
 import database as db
 
 
@@ -1226,6 +1227,11 @@ class CineMarker(QMainWindow):
         self.films_panel.play_requested.connect(self._load_video_and_switch)
         self.main_tabs.addTab(self.films_panel, "🎬  FILMS")
 
+        # Markers overzicht tab
+        self.markers_panel = MarkersPanel(self.player)
+        self.markers_panel.scene_jump_requested.connect(self._on_scene_jump)
+        self.main_tabs.addTab(self.markers_panel, "◈  MARKERS")
+
         # Acteurs tab
         self.actors_panel = ActorsPanel(self.player)
         self.actors_panel.open_film_requested.connect(self._load_video_and_switch)
@@ -1260,11 +1266,14 @@ class CineMarker(QMainWindow):
         self.status.showMessage("Open een videobestand om te beginnen  •  CineMarker")
 
     def _on_tab_changed(self, idx):
-        actors_idx = self.main_tabs.indexOf(self.actors_panel)
+        actors_idx  = self.main_tabs.indexOf(self.actors_panel)
+        markers_idx = self.main_tabs.indexOf(self.markers_panel)
         self._actors_tb.setVisible(idx == actors_idx)
         player_idx = self.main_tabs.indexOf(self._player_widget)
         on_player = (idx == player_idx)
         on_actors = (idx == actors_idx)
+        if idx == markers_idx:
+            QTimer.singleShot(0, self.markers_panel.refresh)
         self._player_tb.setVisible(on_player)
         self._panel.setVisible(on_player)
         if on_player and self._video_path:
@@ -1629,6 +1638,7 @@ class CineMarker(QMainWindow):
         ok, msg = self.films_panel.delete_film(path)
         if ok:
             self.status.showMessage(f"Verplaatst naar 'deleted/': {name}")
+            self.main_tabs.setCurrentIndex(self.main_tabs.indexOf(self.films_panel))
         else:
             QMessageBox.warning(self, "Fout bij verplaatsen", msg)
 
