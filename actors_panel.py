@@ -17,12 +17,13 @@ from PyQt6.QtWidgets import (
     QFileDialog, QMessageBox, QInputDialog, QScrollArea,
     QFrame, QGridLayout, QTextEdit, QDialog, QDialogButtonBox,
     QProgressBar, QCheckBox, QSizePolicy, QStackedWidget,
-    QStyledItemDelegate, QApplication, QComboBox, QStyle
+    QStyledItemDelegate, QApplication, QComboBox, QStyle, QListView
 )
 from PyQt6.QtCore import Qt, QSize, QThread, pyqtSignal, QTimer, QRect
 from PyQt6.QtGui import QPixmap, QFont, QIcon, QPen, QColor, QPainter, QBrush
 
 import database as db
+from films_panel import FilmGridDelegate as _FilmGridDelegate
 
 
 def _count_actor_markers(actor_id: int, films: list) -> int:
@@ -124,6 +125,107 @@ class FrameExtractWorker(QThread):
                     continue
             if os.path.exists(cache_path):
                 self.frame_ready.emit(row_idx, cache_path)
+
+
+# ─────────────────────────────────────────────
+#  Marker Grid Delegate
+# ─────────────────────────────────────────────
+
+class MarkerGridDelegate(QStyledItemDelegate):
+    """Paints a marker grid cell: frame thumbnail + category icon overlay + time bar."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._thumb_cache: dict = {}   # only caches successful loads
+
+    def invalidate_cache(self):
+        self._thumb_cache.clear()
+
+    def _get_pix(self, path: str, w: int, h: int):
+        """Return scaled-and-cropped QPixmap or None. Only caches successes."""
+        if not path or not os.path.exists(path):
+            return None
+        key = f"{path}:{w}:{h}"
+        if key in self._thumb_cache:
+            return self._thumb_cache[key]
+        raw = QPixmap(path)
+        if raw.isNull():
+            return None
+        sc = raw.scaled(w, h,
+            Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+            Qt.TransformationMode.SmoothTransformation)
+        ox = (sc.width() - w) // 2
+        oy = (sc.height() - h) // 2
+        pix = sc.copy(ox, oy, w, h)
+        self._thumb_cache[key] = pix
+        return pix
+
+    def sizeHint(self, option, index):
+        d = index.data(Qt.ItemDataRole.UserRole)
+        if d and 'cell_size' in d:
+            return d['cell_size']
+        return QSize(128, 72)
+
+    def paint(self, painter, option, index):
+        data = index.data(Qt.ItemDataRole.UserRole)
+        if not data:
+            super().paint(painter, option, index)
+            return
+
+        r = option.rect
+        w, h = r.width(), r.height()
+
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+
+        # Frame thumbnail
+        pix = self._get_pix(data.get('cache_path', ''), w, h)
+        if pix:
+            painter.drawPixmap(r.x(), r.y(), pix)
+        else:
+            painter.fillRect(r, QColor('#0d0d0d'))
+            f = QFont(painter.font())
+            f.setPointSize(14)
+            painter.setFont(f)
+            painter.setPen(QColor('#252525'))
+            painter.drawText(r, Qt.AlignmentFlag.AlignCenter, '◉')
+
+        # Category icons — top-left overlay
+        cat_pixmaps = data.get('cat_pixmaps', [])
+        if cat_pixmaps:
+            cat_sz = max(14, min(20, h // 4))
+            cx = r.x() + 3
+            cy = r.y() + 3
+            for cp in cat_pixmaps:
+                sc_c = cp.scaled(cat_sz, cat_sz,
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation)
+                painter.fillRect(QRect(cx - 1, cy - 1, cat_sz + 2, cat_sz + 2),
+                                 QColor(0, 0, 0, 160))
+                painter.drawPixmap(cx, cy, sc_c)
+                cx += cat_sz + 3
+
+        # Time bar — bottom
+        time_str = data.get('time_str', '')
+        if time_str:
+            bar_h = 16
+            bar_r = QRect(r.x(), r.bottom() - bar_h + 1, w, bar_h)
+            painter.fillRect(bar_r, QColor(0, 0, 0, 170))
+            bf = QFont(painter.font())
+            bf.setPointSize(7)
+            painter.setFont(bf)
+            painter.setPen(QColor('#aaaaaa'))
+            painter.drawText(bar_r.adjusted(4, 0, -4, 0),
+                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                time_str)
+
+        # Selection highlight
+        if option.state & QStyle.StateFlag.State_Selected:
+            painter.fillRect(r, QColor(232, 184, 109, 40))
+            painter.setPen(QPen(QColor('#e8b86d'), 2))
+            painter.drawRect(r.adjusted(1, 1, -1, -1))
+
+        painter.restore()
 
 
 # ─────────────────────────────────────────────
@@ -1044,12 +1146,27 @@ class ActorDetailView(QWidget):
                     [(str(d), f"{d*10}s") for d in range(3, 10)] +
                     [('0', '00s'), ('1', '10s'), ('2', '20s')])
 
+    _FILMS_CELL_W    = 160
+    _FILMS_CELL_H    = 90
+    _FILMS_ZOOM_STEP = 32
+    _FILMS_ZOOM_MIN  = 64
+
+    _MARKERS_CELL_W    = 128
+    _MARKERS_CELL_H    = 72
+    _MARKERS_ZOOM_STEP = 24
+    _MARKERS_ZOOM_MIN  = 56
+
     def __init__(self):
         super().__init__()
         self._data:  dict = {}
         self._actor        = None
         self._frame_worker = None
-        self._marker_row_widgets: dict = {}   # row_idx -> QLabel
+        # Load zoom levels from DB before _build_ui so initial grid sizes are correct
+        self._films_zoom_level:   int  = int(db.get_setting('zoom_detail_films',   '0') or '0')
+        self._films_tick:         int  = 0
+        self._films_all_items:    list = []
+        self._markers_zoom_level: int  = int(db.get_setting('zoom_detail_markers', '0') or '0')
+        self._markers_all_items:  list = []
         self._build_ui()
 
     def _build_ui(self):
@@ -1155,45 +1272,109 @@ class ActorDetailView(QWidget):
 
         right.addWidget(fields_frame)
 
-        # Films linked to this actor
+        # Films linked to this actor — thumbnail grid
         films_frame = QFrame()
         films_frame.setStyleSheet(
             "QFrame { background: #111; border: 1px solid #1e1e1e; border-radius: 6px; }"
         )
         fv = QVBoxLayout(films_frame)
-        fv.setContentsMargins(16, 12, 16, 12)
-        fv.setSpacing(6)
+        fv.setContentsMargins(8, 8, 8, 8)
+        fv.setSpacing(4)
 
         fl_h = QHBoxLayout()
         fl_lbl = QLabel("FILMS")
         fl_lbl.setStyleSheet("color: #444; font-size: 10px; letter-spacing: 3px;")
         fl_h.addWidget(fl_lbl)
         fl_h.addStretch()
+        btn_fzo = QPushButton("−")
+        btn_fzo.setFixedSize(22, 22)
+        btn_fzo.setAutoRepeat(True)
+        btn_fzo.setAutoRepeatDelay(400)
+        btn_fzo.setAutoRepeatInterval(80)
+        btn_fzo.clicked.connect(self._films_zoom_out)
+        fl_h.addWidget(btn_fzo)
+        btn_fzi = QPushButton("+")
+        btn_fzi.setFixedSize(22, 22)
+        btn_fzi.setAutoRepeat(True)
+        btn_fzi.setAutoRepeatDelay(400)
+        btn_fzi.setAutoRepeatInterval(80)
+        btn_fzi.clicked.connect(self._films_zoom_in)
+        fl_h.addWidget(btn_fzi)
         fv.addLayout(fl_h)
 
+        cw0, ch0 = self._films_zoom_size()
         self.films_list = QListWidget()
+        self.films_list.setMouseTracking(True)
+        self.films_list.setViewMode(QListView.ViewMode.IconMode)
+        self.films_list.setResizeMode(QListView.ResizeMode.Adjust)
+        self.films_list.setFlow(QListView.Flow.LeftToRight)
+        self.films_list.setWrapping(True)
+        self.films_list.setUniformItemSizes(True)
+        self.films_list.setSpacing(0)
+        self.films_list.setGridSize(QSize(cw0, ch0))
+        self.films_list.setIconSize(QSize(0, 0))
+        self.films_list.setStyleSheet(
+            "QListWidget { background: #0a0a0a; border: none; outline: none; }"
+            "QListWidget::item { padding: 0; margin: 0; background: transparent; }"
+            "QListWidget::item:selected { background: transparent; }"
+        )
+        self.films_list.setItemDelegate(_FilmGridDelegate())
         self.films_list.itemDoubleClicked.connect(self._open_film)
         fv.addWidget(self.films_list)
 
-        # Markers linked to this actor
+        # Animation timer — cycles multi-thumbnail films every 2 s
+        self._films_anim_timer = QTimer(self)
+        self._films_anim_timer.setInterval(2000)
+        self._films_anim_timer.timeout.connect(self._films_anim_tick)
+        self._films_anim_timer.start()
+
+        # Markers linked to this actor — thumbnail grid
         markers_frame = QFrame()
         markers_frame.setStyleSheet(
             "QFrame { background: #111; border: 1px solid #1e1e1e; border-radius: 6px; }"
         )
         mv = QVBoxLayout(markers_frame)
-        mv.setContentsMargins(16, 12, 16, 12)
-        mv.setSpacing(6)
+        mv.setContentsMargins(8, 8, 8, 8)
+        mv.setSpacing(4)
 
+        mk_h = QHBoxLayout()
         mk_lbl = QLabel("MARKERS")
         mk_lbl.setStyleSheet("color: #444; font-size: 10px; letter-spacing: 3px;")
-        mv.addWidget(mk_lbl)
+        mk_h.addWidget(mk_lbl)
+        mk_h.addStretch()
+        btn_mzo = QPushButton("−")
+        btn_mzo.setFixedSize(22, 22)
+        btn_mzo.setAutoRepeat(True)
+        btn_mzo.setAutoRepeatDelay(400)
+        btn_mzo.setAutoRepeatInterval(80)
+        btn_mzo.clicked.connect(self._markers_zoom_out)
+        mk_h.addWidget(btn_mzo)
+        btn_mzi = QPushButton("+")
+        btn_mzi.setFixedSize(22, 22)
+        btn_mzi.setAutoRepeat(True)
+        btn_mzi.setAutoRepeatDelay(400)
+        btn_mzi.setAutoRepeatInterval(80)
+        btn_mzi.clicked.connect(self._markers_zoom_in)
+        mk_h.addWidget(btn_mzi)
+        mv.addLayout(mk_h)
 
+        mcw, mch = self._markers_zoom_size()
         self.markers_list = QListWidget()
+        self.markers_list.setMouseTracking(True)
+        self.markers_list.setViewMode(QListView.ViewMode.IconMode)
+        self.markers_list.setResizeMode(QListView.ResizeMode.Adjust)
+        self.markers_list.setFlow(QListView.Flow.LeftToRight)
+        self.markers_list.setWrapping(True)
+        self.markers_list.setUniformItemSizes(True)
+        self.markers_list.setSpacing(0)
+        self.markers_list.setGridSize(QSize(mcw, mch))
+        self.markers_list.setIconSize(QSize(0, 0))
         self.markers_list.setStyleSheet(
-            "QListWidget { background: #0d0d0d; border: none; }"
-            "QListWidget::item { padding: 3px 4px; color: #777; font-size: 10px; }"
-            "QListWidget::item:selected { background: #1e1600; color: #e8b86d; }"
+            "QListWidget { background: #0a0a0a; border: none; outline: none; }"
+            "QListWidget::item { padding: 0; margin: 0; background: transparent; }"
+            "QListWidget::item:selected { background: transparent; }"
         )
+        self.markers_list.setItemDelegate(MarkerGridDelegate())
         self.markers_list.itemDoubleClicked.connect(self._jump_to_marker)
         mv.addWidget(self.markers_list)
 
@@ -1210,7 +1391,6 @@ class ActorDetailView(QWidget):
         if self._frame_worker:
             self._frame_worker.stop()
             self._frame_worker = None
-        self._marker_row_widgets.clear()
         self._data  = data
         self._actor = data.get('actor')
         meta        = data.get('meta', {})
@@ -1245,6 +1425,73 @@ class ActorDetailView(QWidget):
         if f and f.get('file_path'):
             self.open_film_requested.emit(f['file_path'])
 
+    # ── Films grid zoom / animation ──────────────
+
+    def _films_zoom_size(self):
+        w = max(self._FILMS_ZOOM_MIN,
+                self._FILMS_CELL_W + self._films_zoom_level * self._FILMS_ZOOM_STEP)
+        return w, w * 9 // 16
+
+    def _films_zoom_in(self):
+        self._films_zoom_level += 1
+        db.set_setting('zoom_detail_films', str(self._films_zoom_level))
+        self._films_apply_zoom()
+
+    def _films_zoom_out(self):
+        if (self._FILMS_CELL_W +
+                (self._films_zoom_level - 1) * self._FILMS_ZOOM_STEP) >= self._FILMS_ZOOM_MIN:
+            self._films_zoom_level -= 1
+            db.set_setting('zoom_detail_films', str(self._films_zoom_level))
+            self._films_apply_zoom()
+
+    def _films_apply_zoom(self):
+        cw, ch = self._films_zoom_size()
+        self.films_list.setGridSize(QSize(cw, ch))
+        for item in self._films_all_items:
+            item.setSizeHint(QSize(cw, ch))
+            d = item.data(Qt.ItemDataRole.UserRole)
+            if d:
+                d['cell_size'] = QSize(cw, ch)
+                item.setData(Qt.ItemDataRole.UserRole, d)
+        self.films_list.itemDelegate().invalidate_cache()
+        self.films_list.update()
+
+    def _films_anim_tick(self):
+        self._films_tick += 1
+        self.films_list.itemDelegate().set_tick(self._films_tick)
+        self.films_list.viewport().update()
+
+    # ── Markers grid zoom ──────────────────────
+
+    def _markers_zoom_size(self):
+        w = max(self._MARKERS_ZOOM_MIN,
+                self._MARKERS_CELL_W + self._markers_zoom_level * self._MARKERS_ZOOM_STEP)
+        return w, w * 9 // 16
+
+    def _markers_zoom_in(self):
+        self._markers_zoom_level += 1
+        db.set_setting('zoom_detail_markers', str(self._markers_zoom_level))
+        self._markers_apply_zoom()
+
+    def _markers_zoom_out(self):
+        if (self._MARKERS_CELL_W +
+                (self._markers_zoom_level - 1) * self._MARKERS_ZOOM_STEP) >= self._MARKERS_ZOOM_MIN:
+            self._markers_zoom_level -= 1
+            db.set_setting('zoom_detail_markers', str(self._markers_zoom_level))
+            self._markers_apply_zoom()
+
+    def _markers_apply_zoom(self):
+        cw, ch = self._markers_zoom_size()
+        self.markers_list.setGridSize(QSize(cw, ch))
+        for item in self._markers_all_items:
+            item.setSizeHint(QSize(cw, ch))
+            d = item.data(Qt.ItemDataRole.UserRole)
+            if d:
+                d['cell_size'] = QSize(cw, ch)
+                item.setData(Qt.ItemDataRole.UserRole, d)
+        self.markers_list.itemDelegate().invalidate_cache()
+        self.markers_list.update()
+
     def _jump_to_marker(self, item):
         d = item.data(Qt.ItemDataRole.UserRole)
         if d and d.get('film_path'):
@@ -1252,25 +1499,69 @@ class ActorDetailView(QWidget):
 
     def _refresh_films(self):
         self.films_list.clear()
-        self.films_list.setIconSize(QSize(96, 54))
-        if self._actor:
-            for f in db.get_films_for_actor(self._actor['id']):
-                item = QListWidgetItem()
-                thumb = f.get('thumbnail', '')
-                if thumb and os.path.exists(thumb):
-                    pix = QPixmap(thumb).scaled(
-                        96, 54,
-                        Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-                        Qt.TransformationMode.SmoothTransformation
-                    )
-                    item.setIcon(QIcon(pix))
-                item.setText(f"  {f['title']}")
-                item.setData(Qt.ItemDataRole.UserRole, f)
-                self.films_list.addItem(item)
+        self._films_all_items.clear()
+        self.films_list.itemDelegate().invalidate_cache()
+
+        if not self._actor:
+            return
+
+        cw, ch = self._films_zoom_size()
+
+        for f in db.get_films_for_actor(self._actor['id']):
+            film_id = f.get('id')
+
+            # All thumbnails for cycling animation
+            if film_id:
+                rows = db.get_film_thumbnails(film_id)
+                thumbnails = [r['path'] for r in rows if os.path.exists(r['path'])]
+            else:
+                thumbnails = []
+            if not thumbnails and f.get('thumbnail') and os.path.exists(f.get('thumbnail', '')):
+                thumbnails = [f['thumbnail']]
+
+            # File size from disk
+            fp = f.get('file_path', '')
+            size = 0
+            if fp and os.path.exists(fp):
+                try:
+                    size = os.path.getsize(fp)
+                except OSError:
+                    pass
+
+            # Marker count
+            markers = 0
+            if fp:
+                p = Path(fp)
+                mf = p.parent / f".{p.stem}_markers.json"
+                if mf.exists():
+                    try:
+                        markers = len(json.loads(mf.read_text('utf-8')))
+                    except Exception:
+                        pass
+
+            item = QListWidgetItem()
+            item.setSizeHint(QSize(cw, ch))
+            item.setToolTip(f.get('title', ''))
+            item.setData(Qt.ItemDataRole.UserRole, {
+                'path':       fp,
+                'file_path':  fp,
+                'name':       f.get('title', ''),
+                'thumbnail':  f.get('thumbnail', ''),
+                'thumbnails': thumbnails,
+                'film_id':    film_id,
+                'size':       size,
+                'date':       0,
+                'markers':    markers,
+                'duration':   f.get('duration', 0) or 0,
+                'cell_size':  QSize(cw, ch),
+            })
+            self.films_list.addItem(item)
+            self._films_all_items.append(item)
 
     def _refresh_markers(self):
         self.markers_list.clear()
-        self._marker_row_widgets.clear()
+        self._markers_all_items.clear()
+        self.markers_list.itemDelegate().invalidate_cache()
         if self._frame_worker:
             self._frame_worker.stop()
             self._frame_worker = None
@@ -1285,8 +1576,7 @@ class ActorDetailView(QWidget):
         thumb_dir = Path(__file__).parent / 'thumbnails' / 'markers'
         thumb_dir.mkdir(parents=True, exist_ok=True)
 
-        FRAME_W, FRAME_H = 80, 45
-        CAT_SZ = 22
+        cw, ch = self._markers_zoom_size()
 
         for film in db.get_films_for_actor(actor_id):
             for m in self._load_markers(film['file_path']):
@@ -1297,7 +1587,7 @@ class ActorDetailView(QWidget):
                 s = int(time_val)
                 time_str = f"{s // 60:02d}:{s % 60:02d}"
 
-                # Category pixmaps
+                # Category pixmaps (pre-load full QPixmap into item data; delegate scales)
                 cat_ids  = m.get('categories') or []
                 cat_pixs = []
                 for cid in cat_ids:
@@ -1306,11 +1596,7 @@ class ActorDetailView(QWidget):
                         ip   = cats[0].get('icon_path', '') if cats else ''
                         if ip and os.path.exists(ip):
                             p = QPixmap(ip)
-                            cat_cache[cid] = p.scaled(
-                                CAT_SZ, CAT_SZ,
-                                Qt.AspectRatioMode.KeepAspectRatio,
-                                Qt.TransformationMode.SmoothTransformation,
-                            ) if not p.isNull() else None
+                            cat_cache[cid] = p if not p.isNull() else None
                         else:
                             cat_cache[cid] = None
                     if cat_cache[cid]:
@@ -1321,63 +1607,19 @@ class ActorDetailView(QWidget):
                 cache_name = f"{Path(film['file_path']).stem}_{time_ms}.jpg"
                 cache_path = str(thumb_dir / cache_name)
 
-                # ── Row widget ───────────────────
-                row_w = QWidget()
-                row_w.setStyleSheet("background: transparent;")
-                rh = QHBoxLayout(row_w)
-                rh.setContentsMargins(4, 3, 6, 3)
-                rh.setSpacing(6)
-
-                # Frame thumbnail (placeholder or cached)
-                frame_lbl = QLabel()
-                frame_lbl.setFixedSize(FRAME_W, FRAME_H)
-                frame_lbl.setStyleSheet(
-                    "background:#111; border-radius:2px;")
-                frame_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-                if os.path.exists(cache_path):
-                    pix = QPixmap(cache_path)
-                    if not pix.isNull():
-                        scaled = pix.scaled(
-                            FRAME_W, FRAME_H,
-                            Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-                            Qt.TransformationMode.SmoothTransformation,
-                        )
-                        ox = (scaled.width()  - FRAME_W) // 2
-                        oy = (scaled.height() - FRAME_H) // 2
-                        frame_lbl.setPixmap(scaled.copy(ox, oy, FRAME_W, FRAME_H))
-                        frame_lbl.setStyleSheet("")
-                rh.addWidget(frame_lbl)
-
-                # Category icons
-                for cp in cat_pixs:
-                    cl = QLabel()
-                    cl.setFixedSize(CAT_SZ, CAT_SZ)
-                    cl.setPixmap(cp)
-                    cl.setStyleSheet("background: transparent;")
-                    rh.addWidget(cl)
-
-                # MM:SS
-                t_lbl = QLabel(time_str)
-                t_lbl.setStyleSheet(
-                    "color:#888; font-size:11px;"
-                    "font-family:'Consolas',monospace; background:transparent;")
-                t_lbl.setFixedWidth(36)
-                rh.addWidget(t_lbl)
-
-                rh.addStretch()
-
-                # List item
-                row_idx = self.markers_list.count()
+                row_idx = len(self._markers_all_items)
                 item = QListWidgetItem()
-                item.setSizeHint(QSize(0, FRAME_H + 10))
+                item.setSizeHint(QSize(cw, ch))
                 item.setData(Qt.ItemDataRole.UserRole, {
-                    'film_path': film['file_path'],
-                    'time':      time_val,
+                    'film_path':   film['file_path'],
+                    'time':        time_val,
+                    'time_str':    time_str,
+                    'cache_path':  cache_path,
+                    'cat_pixmaps': cat_pixs,
+                    'cell_size':   QSize(cw, ch),
                 })
                 self.markers_list.addItem(item)
-                self.markers_list.setItemWidget(item, row_w)
-
-                self._marker_row_widgets[row_idx] = frame_lbl
+                self._markers_all_items.append(item)
 
                 if not os.path.exists(cache_path):
                     tasks.append((row_idx, film['file_path'], time_val, cache_path))
@@ -1389,21 +1631,9 @@ class ActorDetailView(QWidget):
             self._frame_worker.start()
 
     def _on_frame_ready(self, row_idx: int, cache_path: str):
-        lbl = self._marker_row_widgets.get(row_idx)
-        if lbl is None:
-            return
-        pix = QPixmap(cache_path)
-        if pix.isNull():
-            return
-        scaled = pix.scaled(
-            lbl.width(), lbl.height(),
-            Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-            Qt.TransformationMode.SmoothTransformation,
-        )
-        ox = (scaled.width()  - lbl.width())  // 2
-        oy = (scaled.height() - lbl.height()) // 2
-        lbl.setPixmap(scaled.copy(ox, oy, lbl.width(), lbl.height()))
-        lbl.setStyleSheet("")   # remove grey placeholder background
+        # Delegate's _get_pix only caches successes, so just refresh the
+        # viewport — next repaint will pick up the newly extracted file.
+        self.markers_list.viewport().update()
 
     @staticmethod
     def _load_markers(video_path: str) -> list:
@@ -1472,7 +1702,10 @@ class ActorsPanel(QWidget):
         super().__init__()
         self.player = player
         self._all_items: list = []
-        self._zoom_level = self.ZOOM_DEFAULT_LEVEL
+        self._zoom_level = int(
+            db.get_setting('zoom_actors_panel', str(self.ZOOM_DEFAULT_LEVEL))
+            or str(self.ZOOM_DEFAULT_LEVEL)
+        )
         self._mode = 'in_db'
         self._cb_db: dict = {}
         self._cb_kleur: dict = {}
@@ -1839,11 +2072,13 @@ class ActorsPanel(QWidget):
 
     def _zoom_in(self):
         self._zoom_level += 1
+        db.set_setting('zoom_actors_panel', str(self._zoom_level))
         self._apply_zoom()
 
     def _zoom_out(self):
         if 160 + (self._zoom_level - 1) * self.ZOOM_STEP_W >= self.ZOOM_MIN_W:
             self._zoom_level -= 1
+            db.set_setting('zoom_actors_panel', str(self._zoom_level))
             self._apply_zoom()
 
     def _apply_zoom(self):

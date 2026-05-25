@@ -1100,6 +1100,16 @@ class CineMarker(QMainWindow):
         btn_next.clicked.connect(self._next_film)
         _ph.addWidget(btn_next)
 
+        btn_del_film = QPushButton("🗑")
+        btn_del_film.setFixedSize(26, 26)
+        btn_del_film.setToolTip("Verplaats huidige film naar map 'deleted'")
+        btn_del_film.setStyleSheet(
+            "QPushButton { background: transparent; border: none; color: #443333; font-size: 14px; }"
+            "QPushButton:hover { color: #cc4444; }"
+        )
+        btn_del_film.clicked.connect(self._delete_current_film)
+        _ph.addWidget(btn_del_film)
+
         self._player_search = QLineEdit()
         self._player_search.setPlaceholderText("Acteur zoeken…")
         self._player_search.setFixedWidth(160)
@@ -1503,6 +1513,37 @@ class CineMarker(QMainWindow):
                 if d:
                     self._load_video(d['path'])
                     return
+
+    def _delete_current_film(self):
+        """Move the currently playing film to the 'deleted/' subfolder."""
+        if not self._video_path:
+            return
+        path = self._video_path
+        name = Path(path).stem
+
+        reply = QMessageBox.question(
+            self,
+            "Film verplaatsen",
+            f"'{name}' verplaatsen naar de map 'deleted'?\n\n"
+            "De film verdwijnt uit de applicatie maar blijft als\n"
+            "bestand bewaard in de submap 'deleted'.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        # Stop playback first
+        try:
+            self.player.stop()
+        except Exception:
+            pass
+        self._video_path = None
+
+        ok, msg = self.films_panel.delete_film(path)
+        if ok:
+            self.status.showMessage(f"Verplaatst naar 'deleted/': {name}")
+        else:
+            QMessageBox.warning(self, "Fout bij verplaatsen", msg)
 
     def _on_scene_jump(self, film_path, start_time):
         """Jump to a scene: load film if needed, seek to start"""

@@ -10,7 +10,8 @@ from pathlib import Path
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel,
     QListWidget, QListWidgetItem, QLineEdit, QFrame,
-    QFileDialog, QStyledItemDelegate, QStyle, QListView
+    QFileDialog, QStyledItemDelegate, QStyle, QListView,
+    QMenu, QMessageBox
 )
 from PyQt6.QtCore import Qt, QSize, QRect, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QFont, QPainter, QPen, QPixmap
@@ -244,7 +245,7 @@ class FilmsPanel(QWidget):
         self._sort_key:   str  = 'name'
         self._sort_asc:   bool = True
         self._sort_btns:  dict = {}
-        self._zoom_level: int  = 0
+        self._zoom_level: int  = int(db.get_setting('zoom_films_panel', '0') or '0')
         self._build_ui()
         folder = db.get_setting('film_folder', '')
         if folder:
@@ -350,7 +351,8 @@ class FilmsPanel(QWidget):
         self.film_list.setWrapping(True)
         self.film_list.setUniformItemSizes(True)
         self.film_list.setSpacing(0)
-        self.film_list.setGridSize(QSize(CELL_W, CELL_H))   # updated by _apply_zoom
+        _cw0, _ch0 = self._zoom_size()
+        self.film_list.setGridSize(QSize(_cw0, _ch0))
         self.film_list.setIconSize(QSize(0, 0))
         self.film_list.setStyleSheet(
             "QListWidget { background: #0a0a0a; border: none; outline: none; }"
@@ -359,6 +361,8 @@ class FilmsPanel(QWidget):
         )
         self.film_list.setItemDelegate(FilmGridDelegate())
         self.film_list.itemDoubleClicked.connect(self._on_double_click)
+        self.film_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.film_list.customContextMenuRequested.connect(self._show_context_menu)
         v.addWidget(self.film_list, stretch=1)
 
         # Animation timer — advances thumbnail frame every 2 s
@@ -436,11 +440,13 @@ class FilmsPanel(QWidget):
 
     def _zoom_in(self):
         self._zoom_level += 1
+        db.set_setting('zoom_films_panel', str(self._zoom_level))
         self._apply_zoom()
 
     def _zoom_out(self):
         if CELL_W + (self._zoom_level - 1) * ZOOM_STEP_W >= ZOOM_MIN_W:
             self._zoom_level -= 1
+            db.set_setting('zoom_films_panel', str(self._zoom_level))
             self._apply_zoom()
 
     def _apply_zoom(self):
@@ -556,6 +562,94 @@ class FilmsPanel(QWidget):
         visible = sum(1 for i in self._all_items if not i.isHidden())
         total   = len(self._all_items)
         self.lbl_count.setText(f"  {visible} / {total} films")
+
+    # ── Context menu ─────────────────────────────
+
+    def _show_context_menu(self, pos):
+        item = self.film_list.itemAt(pos)
+        if not item:
+            return
+        d = item.data(Qt.ItemDataRole.UserRole)
+        if not d:
+            return
+
+        menu = QMenu(self)
+        act_play   = menu.addAction("▶  Afspelen")
+        menu.addSeparator()
+        act_delete = menu.addAction("🗑  Verplaats naar map 'deleted'")
+
+        chosen = menu.exec(self.film_list.viewport().mapToGlobal(pos))
+        if chosen == act_play:
+            self.play_requested.emit(d['path'])
+        elif chosen == act_delete:
+            self._confirm_and_delete(item, d)
+
+    def _confirm_and_delete(self, item, d):
+        name = d.get('name', Path(d.get('path', '')).stem)
+        reply = QMessageBox.question(
+            self,
+            "Film verplaatsen",
+            f"'{name}' verplaatsen naar de map 'deleted'?\n\n"
+            "De film verdwijnt uit de applicatie maar blijft als\n"
+            "bestand bewaard in de submap 'deleted'.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        ok, msg = self.delete_film(d.get('path', ''))
+        if not ok:
+            QMessageBox.warning(self, "Fout bij verplaatsen", msg)
+
+    def delete_film(self, file_path: str) -> tuple:
+        """Move film + markers to a 'deleted/' subfolder; remove from DB and list.
+
+        Returns (success: bool, error_message: str).
+        """
+        p = Path(file_path)
+
+        if p.exists():
+            deleted_dir = p.parent / 'deleted'
+            try:
+                deleted_dir.mkdir(exist_ok=True)
+            except OSError as e:
+                return False, f"Kan map 'deleted' niet aanmaken:\n{e}"
+
+            dest = deleted_dir / p.name
+            # Avoid collision — append a counter
+            if dest.exists():
+                i = 1
+                while dest.exists():
+                    dest = deleted_dir / f"{p.stem}_{i}{p.suffix}"
+                    i += 1
+
+            try:
+                p.rename(dest)
+            except OSError as e:
+                return False, f"Kan bestand niet verplaatsen:\n{e}"
+
+            # Move markers JSON alongside the film
+            mf = p.parent / f".{p.stem}_markers.json"
+            if mf.exists():
+                try:
+                    mf.rename(deleted_dir / mf.name)
+                except OSError:
+                    pass  # not critical — markers file stays behind, no harm
+
+        # Remove from DB (cascades to film_thumbnails, scenes, actor_films…)
+        db.delete_film_by_path(file_path)
+
+        # Remove from displayed list
+        for i in range(self.film_list.count()):
+            it = self.film_list.item(i)
+            if it:
+                itd = it.data(Qt.ItemDataRole.UserRole)
+                if itd and itd.get('path') == file_path:
+                    self.film_list.takeItem(i)
+                    self._all_items = [x for x in self._all_items if x is not it]
+                    break
+
+        self._update_count()
+        return True, ''
 
     # ── Play ─────────────────────────────────────
 

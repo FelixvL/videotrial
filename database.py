@@ -290,6 +290,14 @@ def get_film(film_id):
     return dict(row) if row else None
 
 
+def delete_film_by_path(file_path: str):
+    """Remove a film record (and all cascades) by its file path."""
+    conn = get_connection()
+    conn.execute("DELETE FROM films WHERE file_path=?", (file_path,))
+    conn.commit()
+    conn.close()
+
+
 def update_film_notes(film_id, notes):
     conn = get_connection()
     conn.execute("UPDATE films SET notes=? WHERE id=?", (notes, film_id))
