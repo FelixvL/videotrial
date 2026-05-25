@@ -24,9 +24,11 @@ VIDEO_EXTS = {
     '.divx', '.vob', '.rmvb', '.rm', '.3gp',
 }
 
-CELL_W  = 192
-CELL_H  = 108   # 16:9
-ACT_SZ  = 26    # actor photo overlay size
+CELL_W      = 192   # default cell width
+CELL_H      = 108   # default cell height  (16:9)
+ACT_SZ      = 26    # actor photo overlay size
+ZOOM_STEP_W = 32    # px per zoom level
+ZOOM_MIN_W  = 64    # minimum cell width
 
 SORT_FIELDS = [
     ('name',    'Naam'),
@@ -58,6 +60,10 @@ class FilmGridDelegate(QStyledItemDelegate):
         super().__init__(parent)
         self._thumb_cache: dict = {}
         self._actor_cache: dict = {}   # film_id -> [QPixmap, ...]
+        self._tick: int = 0
+
+    def set_tick(self, tick: int):
+        self._tick = tick
 
     def invalidate_cache(self):
         self._thumb_cache.clear()
@@ -111,8 +117,13 @@ class FilmGridDelegate(QStyledItemDelegate):
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
 
-        # Thumbnail
-        pix = self._thumb(data.get('thumbnail', ''), w, h)
+        # Thumbnail — cycle through all thumbnails when more than one exists
+        thumbs = data.get('thumbnails', [])
+        if thumbs:
+            thumb_path = thumbs[self._tick % len(thumbs)]
+        else:
+            thumb_path = data.get('thumbnail', '')
+        pix = self._thumb(thumb_path, w, h)
         if pix:
             painter.drawPixmap(r.x(), r.y(), pix)
         else:
@@ -123,11 +134,53 @@ class FilmGridDelegate(QStyledItemDelegate):
             painter.setPen(QColor('#252525'))
             painter.drawText(r, Qt.AlignmentFlag.AlignCenter, '▶')
 
-        # Actor photos (bottom-left)
+        # Bottom info bar — always visible when not hovered
+        bar_h = 20
+        bar_r = QRect(r.x(), r.bottom() - bar_h, w, bar_h)
+        if not hovered:
+            painter.fillRect(bar_r, QColor(0, 0, 0, 170))
+            bf = QFont(painter.font())
+            bf.setPointSize(7)
+            painter.setFont(bf)
+
+            duration = data.get('duration', 0) or 0
+            markers  = data.get('markers',  0) or 0
+            size_b   = data.get('size',     0) or 0
+
+            # File size — right-aligned
+            if size_b > 0:
+                gb = size_b / 1_073_741_824
+                mb = size_b / 1_048_576
+                size_str = (f"{gb:.1f} GB" if gb >= 1 else f"{mb:.0f} MB")
+                painter.setPen(QColor('#888888'))
+                painter.drawText(bar_r.adjusted(0, 0, -5, 0),
+                    Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                    size_str)
+
+            # Duration — to the left of file size
+            if duration > 0:
+                s = int(duration)
+                dur_str = (f"{s//3600}:{(s%3600)//60:02d}:{s%60:02d}"
+                           if s >= 3600 else f"{s//60}:{s%60:02d}")
+                fm = painter.fontMetrics()
+                size_w = (fm.horizontalAdvance(size_str) + 10) if size_b > 0 else 0
+                painter.setPen(QColor('#aaaaaa'))
+                painter.drawText(bar_r.adjusted(0, 0, -(5 + size_w), 0),
+                    Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                    dur_str)
+
+            # Marker count — left-aligned
+            if markers > 0:
+                painter.setPen(QColor('#6db8e8'))
+                painter.drawText(bar_r.adjusted(5, 0, 0, 0),
+                    Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                    f'◉{markers}')
+
+        # Actor photos (bottom-left, above the info bar)
         film_id = data.get('film_id')
         if film_id:
             ax = r.x() + 3
-            ay = r.bottom() - ACT_SZ - 3
+            ay = r.bottom() - ACT_SZ - bar_h - 2
             for ap in self._actor_pixmaps(film_id):
                 painter.drawPixmap(ax, ay, ap)
                 ax += ACT_SZ + 2
@@ -184,10 +237,11 @@ class FilmsPanel(QWidget):
 
     def __init__(self):
         super().__init__()
-        self._all_items: list  = []
-        self._sort_key:  str   = 'name'
-        self._sort_asc:  bool  = True
-        self._sort_btns: dict  = {}
+        self._all_items:  list = []
+        self._sort_key:   str  = 'name'
+        self._sort_asc:   bool = True
+        self._sort_btns:  dict = {}
+        self._zoom_level: int  = 0
         self._build_ui()
         folder = db.get_setting('film_folder', '')
         if folder:
@@ -240,6 +294,22 @@ class FilmsPanel(QWidget):
         btn_folder.clicked.connect(self._pick_folder)
         b.addWidget(btn_folder)
 
+        btn_zoom_out = QPushButton("−")
+        btn_zoom_out.setFixedSize(28, 28)
+        btn_zoom_out.setAutoRepeat(True)
+        btn_zoom_out.setAutoRepeatDelay(400)
+        btn_zoom_out.setAutoRepeatInterval(80)
+        btn_zoom_out.clicked.connect(self._zoom_out)
+        b.addWidget(btn_zoom_out)
+
+        btn_zoom_in = QPushButton("+")
+        btn_zoom_in.setFixedSize(28, 28)
+        btn_zoom_in.setAutoRepeat(True)
+        btn_zoom_in.setAutoRepeatDelay(400)
+        btn_zoom_in.setAutoRepeatInterval(80)
+        btn_zoom_in.clicked.connect(self._zoom_in)
+        b.addWidget(btn_zoom_in)
+
         v.addWidget(bar)
 
         # ── Sort bar ─────────────────────────────
@@ -277,7 +347,7 @@ class FilmsPanel(QWidget):
         self.film_list.setWrapping(True)
         self.film_list.setUniformItemSizes(True)
         self.film_list.setSpacing(0)
-        self.film_list.setGridSize(QSize(CELL_W, CELL_H))
+        self.film_list.setGridSize(QSize(CELL_W, CELL_H))   # updated by _apply_zoom
         self.film_list.setIconSize(QSize(0, 0))
         self.film_list.setStyleSheet(
             "QListWidget { background: #0a0a0a; border: none; outline: none; }"
@@ -287,6 +357,13 @@ class FilmsPanel(QWidget):
         self.film_list.setItemDelegate(FilmGridDelegate())
         self.film_list.itemDoubleClicked.connect(self._on_double_click)
         v.addWidget(self.film_list, stretch=1)
+
+        # Animation timer — advances thumbnail frame every 2 s
+        self._tick = 0
+        self._anim_timer = QTimer(self)
+        self._anim_timer.setInterval(2000)
+        self._anim_timer.timeout.connect(self._anim_tick)
+        self._anim_timer.start()
 
     # ── Sort ─────────────────────────────────────
 
@@ -340,6 +417,37 @@ class FilmsPanel(QWidget):
         self._all_items = items
         self._apply_search_visibility()
 
+    # ── Animation ────────────────────────────────
+
+    def _anim_tick(self):
+        self._tick += 1
+        self.film_list.itemDelegate().set_tick(self._tick)
+        self.film_list.viewport().update()
+
+    # ── Zoom ─────────────────────────────────────
+
+    def _zoom_size(self):
+        w = max(ZOOM_MIN_W, CELL_W + self._zoom_level * ZOOM_STEP_W)
+        h = w * 9 // 16
+        return w, h
+
+    def _zoom_in(self):
+        self._zoom_level += 1
+        self._apply_zoom()
+
+    def _zoom_out(self):
+        if CELL_W + (self._zoom_level - 1) * ZOOM_STEP_W >= ZOOM_MIN_W:
+            self._zoom_level -= 1
+            self._apply_zoom()
+
+    def _apply_zoom(self):
+        cw, ch = self._zoom_size()
+        self.film_list.setGridSize(QSize(cw, ch))
+        for item in self._all_items:
+            item.setSizeHint(QSize(cw, ch))
+        self.film_list.itemDelegate().invalidate_cache()
+        self.film_list.update()
+
     # ── Folder ───────────────────────────────────
 
     def _pick_folder(self):
@@ -383,6 +491,15 @@ class FilmsPanel(QWidget):
             thumbnail = db_film.get('thumbnail', '')
             duration  = db_film.get('duration', 0) or 0
 
+            # All thumbnails for cycling animation
+            if film_id:
+                _rows = db.get_film_thumbnails(film_id)
+                thumbnails = [r['path'] for r in _rows if os.path.exists(r['path'])]
+            else:
+                thumbnails = []
+            if not thumbnails and thumbnail and os.path.exists(thumbnail):
+                thumbnails = [thumbnail]
+
             try:
                 st = fp.stat()
                 size = st.st_size
@@ -393,18 +510,20 @@ class FilmsPanel(QWidget):
 
             markers = _count_film_markers(str(fp))
 
+            cw, ch = self._zoom_size()
             item = QListWidgetItem()
-            item.setSizeHint(QSize(CELL_W, CELL_H))
+            item.setSizeHint(QSize(cw, ch))
             item.setToolTip(fp.stem)
             item.setData(Qt.ItemDataRole.UserRole, {
-                'path':      str(fp),
-                'name':      fp.stem,
-                'thumbnail': thumbnail,
-                'film_id':   film_id,
-                'size':      size,
-                'date':      date,
-                'markers':   markers,
-                'duration':  duration,
+                'path':       str(fp),
+                'name':       fp.stem,
+                'thumbnail':  thumbnail,
+                'thumbnails': thumbnails,
+                'film_id':    film_id,
+                'size':       size,
+                'date':       date,
+                'markers':    markers,
+                'duration':   duration,
             })
             self.film_list.addItem(item)
             self._all_items.append(item)

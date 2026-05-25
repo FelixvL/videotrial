@@ -89,6 +89,32 @@ def init_db():
     except Exception:
         pass
 
+    # Migration: film_thumbnails table (multiple thumbnails per film)
+    c.executescript("""
+        CREATE TABLE IF NOT EXISTS film_thumbnails (
+            id      INTEGER PRIMARY KEY AUTOINCREMENT,
+            film_id INTEGER NOT NULL REFERENCES films(id) ON DELETE CASCADE,
+            path    TEXT NOT NULL
+        );
+    """)
+    # Back-fill existing single thumbnails into the new table
+    try:
+        rows = c.execute(
+            "SELECT id, thumbnail FROM films WHERE thumbnail != '' AND thumbnail IS NOT NULL"
+        ).fetchall()
+        for row in rows:
+            exists = c.execute(
+                "SELECT id FROM film_thumbnails WHERE film_id=? AND path=?",
+                (row['id'], row['thumbnail'])
+            ).fetchone()
+            if not exists:
+                c.execute(
+                    "INSERT INTO film_thumbnails (film_id, path) VALUES (?, ?)",
+                    (row['id'], row['thumbnail'])
+                )
+    except Exception:
+        pass
+
     conn.commit()
     conn.close()
 
@@ -274,6 +300,29 @@ def update_film_notes(film_id, notes):
 def set_film_thumbnail(film_id, path):
     conn = get_connection()
     conn.execute("UPDATE films SET thumbnail=? WHERE id=?", (path, film_id))
+    conn.commit()
+    conn.close()
+
+
+def add_film_thumbnail(film_id, path):
+    conn = get_connection()
+    conn.execute("INSERT INTO film_thumbnails (film_id, path) VALUES (?, ?)", (film_id, path))
+    conn.commit()
+    conn.close()
+
+
+def get_film_thumbnails(film_id):
+    conn = get_connection()
+    rows = conn.execute(
+        "SELECT * FROM film_thumbnails WHERE film_id=? ORDER BY id", (film_id,)
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def delete_film_thumbnail(thumb_id):
+    conn = get_connection()
+    conn.execute("DELETE FROM film_thumbnails WHERE id=?", (thumb_id,))
     conn.commit()
     conn.close()
 

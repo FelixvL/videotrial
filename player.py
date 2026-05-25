@@ -379,6 +379,12 @@ class _FilmActorsOverlay(QWidget):
         self.setFixedHeight(self.TOTAL_H)
         main_win.installEventFilter(self)
 
+        self._thumb_paths: list = []
+        self._thumb_idx:   int  = 0
+        self._thumb_timer = QTimer(self)
+        self._thumb_timer.setInterval(2000)
+        self._thumb_timer.timeout.connect(self._cycle_thumb)
+
         self._btn_thumb = QPushButton("⊡", self)
         self._btn_thumb.setFixedSize(self.BTN_TW, self.BTN_TH)
         self._btn_thumb.setToolTip("Klik om huidig frame als thumbnail op te slaan")
@@ -534,6 +540,26 @@ class _FilmActorsOverlay(QWidget):
         self._place_buttons()
         self.move(tl.x() + 8, tl.y() + vc.height() - self.TOTAL_H - 8)
 
+    # ── Thumbnail cycling ────────────────────────
+
+    def load_thumbnails(self, film_id: int):
+        """Load all thumbnails for a film and start cycling if > 1."""
+        rows = db.get_film_thumbnails(film_id)
+        self._thumb_paths = [r['path'] for r in rows if os.path.exists(r['path'])]
+        self._thumb_idx   = 0
+        self._thumb_timer.stop()
+        if self._thumb_paths:
+            self.set_thumb_preview(self._thumb_paths[0])
+            if len(self._thumb_paths) > 1:
+                self._thumb_timer.start()
+        else:
+            self.set_thumb_preview('')
+
+    def _cycle_thumb(self):
+        if len(self._thumb_paths) > 1:
+            self._thumb_idx = (self._thumb_idx + 1) % len(self._thumb_paths)
+            self.set_thumb_preview(self._thumb_paths[self._thumb_idx])
+
     # ── Thumbnail button ─────────────────────────
 
     def set_thumb_preview(self, path: str):
@@ -597,8 +623,7 @@ class _FilmActorsOverlay(QWidget):
                     pix = scaled.copy(ox, oy, self.TW, self.TH)
             self._pixmaps.append(pix)
 
-        film = db.get_film(film_id)
-        self.set_thumb_preview(film.get('thumbnail', '') if film else '')
+        self.load_thumbnails(film_id)
         self._reload_categories()
         self._reposition()
         self.update()
@@ -1359,6 +1384,7 @@ class CineMarker(QMainWindow):
         QShortcut(QKeySequence(Qt.Key.Key_Minus), self).activated.connect(self._shortcut_minus)
         QShortcut(QKeySequence(Qt.Key.Key_0), self).activated.connect(self._reset_zoom)
         QShortcut(QKeySequence("T"), self).activated.connect(self.export_thumbnail)
+        QShortcut(QKeySequence("V"),      self).activated.connect(self._next_film)
         QShortcut(QKeySequence("Ctrl+O"), self).activated.connect(self.open_file)
         QShortcut(QKeySequence("F11"),    self).activated.connect(self._toggle_fullscreen)
         QShortcut(QKeySequence("Ctrl+L"), self).activated.connect(self._show_actor_overlay)
@@ -1410,6 +1436,7 @@ class CineMarker(QMainWindow):
         self._markers = load_markers(path)
         self._refresh_marker_list()
         self.player.play(path)
+        self.player.pause = False   # always start playing, even if previously paused
         film = db.get_or_create_film(path)
         self._actors_overlay.refresh(film['id'])
         self.status.showMessage(f"  {Path(path).name}  •  {path}")
@@ -1560,12 +1587,18 @@ class CineMarker(QMainWindow):
         film = db.get_or_create_film(self._video_path)
         thumb_dir = Path(os.path.dirname(os.path.abspath(__file__))) / 'thumbnails'
         thumb_dir.mkdir(exist_ok=True)
-        path = str(thumb_dir / f"{film['id']}_thumb.jpg")
+        import time as _time
+        ts   = int(_time.time() * 1000)
+        path = str(thumb_dir / f"{film['id']}_thumb_{ts}.jpg")
         try:
             self.player.command('screenshot-to-file', path, 'video')
-            db.set_film_thumbnail(film['id'], path)
-            self._actors_overlay.set_thumb_preview(path)
-            self.films_panel._scan_folder(db.get_setting('film_folder', ''))
+            db.add_film_thumbnail(film['id'], path)
+            db.set_film_thumbnail(film['id'], path)   # keep backward-compat primary
+            # Reload overlay with full thumbnail list so it starts cycling
+            self._actors_overlay.load_thumbnails(film['id'])
+            folder = db.get_setting('film_folder', '')
+            if folder:
+                self.films_panel._scan_folder(folder)
             self.status.showMessage(f"  Thumbnail opgeslagen voor {Path(self._video_path).name}")
         except Exception as e:
             self.status.showMessage(f"  Thumbnail mislukt: {e}")
