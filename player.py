@@ -1625,6 +1625,7 @@ class CineMarker(QMainWindow):
         QShortcut(QKeySequence("]"), self).activated.connect(self._speed_up)
         QShortcut(QKeySequence("["), self).activated.connect(self._speed_down)
         QShortcut(QKeySequence("P"),  self).activated.connect(self._shortcut_p)
+        QShortcut(QKeySequence("O"),  self).activated.connect(self._shortcut_o)
 
     # ── Timer ─────────────────────────────────
 
@@ -2271,14 +2272,27 @@ class CineMarker(QMainWindow):
         n = self.marker_list.count()
         if n == 0:
             return
-        # Zorg dat het paneel zichtbaar is en op de markers-pagina staat
         if not self._panel.isVisible():
             self._panel.show()
         self._panel.show_search(False)
-        # Gebruik de eigen teller — currentRow() wordt gereset door list-rebuilds
         next_row = (self._current_marker_row + 1) % n
         self._current_marker_row = next_row
         self.marker_list.setCurrentRow(next_row)
+        self._on_marker_jump()
+
+    def _shortcut_o(self):
+        """Ga naar de vorige marker in de lijst (wraps rond)."""
+        if not self._video_path:
+            return
+        n = self.marker_list.count()
+        if n == 0:
+            return
+        if not self._panel.isVisible():
+            self._panel.show()
+        self._panel.show_search(False)
+        prev_row = (self._current_marker_row - 1) % n
+        self._current_marker_row = prev_row
+        self.marker_list.setCurrentRow(prev_row)
         self._on_marker_jump()
 
     def _shortcut_plus(self):

@@ -2228,8 +2228,7 @@ class ActorsPanel(QWidget):
             self._sort_reverse = not self._sort_reverse
         else:
             self._sort_key = key
-            # Markers en films standaard aflopend (meeste eerst)
-            self._sort_reverse = key in ('markers', 'films')
+            self._sort_reverse = True   # eerste klik altijd hoog → laag
         self._apply_sort()
         self._update_sort_buttons()
 
