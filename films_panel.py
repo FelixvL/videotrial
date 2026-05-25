@@ -213,6 +213,9 @@ class FilmGridDelegate(QStyledItemDelegate):
         painter.restore()
 
     def sizeHint(self, option, index):
+        d = index.data(Qt.ItemDataRole.UserRole)
+        if d and 'cell_size' in d:
+            return d['cell_size']
         return QSize(CELL_W, CELL_H)
 
 
@@ -445,6 +448,10 @@ class FilmsPanel(QWidget):
         self.film_list.setGridSize(QSize(cw, ch))
         for item in self._all_items:
             item.setSizeHint(QSize(cw, ch))
+            d = item.data(Qt.ItemDataRole.UserRole)
+            if d:
+                d['cell_size'] = QSize(cw, ch)
+                item.setData(Qt.ItemDataRole.UserRole, d)
         self.film_list.itemDelegate().invalidate_cache()
         self.film_list.update()
 
@@ -524,6 +531,7 @@ class FilmsPanel(QWidget):
                 'date':       date,
                 'markers':    markers,
                 'duration':   duration,
+                'cell_size':  QSize(cw, ch),
             })
             self.film_list.addItem(item)
             self._all_items.append(item)
