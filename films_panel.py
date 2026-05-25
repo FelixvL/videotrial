@@ -5,6 +5,7 @@ CineMarker — Films browser panel  (grid view, sortable)
 
 import os
 import json
+import random
 from pathlib import Path
 
 from PyQt6.QtWidgets import (
@@ -130,10 +131,11 @@ class FilmGridDelegate(QStyledItemDelegate):
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
 
-        # Thumbnail — cycle through all thumbnails when more than one exists
+        # Thumbnail — cycle through all thumbnails with per-item phase offset
         thumbs = data.get('thumbnails', [])
         if thumbs:
-            thumb_path = thumbs[self._tick % len(thumbs)]
+            offset     = data.get('thumb_offset', 0)
+            thumb_path = thumbs[(self._tick + offset) % len(thumbs)]
         else:
             thumb_path = data.get('thumbnail', '')
         pix = self._thumb(thumb_path, w, h)
@@ -550,17 +552,18 @@ class FilmsPanel(QWidget):
             item.setSizeHint(QSize(cw, ch))
             item.setToolTip(fp.stem)
             item.setData(Qt.ItemDataRole.UserRole, {
-                'path':        str(fp),
-                'name':        fp.stem,
-                'thumbnail':   thumbnail,
-                'thumbnails':  thumbnails,
-                'film_id':     film_id,
-                'size':        size,
-                'date':        date,
-                'markers':     markers,
-                'neg_markers': neg_markers,
-                'duration':    duration,
-                'cell_size':   QSize(cw, ch),
+                'path':         str(fp),
+                'name':         fp.stem,
+                'thumbnail':    thumbnail,
+                'thumbnails':   thumbnails,
+                'film_id':      film_id,
+                'size':         size,
+                'date':         date,
+                'markers':      markers,
+                'neg_markers':  neg_markers,
+                'duration':     duration,
+                'cell_size':    QSize(cw, ch),
+                'thumb_offset': random.randint(0, 99),
             })
             self.film_list.addItem(item)
             self._all_items.append(item)
