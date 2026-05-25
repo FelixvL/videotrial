@@ -51,7 +51,8 @@ CELL_H  = THUMB_H + 4
 
 
 class MarkersPanel(QWidget):
-    scene_jump_requested = pyqtSignal(str, float)   # film_path, time_sec
+    scene_jump_requested    = pyqtSignal(str, float)   # film_path, time_sec
+    play_selection_requested = pyqtSignal(list)         # list of filtered entries
 
     def __init__(self, mpv_player=None):
         super().__init__()
@@ -89,6 +90,24 @@ class MarkersPanel(QWidget):
         th.addWidget(self._lbl_count)
 
         th.addStretch()
+
+        self._btn_play = QPushButton("▶  Afspelen")
+        self._btn_play.setFixedHeight(28)
+        self._btn_play.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._btn_play.setEnabled(False)
+        self._btn_play.setToolTip(
+            "Open de speler met alle gefilterde markers als afspeellijst"
+        )
+        self._btn_play.setStyleSheet(
+            "QPushButton { background: #1a1500; border: 1px solid #3a3000;"
+            "  border-radius: 4px; color: #665500; font-size: 11px;"
+            "  padding: 0 14px; }"
+            "QPushButton:enabled { border-color: #e8b86d; color: #e8b86d; }"
+            "QPushButton:enabled:hover { background: #2a2200; }"
+            "QPushButton:enabled:pressed { background: #e8b86d; color: #000; }"
+        )
+        self._btn_play.clicked.connect(self._emit_play_selection)
+        th.addWidget(self._btn_play)
 
         btn_refresh = QPushButton("↺")
         btn_refresh.setFixedSize(28, 28)
@@ -421,6 +440,10 @@ class MarkersPanel(QWidget):
         self._lbl_count.setText(
             f"{count} marker{'s' if count != 1 else ''}"
         )
+        self._btn_play.setEnabled(count > 0)
+        self._btn_play.setText(
+            f"▶  {count} afspelen" if count > 0 else "▶  Afspelen"
+        )
 
     def _on_frame_ready(self, row_idx: int, cache_path: str):
         """Plan de visuele update met een willekeurige vertraging zodat thumbnails
@@ -444,6 +467,16 @@ class MarkersPanel(QWidget):
                 self._grid.update(self._grid.model().index(row_idx, 0))
         except RuntimeError:
             pass  # item al verwijderd door nieuwe filter
+
+    def _emit_play_selection(self):
+        """Stuur de gefilterde entries naar de speler als afspeellijst."""
+        entries = self._all_entries
+        if self._cat_filter:
+            entries = [e for e in entries if self._cat_filter & set(e['cat_ids'])]
+        if self._actor_filter:
+            entries = [e for e in entries if self._actor_filter & set(e['actor_ids'])]
+        if entries:
+            self.play_selection_requested.emit(entries)
 
     def _on_item_jump(self, item: QListWidgetItem):
         d = item.data(Qt.ItemDataRole.UserRole)

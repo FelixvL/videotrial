@@ -945,6 +945,7 @@ class CineMarker(QMainWindow):
         self._drag_active = False
         self._drag_last = None
         self._current_speed = 1.0
+        self._selection_entries: list = []   # cross-film afspeellijst vanuit markers-tab
 
         # Multi-tap seek state
         self._seek_count = 0
@@ -1230,6 +1231,7 @@ class CineMarker(QMainWindow):
         # Markers overzicht tab
         self.markers_panel = MarkersPanel(self.player)
         self.markers_panel.scene_jump_requested.connect(self._on_scene_jump)
+        self.markers_panel.play_selection_requested.connect(self._load_selection)
         self.main_tabs.addTab(self.markers_panel, "◈  MARKERS")
 
         # Acteurs tab
@@ -1531,6 +1533,7 @@ class CineMarker(QMainWindow):
             "Video bestanden (*.mp4 *.avi *.mov *.wmv *.mkv *.flv *.webm *.m4v *.mpg *.mpeg *.ts *.mts);;Alle bestanden (*)"
         )
         if path:
+            self._selection_entries.clear()
             self._load_video(path)
 
     def _load_video(self, path):
@@ -1573,11 +1576,13 @@ class CineMarker(QMainWindow):
 
     def _load_video_and_switch(self, path):
         """Load video and switch to player tab"""
+        self._selection_entries.clear()
         self._load_video(path)
         self.main_tabs.setCurrentIndex(0)
 
     def _next_film(self):
         """Load the next film in the films panel list."""
+        self._selection_entries.clear()
         film_list = self.films_panel.film_list
         n = film_list.count()
         if n == 0:
@@ -1652,6 +1657,137 @@ class CineMarker(QMainWindow):
         else:
             self.player.seek(start_time, 'absolute+exact')
         self.main_tabs.setCurrentIndex(0)
+
+    # ── Selectie-afspeellijst (vanuit markers-tab) ────────────────
+
+    def _load_selection(self, entries: list):
+        """Laad een cross-film afspeellijst vanuit het markers-tabblad.
+        De marker-list in het rechter paneel toont alle entries; dubbelklikken
+        laadt de juiste film en springt naar de scène."""
+        if not entries:
+            return
+        # Sorteer op film + tijd zodat je per film afspeelt
+        self._selection_entries = sorted(
+            entries,
+            key=lambda e: (e['film_path'], e['marker'].get('time', 0))
+        )
+        first     = self._selection_entries[0]
+        first_path = first['film_path']
+        first_time = first['marker'].get('time', 0)
+
+        self.main_tabs.setCurrentIndex(0)   # naar speler-tab
+        if not self._panel.isVisible():
+            self._panel.show()
+        self._panel.show_search(False)
+
+        if self._video_path != first_path:
+            self._load_video(first_path)    # roept _refresh_marker_list aan
+            QTimer.singleShot(100, lambda: self._seek_when_ready(first_time))
+        else:
+            self._refresh_marker_list()     # selectie-modus activeren
+            self.player.seek(first_time, 'absolute+exact')
+
+    def _refresh_selection_markers(self):
+        """Bouw de marker-list op uit self._selection_entries (meerdere films)."""
+        self.marker_list.clear()
+        SZ_A  = 26
+        SZ_C  = 22
+        ROW_H = 34
+
+        actor_pix_cache: dict = {}
+        cat_pix_cache:   dict = {}
+
+        def _actor_pix(aid):
+            if aid not in actor_pix_cache:
+                photos = db.get_actor_photos(aid)
+                pix = None
+                if photos:
+                    raw = QPixmap(photos[0]['photo_path'])
+                    if not raw.isNull():
+                        sc = raw.scaled(SZ_A, SZ_A,
+                            Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                            Qt.TransformationMode.SmoothTransformation)
+                        ox = (sc.width()  - SZ_A) // 2
+                        oy = (sc.height() - SZ_A) // 2
+                        pix = sc.copy(ox, oy, SZ_A, SZ_A)
+                actor_pix_cache[aid] = pix
+            return actor_pix_cache[aid]
+
+        def _cat_pix(cid):
+            if cid not in cat_pix_cache:
+                cats = db.get_categories_by_ids([cid])
+                pix = None
+                if cats:
+                    ip = cats[0].get('icon_path', '')
+                    if ip and os.path.exists(ip):
+                        raw = QPixmap(ip)
+                        if not raw.isNull():
+                            pix = raw.scaled(SZ_C, SZ_C,
+                                Qt.AspectRatioMode.KeepAspectRatio,
+                                Qt.TransformationMode.SmoothTransformation)
+                cat_pix_cache[cid] = pix
+            return cat_pix_cache[cid]
+
+        def _img_label(pix, size, fallback_color):
+            lbl = QLabel()
+            lbl.setFixedSize(size, size)
+            if pix:
+                lbl.setPixmap(pix)
+            else:
+                lbl.setStyleSheet(
+                    f"background:{fallback_color}; border-radius:3px;")
+            return lbl
+
+        prev_film = None
+        for entry in self._selection_entries:
+            m         = entry['marker']
+            film_path = entry['film_path']
+            film_name = entry['film_name']
+
+            item = QListWidgetItem()
+            self.marker_list.addItem(item)
+
+            row_w = QWidget()
+            # Subtiel andere achtergrond als de film wisselt
+            is_alt = (film_path != prev_film) and (prev_film is not None)
+            row_w.setStyleSheet(
+                "background: #141414;" if is_alt else "background: transparent;"
+            )
+            prev_film = film_path
+
+            rh = QHBoxLayout(row_w)
+            rh.setContentsMargins(4, 0, 4, 0)
+            rh.setSpacing(3)
+
+            # Acteur-foto('s)
+            for aid in (m.get('actors') or []):
+                rh.addWidget(_img_label(_actor_pix(aid), SZ_A, '#222'))
+            # Categorie-icoon(tjes)
+            for cid in (m.get('categories') or []):
+                rh.addWidget(_img_label(_cat_pix(cid), SZ_C, '#1a1a2a'))
+
+            # Tijdcode
+            s = int(m.get('time', 0))
+            time_str = f"{s // 60:02d}:{s % 60:02d}"
+            lbl_t = QLabel(time_str)
+            lbl_t.setStyleSheet(
+                "color:#888; font-size:11px;"
+                " font-family:'Consolas',monospace; background:transparent;"
+            )
+            lbl_t.setFixedWidth(34)
+            rh.addWidget(lbl_t)
+
+            # Filmnaam (ingekort)
+            lbl_f = QLabel(film_name[:18])
+            lbl_f.setStyleSheet(
+                "color:#444; font-size:9px;"
+                " font-family:'Consolas',monospace; background:transparent;"
+            )
+            rh.addStretch()
+            rh.addWidget(lbl_f)
+
+            item.setSizeHint(QSize(0, ROW_H))
+            self.marker_list.setItemWidget(item, row_w)
 
     def _seek_when_ready(self, target: float, attempts: int = 30):
         """Seek to target once mpv has finished loading (duration > 0).
@@ -2138,6 +2274,9 @@ class CineMarker(QMainWindow):
         self.status.showMessage(f"  Negatieve perioden overslaan: {state}")
 
     def _refresh_marker_list(self):
+        if self._selection_entries:
+            self._refresh_selection_markers()
+            return
         self.marker_list.clear()
         SZ_A = 26   # actor photo size
         SZ_C = 22   # category icon size
@@ -2259,9 +2398,15 @@ class CineMarker(QMainWindow):
 
     def _on_marker_jump(self, item=None):
         row = self.marker_list.currentRow()
-        if 0 <= row < len(self._markers):
-            t = self._markers[row]['time']
-            self.player.seek(t, 'absolute+exact')
+        if self._selection_entries:
+            if 0 <= row < len(self._selection_entries):
+                entry = self._selection_entries[row]
+                self._on_scene_jump(entry['film_path'],
+                                    entry['marker'].get('time', 0))
+        else:
+            if 0 <= row < len(self._markers):
+                t = self._markers[row]['time']
+                self.player.seek(t, 'absolute+exact')
         # Panel is a separate top-level window; return keyboard focus to main window
         self.activateWindow()
         self.video_container.setFocus(Qt.FocusReason.OtherFocusReason)
