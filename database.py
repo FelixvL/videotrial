@@ -83,6 +83,12 @@ def init_db():
     except Exception:
         pass
 
+    # Migration: duration column (seconds, float)
+    try:
+        c.execute("ALTER TABLE films ADD COLUMN duration REAL DEFAULT 0")
+    except Exception:
+        pass
+
     conn.commit()
     conn.close()
 
@@ -268,6 +274,13 @@ def update_film_notes(film_id, notes):
 def set_film_thumbnail(film_id, path):
     conn = get_connection()
     conn.execute("UPDATE films SET thumbnail=? WHERE id=?", (path, film_id))
+    conn.commit()
+    conn.close()
+
+
+def set_film_duration(film_id, duration: float):
+    conn = get_connection()
+    conn.execute("UPDATE films SET duration=? WHERE id=?", (duration, film_id))
     conn.commit()
     conn.close()
 

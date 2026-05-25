@@ -356,8 +356,8 @@ class _FilmActorsOverlay(QWidget):
     PAD      = 6
     ROW_GAP  = 8
     BTN_W    = 36       # square action buttons (+ category)
-    BTN_TW   = 56       # thumbnail button width
-    BTN_TH   = 36       # thumbnail button height
+    BTN_TW   = 80       # thumbnail button width  (~2× area vs old 56×36)
+    BTN_TH   = 52       # thumbnail button height
     CELL_A   = TH + 16  # actor row height  (78)
     CELL_C   = CH + 14  # category row height (56)
     TOTAL_H  = PAD + CELL_A + ROW_GAP + CELL_C + PAD   # 154
@@ -418,15 +418,18 @@ class _FilmActorsOverlay(QWidget):
         return max(self._actor_row_width(), self._cat_row_width())
 
     def _total_width(self):
-        return self.PAD + self._content_width() + self.SPACING + self.BTN_TW + self.PAD
+        # Cat row: icons + spacing + (+) button + spacing + thumb button
+        cat_total = self._cat_row_width() + self.SPACING + self.BTN_W + self.SPACING + self.BTN_TW
+        return self.PAD + max(self._actor_row_width(), cat_total) + self.PAD
 
     def _place_buttons(self):
-        x = self.PAD + self._content_width() + self.SPACING
-        btn_y = self.PAD + (self.CELL_A - self.BTN_TH) // 2
-        self._btn_thumb.move(x, btn_y)
         cat_row_y = self.PAD + self.CELL_A + self.ROW_GAP
-        self._btn_add_cat.move(x + (self.BTN_TW - self.BTN_W) // 2,
-                               cat_row_y + (self.CELL_C - self.BTN_W) // 2)
+        # Thumbnail button — far right of the category row
+        thumb_x = self._total_width() - self.PAD - self.BTN_TW
+        self._btn_thumb.move(thumb_x, cat_row_y + (self.CELL_C - self.BTN_TH) // 2)
+        # + button — just left of the thumbnail button
+        plus_x = thumb_x - self.SPACING - self.BTN_W
+        self._btn_add_cat.move(plus_x, cat_row_y + (self.CELL_C - self.BTN_W) // 2)
 
     # ── Paint ────────────────────────────────────
 
@@ -766,7 +769,7 @@ class _SearchPage(QWidget):
         for i, actor in enumerate(actors[:24]):
             card = _ActorCard(actor)
             card.clicked.connect(self.actor_clicked)
-            grid.addWidget(card, i // 2, i % 2)
+            grid.addWidget(card, i, 0)
 
 
 # ─────────────────────────────────────────────
@@ -1352,6 +1355,7 @@ class CineMarker(QMainWindow):
         QShortcut(QKeySequence("M"),     self).activated.connect(self._shortcut_m)
         QShortcut(QKeySequence("N"),     self).activated.connect(self._shortcut_n)
         QShortcut(QKeySequence(Qt.Key.Key_Plus),  self).activated.connect(self._shortcut_plus)
+        QShortcut(QKeySequence(Qt.Key.Key_Equal), self).activated.connect(self._shortcut_plus)
         QShortcut(QKeySequence(Qt.Key.Key_Minus), self).activated.connect(self._shortcut_minus)
         QShortcut(QKeySequence(Qt.Key.Key_0), self).activated.connect(self._reset_zoom)
         QShortcut(QKeySequence("T"), self).activated.connect(self.export_thumbnail)
@@ -1382,6 +1386,9 @@ class CineMarker(QMainWindow):
                 self._lbl_time.setText(f"{_fmt_hms(pos)} / {_fmt_hms(dur)}")
             if dur is not None and self._duration != dur:
                 self._duration = dur
+                if dur > 0 and self._video_path:
+                    film = db.get_or_create_film(self._video_path)
+                    db.set_film_duration(film['id'], dur)
         except Exception:
             pass
 
@@ -1666,9 +1673,8 @@ class CineMarker(QMainWindow):
         # Deselect categories, leave actors untouched
         self._actors_overlay._cat_sel.clear()
         self._actors_overlay.update()
-        # Hide search / panel overlay
+        # Switch back from search to markers view (keep panel visible)
         self._panel.show_search(False)
-        self._panel.hide()
         self._player_search.clear()
         # Return keyboard focus to the main window so shortcuts work
         self.setFocus()

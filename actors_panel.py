@@ -78,6 +78,46 @@ class SceneExportWorker(QThread):
 
 
 # ─────────────────────────────────────────────
+#  Frame Extraction Worker
+# ─────────────────────────────────────────────
+
+class FrameExtractWorker(QThread):
+    """Extract single frames from videos at given timestamps using ffmpeg."""
+
+    frame_ready = pyqtSignal(int, str)   # row_index, cache_path
+
+    def __init__(self, tasks: list):
+        super().__init__()
+        # tasks: [(row_idx, film_path, time_sec, cache_path), ...]
+        self._tasks = tasks
+        self._stop  = False
+
+    def stop(self):
+        self._stop = True
+
+    def run(self):
+        for row_idx, film_path, time_sec, cache_path in self._tasks:
+            if self._stop:
+                break
+            if not os.path.exists(cache_path):
+                try:
+                    subprocess.run([
+                        'ffmpeg', '-y',
+                        '-ss', str(time_sec),
+                        '-i', film_path,
+                        '-frames:v', '1',
+                        '-vf', 'scale=80:45:force_original_aspect_ratio=decrease,'
+                               'pad=80:45:(ow-iw)/2:(oh-ih)/2',
+                        '-q:v', '5',
+                        cache_path,
+                    ], capture_output=True, timeout=20)
+                except Exception:
+                    continue
+            if os.path.exists(cache_path):
+                self.frame_ready.emit(row_idx, cache_path)
+
+
+# ─────────────────────────────────────────────
 #  Actor Card Delegate
 # ─────────────────────────────────────────────
 
@@ -999,6 +1039,8 @@ class ActorDetailView(QWidget):
         super().__init__()
         self._data:  dict = {}
         self._actor        = None
+        self._frame_worker = None
+        self._marker_row_widgets: dict = {}   # row_idx -> QLabel
         self._build_ui()
 
     def _build_ui(self):
@@ -1156,6 +1198,10 @@ class ActorDetailView(QWidget):
         v.addWidget(content, stretch=1)
 
     def load(self, data: dict):
+        if self._frame_worker:
+            self._frame_worker.stop()
+            self._frame_worker = None
+        self._marker_row_widgets.clear()
         self._data  = data
         self._actor = data.get('actor')
         meta        = data.get('meta', {})
@@ -1215,30 +1261,123 @@ class ActorDetailView(QWidget):
 
     def _refresh_markers(self):
         self.markers_list.clear()
+        self._marker_row_widgets.clear()
+        if self._frame_worker:
+            self._frame_worker.stop()
+            self._frame_worker = None
+
         if not self._actor:
             return
-        actor_id = self._actor['id']
+
+        actor_id  = self._actor['id']
         cat_cache: dict = {}
+        tasks: list = []
+
+        thumb_dir = Path(__file__).parent / 'thumbnails' / 'markers'
+        thumb_dir.mkdir(parents=True, exist_ok=True)
+
+        FRAME_W, FRAME_H = 80, 45
+        CAT_SZ = 22
+
         for film in db.get_films_for_actor(actor_id):
             for m in self._load_markers(film['file_path']):
-                if actor_id in (m.get('actors') or []):
-                    t = self._fmt_time(m.get('time', 0))
-                    cat_ids = m.get('categories') or []
-                    if cat_ids:
-                        key = tuple(cat_ids)
-                        if key not in cat_cache:
-                            cat_cache[key] = db.get_categories_by_ids(cat_ids)
-                        cats = cat_cache[key]
-                        cat_str = ', '.join(c['name'] for c in cats)
-                        label = f"{film['title']}  ·  {t}  [{cat_str}]  {m.get('name', '')}"
-                    else:
-                        label = f"{film['title']}  ·  {t}  —  {m.get('name', '')}"
-                    item = QListWidgetItem(label)
-                    item.setData(Qt.ItemDataRole.UserRole, {
-                        'film_path': film['file_path'],
-                        'time': m.get('time', 0),
-                    })
-                    self.markers_list.addItem(item)
+                if actor_id not in (m.get('actors') or []):
+                    continue
+
+                time_val = m.get('time', 0)
+                s = int(time_val)
+                time_str = f"{s // 60:02d}:{s % 60:02d}"
+
+                # Category pixmaps
+                cat_ids  = m.get('categories') or []
+                cat_pixs = []
+                for cid in cat_ids:
+                    if cid not in cat_cache:
+                        cats = db.get_categories_by_ids([cid])
+                        ip   = cats[0].get('icon_path', '') if cats else ''
+                        if ip and os.path.exists(ip):
+                            p = QPixmap(ip)
+                            cat_cache[cid] = p.scaled(
+                                CAT_SZ, CAT_SZ,
+                                Qt.AspectRatioMode.KeepAspectRatio,
+                                Qt.TransformationMode.SmoothTransformation,
+                            ) if not p.isNull() else None
+                        else:
+                            cat_cache[cid] = None
+                    if cat_cache[cid]:
+                        cat_pixs.append(cat_cache[cid])
+
+                # Frame cache path
+                time_ms    = int(time_val * 1000)
+                cache_name = f"{Path(film['file_path']).stem}_{time_ms}.jpg"
+                cache_path = str(thumb_dir / cache_name)
+
+                # ── Row widget ───────────────────
+                row_w = QWidget()
+                row_w.setStyleSheet("background: transparent;")
+                rh = QHBoxLayout(row_w)
+                rh.setContentsMargins(4, 3, 6, 3)
+                rh.setSpacing(6)
+
+                # Frame thumbnail (placeholder or cached)
+                frame_lbl = QLabel()
+                frame_lbl.setFixedSize(FRAME_W, FRAME_H)
+                frame_lbl.setStyleSheet(
+                    "background:#111; border-radius:2px;")
+                frame_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                if os.path.exists(cache_path):
+                    pix = QPixmap(cache_path)
+                    if not pix.isNull():
+                        frame_lbl.setPixmap(pix)
+                rh.addWidget(frame_lbl)
+
+                # Category icons
+                for cp in cat_pixs:
+                    cl = QLabel()
+                    cl.setFixedSize(CAT_SZ, CAT_SZ)
+                    cl.setPixmap(cp)
+                    cl.setStyleSheet("background: transparent;")
+                    rh.addWidget(cl)
+
+                # MM:SS
+                t_lbl = QLabel(time_str)
+                t_lbl.setStyleSheet(
+                    "color:#888; font-size:11px;"
+                    "font-family:'Consolas',monospace; background:transparent;")
+                t_lbl.setFixedWidth(36)
+                rh.addWidget(t_lbl)
+
+                rh.addStretch()
+
+                # List item
+                row_idx = self.markers_list.count()
+                item = QListWidgetItem()
+                item.setSizeHint(QSize(0, FRAME_H + 10))
+                item.setData(Qt.ItemDataRole.UserRole, {
+                    'film_path': film['file_path'],
+                    'time':      time_val,
+                })
+                self.markers_list.addItem(item)
+                self.markers_list.setItemWidget(item, row_w)
+
+                self._marker_row_widgets[row_idx] = frame_lbl
+
+                if not os.path.exists(cache_path):
+                    tasks.append((row_idx, film['file_path'], time_val, cache_path))
+
+        # Start background extraction for missing frames
+        if tasks:
+            self._frame_worker = FrameExtractWorker(tasks)
+            self._frame_worker.frame_ready.connect(self._on_frame_ready)
+            self._frame_worker.start()
+
+    def _on_frame_ready(self, row_idx: int, cache_path: str):
+        lbl = self._marker_row_widgets.get(row_idx)
+        if lbl:
+            pix = QPixmap(cache_path)
+            if not pix.isNull():
+                lbl.setPixmap(pix)
+                lbl.setStyleSheet("")   # remove grey placeholder bg
 
     @staticmethod
     def _load_markers(video_path: str) -> list:

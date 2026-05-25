@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """
-CineMarker — Films browser panel
+CineMarker — Films browser panel  (grid view, sortable)
 """
 
 import os
+import json
 from pathlib import Path
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel,
     QListWidget, QListWidgetItem, QLineEdit, QFrame,
-    QFileDialog, QStyledItemDelegate, QStyle
+    QFileDialog, QStyledItemDelegate, QStyle, QListView
 )
 from PyQt6.QtCore import Qt, QSize, QRect, pyqtSignal
 from PyQt6.QtGui import QColor, QFont, QPainter, QPen, QPixmap
@@ -23,43 +24,78 @@ VIDEO_EXTS = {
     '.divx', '.vob', '.rmvb', '.rm', '.3gp',
 }
 
+CELL_W  = 192
+CELL_H  = 108   # 16:9
+ACT_SZ  = 26    # actor photo overlay size
+
+SORT_FIELDS = [
+    ('name',    'Naam'),
+    ('size',    'Grootte'),
+    ('date',    'Datum'),
+    ('markers', 'Markers'),
+    ('duration','Duur'),
+]
+
+
+def _count_film_markers(file_path: str) -> int:
+    p = Path(file_path)
+    mf = p.parent / f".{p.stem}_markers.json"
+    if not mf.exists():
+        return 0
+    try:
+        return len(json.loads(mf.read_text('utf-8')))
+    except Exception:
+        return 0
+
 
 # ─────────────────────────────────────────────
 #  Delegate
 # ─────────────────────────────────────────────
 
-class FilmDelegate(QStyledItemDelegate):
-
-    THUMB_W = 85
-    ROW_H   = 54
+class FilmGridDelegate(QStyledItemDelegate):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._cache: dict = {}
+        self._thumb_cache: dict = {}
+        self._actor_cache: dict = {}   # film_id -> [QPixmap, ...]
 
     def invalidate_cache(self):
-        self._cache.clear()
+        self._thumb_cache.clear()
+        self._actor_cache.clear()
 
-    def _get_thumb(self, path: str) -> QPixmap | None:
-        if path in self._cache:
-            return self._cache[path]
-        if not path or not os.path.exists(path):
-            self._cache[path] = None
-            return None
-        raw = QPixmap(path)
-        if raw.isNull():
-            self._cache[path] = None
-            return None
-        scaled = raw.scaled(
-            self.THUMB_W, self.ROW_H,
-            Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-            Qt.TransformationMode.SmoothTransformation,
-        )
-        ox = (scaled.width()  - self.THUMB_W) // 2
-        oy = (scaled.height() - self.ROW_H)   // 2
-        pix = scaled.copy(ox, oy, self.THUMB_W, self.ROW_H)
-        self._cache[path] = pix
-        return pix
+    def _thumb(self, path: str, w: int, h: int) -> QPixmap | None:
+        key = f"{path}:{w}:{h}"
+        if key not in self._thumb_cache:
+            pix = None
+            if path and os.path.exists(path):
+                raw = QPixmap(path)
+                if not raw.isNull():
+                    sc = raw.scaled(w, h,
+                        Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                        Qt.TransformationMode.SmoothTransformation)
+                    ox = (sc.width()  - w) // 2
+                    oy = (sc.height() - h) // 2
+                    pix = sc.copy(ox, oy, w, h)
+            self._thumb_cache[key] = pix
+        return self._thumb_cache[key]
+
+    def _actor_pixmaps(self, film_id: int) -> list:
+        if film_id not in self._actor_cache:
+            result = []
+            for actor in db.get_actors_for_film(film_id)[:6]:
+                photos = db.get_actor_photos(actor['id'])
+                if photos:
+                    raw = QPixmap(photos[0]['photo_path'])
+                    if not raw.isNull():
+                        sz = ACT_SZ
+                        sc = raw.scaled(sz, sz,
+                            Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                            Qt.TransformationMode.SmoothTransformation)
+                        ox = (sc.width()  - sz) // 2
+                        oy = (sc.height() - sz) // 2
+                        result.append(sc.copy(ox, oy, sz, sz))
+            self._actor_cache[film_id] = result
+        return self._actor_cache[film_id]
 
     def paint(self, painter, option, index):
         data = index.data(Qt.ItemDataRole.UserRole)
@@ -67,70 +103,64 @@ class FilmDelegate(QStyledItemDelegate):
             super().paint(painter, option, index)
             return
 
-        r        = option.rect
+        r = option.rect
+        w, h = r.width(), r.height()
         selected = bool(option.state & QStyle.StateFlag.State_Selected)
         hovered  = bool(option.state & QStyle.StateFlag.State_MouseOver)
 
         painter.save()
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
 
-        # Background
-        if selected:
-            painter.fillRect(r, QColor('#1e1600'))
-        elif hovered:
-            painter.fillRect(r, QColor('#111111'))
-
-        # Left column: thumbnail or play icon
-        thumb_r = QRect(r.x(), r.y(), self.THUMB_W, r.height())
-        pix = self._get_thumb(data.get('thumbnail', ''))
+        # Thumbnail
+        pix = self._thumb(data.get('thumbnail', ''), w, h)
         if pix:
-            painter.drawPixmap(r.x(), r.y() + (r.height() - pix.height()) // 2, pix)
-            if selected:
-                painter.fillRect(thumb_r, QColor(232, 184, 109, 40))
+            painter.drawPixmap(r.x(), r.y(), pix)
         else:
-            painter.fillRect(thumb_r, QColor('#0c0c0c'))
-            pf = QFont(painter.font())
-            pf.setPointSize(14)
-            painter.setFont(pf)
-            painter.setPen(QColor('#e8b86d') if selected else QColor('#2a2a2a'))
-            painter.drawText(thumb_r, Qt.AlignmentFlag.AlignCenter, '▶')
+            painter.fillRect(r, QColor('#0d0d0d'))
+            f = QFont(painter.font())
+            f.setPointSize(18)
+            painter.setFont(f)
+            painter.setPen(QColor('#252525'))
+            painter.drawText(r, Qt.AlignmentFlag.AlignCenter, '▶')
 
-        # Divider
-        painter.setPen(QPen(QColor('#1a1a1a'), 1))
-        painter.drawLine(r.x() + self.THUMB_W, r.y(), r.x() + self.THUMB_W, r.bottom())
+        # Actor photos (bottom-left)
+        film_id = data.get('film_id')
+        if film_id:
+            ax = r.x() + 3
+            ay = r.bottom() - ACT_SZ - 3
+            for ap in self._actor_pixmaps(film_id):
+                painter.drawPixmap(ax, ay, ap)
+                ax += ACT_SZ + 2
 
-        # Film name
-        nf = QFont(painter.font())
-        nf.setPointSize(12)
-        nf.setBold(False)
-        painter.setFont(nf)
-        painter.setPen(QColor('#e8b86d') if selected else QColor('#cccccc'))
-        name_r = QRect(r.x() + self.THUMB_W + 12, r.y(), r.width() - self.THUMB_W - 180, r.height())
-        painter.drawText(
-            name_r,
-            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-            data.get('name', '')
-        )
+        # Hover: dim + name
+        if hovered and not selected:
+            painter.fillRect(r, QColor(0, 0, 0, 80))
+            name_r = QRect(r.x(), r.bottom() - 22, w, 22)
+            painter.fillRect(name_r, QColor(0, 0, 0, 180))
+            nf = QFont(painter.font())
+            nf.setPointSize(8)
+            painter.setFont(nf)
+            painter.setPen(QColor('#eeeeee'))
+            painter.drawText(name_r.adjusted(5, 0, -5, 0),
+                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                data.get('name', ''))
 
-        # Meta (right — ext + size)
-        mf = QFont(painter.font())
-        mf.setPointSize(10)
-        painter.setFont(mf)
-        painter.setPen(QColor('#363636'))
-        meta_r = QRect(r.right() - 155, r.y(), 148, r.height())
-        painter.drawText(
-            meta_r,
-            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
-            data.get('meta', '')
-        )
+        # Selection
+        if selected:
+            painter.fillRect(r, QColor(232, 184, 109, 50))
+            painter.setPen(QPen(QColor('#e8b86d'), 2))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRect(r.adjusted(1, 1, -1, -1))
 
-        # Bottom separator
-        painter.setPen(QPen(QColor('#141414'), 1))
-        painter.drawLine(r.x() + self.THUMB_W + 1, r.bottom(), r.right(), r.bottom())
+        # Border: right + bottom only (1 px)
+        painter.setPen(QPen(QColor('#1e1e1e'), 1))
+        painter.drawLine(r.right(), r.y(), r.right(), r.bottom())
+        painter.drawLine(r.x(), r.bottom(), r.right(), r.bottom())
 
         painter.restore()
 
     def sizeHint(self, option, index):
-        return QSize(max(option.rect.width(), 200), self.ROW_H)
+        return QSize(CELL_W, CELL_H)
 
 
 # ─────────────────────────────────────────────
@@ -141,9 +171,23 @@ class FilmsPanel(QWidget):
 
     play_requested = pyqtSignal(str)
 
+    _SORT_BTN_STYLE = (
+        "QPushButton{background:#111;border:1px solid #252525;border-radius:3px;"
+        "color:#444;font-size:10px;padding:2px 7px;}"
+        "QPushButton:hover{color:#888;border-color:#444;}"
+    )
+    _SORT_BTN_ACTIVE = (
+        "QPushButton{background:#1a1400;border:1px solid #554400;border-radius:3px;"
+        "color:#e8b86d;font-size:10px;padding:2px 7px;}"
+        "QPushButton:hover{border-color:#e8b86d;}"
+    )
+
     def __init__(self):
         super().__init__()
-        self._all_items: list = []
+        self._all_items: list  = []
+        self._sort_key:  str   = 'name'
+        self._sort_asc:  bool  = True
+        self._sort_btns: dict  = {}
         self._build_ui()
         folder = db.get_setting('film_folder', '')
         if folder:
@@ -155,7 +199,7 @@ class FilmsPanel(QWidget):
         v.setContentsMargins(0, 0, 0, 0)
         v.setSpacing(0)
 
-        # Toolbar
+        # ── Top toolbar ──────────────────────────
         bar = QFrame()
         bar.setFixedHeight(44)
         bar.setStyleSheet(
@@ -181,7 +225,7 @@ class FilmsPanel(QWidget):
 
         self.search_input = QLineEdit()
         self.search_input.setPlaceholderText("Zoeken...")
-        self.search_input.setFixedWidth(220)
+        self.search_input.setFixedWidth(200)
         self.search_input.textChanged.connect(self._filter)
         b.addWidget(self.search_input)
 
@@ -198,31 +242,100 @@ class FilmsPanel(QWidget):
 
         v.addWidget(bar)
 
-        # Film list
+        # ── Sort bar ─────────────────────────────
+        sort_bar = QFrame()
+        sort_bar.setFixedHeight(30)
+        sort_bar.setStyleSheet(
+            "QFrame { background: #080808; border-bottom: 1px solid #161616; }"
+        )
+        sb = QHBoxLayout(sort_bar)
+        sb.setContentsMargins(8, 3, 8, 3)
+        sb.setSpacing(4)
+
+        sort_lbl = QLabel("Sorteren:")
+        sort_lbl.setStyleSheet("color: #333; font-size: 10px;")
+        sb.addWidget(sort_lbl)
+
+        for key, label in SORT_FIELDS:
+            btn = QPushButton(label)
+            btn.setFixedHeight(22)
+            btn.setStyleSheet(self._SORT_BTN_STYLE)
+            btn.clicked.connect(lambda _, k=key: self._set_sort(k))
+            sb.addWidget(btn)
+            self._sort_btns[key] = btn
+
+        sb.addStretch()
+        v.addWidget(sort_bar)
+        self._update_sort_buttons()
+
+        # ── Grid ─────────────────────────────────
         self.film_list = QListWidget()
         self.film_list.setMouseTracking(True)
+        self.film_list.setViewMode(QListView.ViewMode.IconMode)
+        self.film_list.setResizeMode(QListView.ResizeMode.Adjust)
+        self.film_list.setFlow(QListView.Flow.LeftToRight)
+        self.film_list.setWrapping(True)
+        self.film_list.setUniformItemSizes(True)
+        self.film_list.setSpacing(0)
+        self.film_list.setGridSize(QSize(CELL_W, CELL_H))
+        self.film_list.setIconSize(QSize(0, 0))
         self.film_list.setStyleSheet(
             "QListWidget { background: #0a0a0a; border: none; outline: none; }"
-            "QListWidget::item { border: none; background: transparent; }"
+            "QListWidget::item { padding: 0; margin: 0; background: transparent; }"
             "QListWidget::item:selected { background: transparent; }"
         )
-        self.film_list.setItemDelegate(FilmDelegate())
+        self.film_list.setItemDelegate(FilmGridDelegate())
         self.film_list.itemDoubleClicked.connect(self._on_double_click)
-        v.addWidget(self.film_list)
+        v.addWidget(self.film_list, stretch=1)
 
-        # Footer hint
-        foot = QFrame()
-        foot.setFixedHeight(26)
-        foot.setStyleSheet(
-            "QFrame { background: #080808; border-top: 1px solid #1a1a1a; }"
-        )
-        fh = QHBoxLayout(foot)
-        fh.setContentsMargins(12, 0, 12, 0)
-        hint = QLabel("Dubbelklik op een film om af te spelen")
-        hint.setStyleSheet("color: #2a2a2a; font-size: 10px;")
-        fh.addWidget(hint)
-        fh.addStretch()
-        v.addWidget(foot)
+    # ── Sort ─────────────────────────────────────
+
+    def _set_sort(self, key: str):
+        if self._sort_key == key:
+            self._sort_asc = not self._sort_asc
+        else:
+            self._sort_key = key
+            self._sort_asc = True
+        self._update_sort_buttons()
+        self._sort_and_repopulate()
+
+    def _update_sort_buttons(self):
+        arrow = ' ↑' if self._sort_asc else ' ↓'
+        for key, label in SORT_FIELDS:
+            btn = self._sort_btns[key]
+            if key == self._sort_key:
+                btn.setText(label + arrow)
+                btn.setStyleSheet(self._SORT_BTN_ACTIVE)
+            else:
+                btn.setText(label)
+                btn.setStyleSheet(self._SORT_BTN_STYLE)
+
+    def _sort_key_fn(self, item):
+        d = item.data(Qt.ItemDataRole.UserRole)
+        if not d:
+            return 0
+        k = self._sort_key
+        if k == 'name':
+            return d.get('name', '').lower()
+        if k == 'size':
+            return d.get('size', 0)
+        if k == 'date':
+            return d.get('date', 0)
+        if k == 'markers':
+            return d.get('markers', 0)
+        if k == 'duration':
+            return d.get('duration', 0)
+        return 0
+
+    def _sort_and_repopulate(self):
+        items = list(self._all_items)
+        items.sort(key=self._sort_key_fn, reverse=not self._sort_asc)
+
+        self.film_list.clear()
+        for item in items:
+            self.film_list.addItem(item)
+        self._all_items = items
+        self._apply_search_visibility()
 
     # ── Folder ───────────────────────────────────
 
@@ -254,7 +367,7 @@ class FilmsPanel(QWidget):
         if not folder_path.exists():
             return
 
-        film_thumbs = {f['file_path']: f.get('thumbnail', '') for f in db.get_all_films()}
+        db_films = {f['file_path']: f for f in db.get_all_films()}
 
         films = sorted(
             (f for f in folder_path.iterdir() if f.suffix.lower() in VIDEO_EXTS),
@@ -262,32 +375,47 @@ class FilmsPanel(QWidget):
         )
 
         for fp in films:
-            try:
-                mb = fp.stat().st_size / (1024 * 1024)
-                size_str = f"{mb / 1024:.1f} GB" if mb >= 1000 else f"{mb:.0f} MB"
-            except OSError:
-                size_str = ''
+            db_film   = db_films.get(str(fp), {})
+            film_id   = db_film.get('id')
+            thumbnail = db_film.get('thumbnail', '')
+            duration  = db_film.get('duration', 0) or 0
 
-            ext  = fp.suffix.upper().lstrip('.')
-            meta = f"{ext}  ·  {size_str}" if size_str else ext
+            try:
+                st = fp.stat()
+                size = st.st_size
+                date = st.st_mtime
+            except OSError:
+                size = 0
+                date = 0
+
+            markers = _count_film_markers(str(fp))
 
             item = QListWidgetItem()
-            item.setSizeHint(QSize(100, FilmDelegate.ROW_H))
+            item.setSizeHint(QSize(CELL_W, CELL_H))
+            item.setToolTip(fp.stem)
             item.setData(Qt.ItemDataRole.UserRole, {
-                'path': str(fp),
-                'name': fp.stem,
-                'meta': meta,
-                'thumbnail': film_thumbs.get(str(fp), ''),
+                'path':      str(fp),
+                'name':      fp.stem,
+                'thumbnail': thumbnail,
+                'film_id':   film_id,
+                'size':      size,
+                'date':      date,
+                'markers':   markers,
+                'duration':  duration,
             })
             self.film_list.addItem(item)
             self._all_items.append(item)
 
+        self._sort_and_repopulate()
         self._update_count()
 
     # ── Filter ───────────────────────────────────
 
     def _filter(self, query: str):
-        q = query.lower()
+        self._apply_search_visibility()
+
+    def _apply_search_visibility(self):
+        q = self.search_input.text().lower()
         for item in self._all_items:
             d    = item.data(Qt.ItemDataRole.UserRole)
             name = d.get('name', '').lower() if d else ''
