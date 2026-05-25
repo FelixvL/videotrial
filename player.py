@@ -115,6 +115,130 @@ def save_markers(video_path: str, markers: list):
 
 
 # ─────────────────────────────────────────────
+#  Help-tekst (HTML)
+# ─────────────────────────────────────────────
+
+_HELP_HTML = """
+<style>
+  body  { background:#0e0e0e; color:#ccc;
+          font-family:'Consolas',monospace; font-size:12px; margin:16px; }
+  h2    { color:#e8b86d; font-size:13px; letter-spacing:3px;
+          border-bottom:1px solid #2a2a2a; padding-bottom:4px; margin-top:18px; }
+  h3    { color:#888; font-size:10px; letter-spacing:2px; margin:10px 0 4px; }
+  table { border-collapse:collapse; width:100%; margin-bottom:6px; }
+  td    { padding:3px 8px; vertical-align:top; }
+  td:first-child { color:#e8b86d; white-space:nowrap; min-width:160px; }
+  tr:nth-child(even) td { background:#111; }
+  .dim  { color:#555; }
+</style>
+
+<h2>GLOBAAL</h2>
+<table>
+<tr><td>Ctrl+O</td><td>Videobestand openen</td></tr>
+<tr><td>F11</td><td>Volledig scherm aan/uit</td></tr>
+<tr><td>Escape</td><td>Acteur-zoekbalk sluiten · categorie-selectie wissen · focus terug</td></tr>
+</table>
+
+<h2>▶ SPELER — toetsenbord</h2>
+<table>
+<tr><td>Spatie</td><td>Afspelen / pauzeren</td></tr>
+<tr><td>← →</td><td>5 seconden terug / vooruit</td></tr>
+<tr><td>L &nbsp;of&nbsp; M</td><td>Multi-tap vooruit — 1×=5s · 2×=30s · 3×=5min · 4×=30min</td></tr>
+<tr><td>N</td><td>Multi-tap achteruit — zelfde stappen</td></tr>
+<tr><td>L / M / N &nbsp;<span class="dim">(gepauzeerd)</span></td><td>1×=1 frame · 2×=5 frames · 3×=1s · 4×=5s</td></tr>
+<tr><td>Home / End</td><td>Naar begin / einde springen</td></tr>
+<tr><td>P</td><td>Volgende marker in de lijst (wraps rond)</td></tr>
+<tr><td>X</td><td>Negatieve marker zetten op huidige positie</td></tr>
+<tr><td>[ &nbsp;/&nbsp; ]</td><td>Afspeelsnelheid omlaag / omhoog (0.25 → 0.5 → 0.75 → 1 → 1.25 → 1.5 → 2 → 3)</td></tr>
+<tr><td>+ / = &nbsp;/&nbsp; −</td><td>Inzoomen / uitzoomen op video</td></tr>
+<tr><td>0</td><td>Zoom en pan resetten</td></tr>
+<tr><td>T</td><td>Thumbnail exporteren (bestandskeuze)</td></tr>
+<tr><td>V</td><td>Volgende film in de Films-lijst laden</td></tr>
+<tr><td>Ctrl+L</td><td>Acteur-koppelen overlay openen</td></tr>
+</table>
+
+<h2>▶ SPELER — muis</h2>
+<table>
+<tr><td>Klik videoscherm</td><td>Focus terug naar speler (sluit acteur-zoekbalk)</td></tr>
+<tr><td>Slepen <span class="dim">(ingezoomd)</span></td><td>Video pannen</td></tr>
+<tr><td>Dubbelklik <span class="dim">(ingezoomd)</span></td><td>Zoom resetten</td></tr>
+<tr><td>Klik op tijdlijn</td><td>Spring naar positie</td></tr>
+<tr><td>Slepen op tijdlijn</td><td>Scrubben</td></tr>
+<tr><td>Dubbelklik op marker <span class="dim">(rechter paneel)</span></td><td>Spring naar markerpositie</td></tr>
+</table>
+
+<h2>▶ SPELER — werkbalk &amp; overlays</h2>
+<table>
+<tr><td>🗑</td><td>Huidige film naar map deleted/ verplaatsen → springt naar Films-tab</td></tr>
+<tr><td>1× knop <span class="dim">(amber = actief)</span></td><td>Klik = afspeelsnelheid resetten naar 1×</td></tr>
+<tr><td>⏭</td><td>Volgende film in de Films-lijst</td></tr>
+<tr><td>⊘ knop <span class="dim">(rood = aan)</span></td><td>Negatieve perioden overslaan aan/uit</td></tr>
+<tr><td>Acteur zoeken…</td><td>Acteurs zoeken; resultaten in rechter paneel</td></tr>
+<tr><td>Klik acteur-foto <span class="dim">(overlay)</span></td><td>Acteur selecteren / deselecteren voor marker</td></tr>
+<tr><td>Klik categorie-icoon <span class="dim">(overlay)</span></td><td>Marker aanmaken voor geselecteerde acteurs</td></tr>
+<tr><td>⊡ thumbnail-knop</td><td>Huidig frame opslaan als film-thumbnail</td></tr>
+<tr><td>+ knop <span class="dim">(overlay)</span></td><td>Nieuwe categorie aanmaken</td></tr>
+<tr><td>✕ naast marker</td><td>Marker verwijderen</td></tr>
+</table>
+
+<h2>◈ MARKERS</h2>
+<table>
+<tr><td>Categorie-chips</td><td>Filter op categorie (meerdere tegelijk · amber = actief · leeg = alle)</td></tr>
+<tr><td>Acteurlijst links</td><td>Filter op acteur (multi-selectie · leeg = alle acteurs)</td></tr>
+<tr><td>▶ N afspelen</td><td>Speler openen met gefilterde markers als afspeellijst</td></tr>
+<tr><td>↺</td><td>Alle markers van alle films herladen</td></tr>
+<tr><td>Dubbelklik thumbnail</td><td>Spring naar die scène in de Speler</td></tr>
+</table>
+
+<h2>🎬 FILMS</h2>
+<table>
+<tr><td>↻</td><td>Filmmap herladen</td></tr>
+<tr><td>📁 Kies map</td><td>Andere filmmap instellen</td></tr>
+<tr><td>− / +</td><td>Thumbnail-formaat aanpassen</td></tr>
+<tr><td>Genre-chips</td><td>Films filteren op genre</td></tr>
+<tr><td>Dubbelklik op film</td><td>Film laden en naar Speler-tab gaan</td></tr>
+</table>
+
+<h2>◉ ACTEURS</h2>
+<table>
+<tr><td>Zoekbalk <span class="dim">(auto-focus)</span></td><td>Acteurs zoeken / filteren</td></tr>
+<tr><td>BUITEN DB knop</td><td>Wisselen tussen database-modus en map-modus</td></tr>
+<tr><td>📁 Map</td><td>Acteur-fotomap instellen</td></tr>
+<tr><td>⬆ Import</td><td>Acteurs importeren uit CSV</td></tr>
+<tr><td>− / + <span class="dim">(foto-grid)</span></td><td>Thumbnail-formaat aanpassen</td></tr>
+<tr><td>Categorie-chips <span class="dim">(detail)</span></td><td>Markers filteren op categorie</td></tr>
+<tr><td>← Terug</td><td>Terug naar acteuroverzicht</td></tr>
+<tr><td>✎ Bewerken</td><td>Acteurgegevens bewerken</td></tr>
+<tr><td>+ Koppel film</td><td>Film handmatig koppelen aan acteur</td></tr>
+<tr><td>▶ Open</td><td>Film laden in de Speler</td></tr>
+<tr><td>✕ Ontkoppel</td><td>Film loskoppelen van acteur</td></tr>
+<tr><td>↵ Spring naar scène</td><td>Film laden op scène-positie in de Speler</td></tr>
+<tr><td>✂ Exporteer</td><td>Scène als apart videobestand exporteren</td></tr>
+</table>
+
+<h2>⊕ SORTEREN</h2>
+<table>
+<tr><td>← →</td><td>Vorige / volgende foto</td></tr>
+<tr><td>Spatie &nbsp;/&nbsp; + &nbsp;/&nbsp; P</td><td>Foto naar map p verplaatsen</td></tr>
+<tr><td>M &nbsp;/&nbsp; −</td><td>Foto naar map m verplaatsen</td></tr>
+<tr><td>📁 Kies map</td><td>Fotomap instellen</td></tr>
+</table>
+
+<h2>⊞ DATABASE</h2>
+<table>
+<tr><td>↻ Vernieuwen</td><td>Database-tabellen herladen</td></tr>
+<tr><td>✕ Verwijder rij</td><td>Geselecteerde rij verwijderen</td></tr>
+<tr><td>＋ Toevoegen</td><td>Nieuwe acteur toevoegen</td></tr>
+</table>
+
+<h2>⟳ CONVERTER</h2>
+<table>
+<tr><td>← Gebruik huidig video</td><td>Huidige film als invoer instellen</td></tr>
+<tr><td>⟳ START CONVERSIE</td><td>Conversie starten met gekozen instellingen</td></tr>
+</table>
+"""
+
+# ─────────────────────────────────────────────
 #  FFmpeg worker threads
 # ─────────────────────────────────────────────
 
@@ -1110,6 +1234,17 @@ class CineMarker(QMainWindow):
         self.btn_fs.setToolTip("Volledig scherm  F11")
         self.btn_fs.clicked.connect(self._toggle_fullscreen)
         _ch.addWidget(self.btn_fs)
+        btn_help = QPushButton("?")
+        btn_help.setFixedSize(28, 28)
+        btn_help.setToolTip("Toetsen & knoppen overzicht")
+        btn_help.setStyleSheet(
+            "QPushButton { background: transparent; border: 1px solid #2a2a2a;"
+            "  border-radius: 4px; color: #444; font-size: 13px; font-weight: bold; }"
+            "QPushButton:hover { border-color: #e8b86d; color: #e8b86d; }"
+        )
+        btn_help.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        btn_help.clicked.connect(self._show_help)
+        _ch.addWidget(btn_help)
         self.main_tabs.setCornerWidget(_corner, Qt.Corner.TopRightCorner)
         self._corner_layout = _ch
 
@@ -1488,6 +1623,7 @@ class CineMarker(QMainWindow):
         QShortcut(QKeySequence("End"), self).activated.connect(self.go_to_end)
         QShortcut(QKeySequence("]"), self).activated.connect(self._speed_up)
         QShortcut(QKeySequence("["), self).activated.connect(self._speed_down)
+        QShortcut(QKeySequence("P"),  self).activated.connect(self._shortcut_p)
 
     # ── Timer ─────────────────────────────────
 
@@ -1536,7 +1672,7 @@ class CineMarker(QMainWindow):
             self._selection_entries.clear()
             self._load_video(path)
 
-    def _load_video(self, path):
+    def _load_video(self, path, start_time: float | None = None):
         self._reset_zoom()
         self._video_path = path
         self._duration = 0
@@ -1544,7 +1680,12 @@ class CineMarker(QMainWindow):
         self._neg_zones_cache: list = []
         self._markers = load_markers(path)
         self._refresh_marker_list()   # also calls _refresh_timeline_zones
-        self.player.play(path)
+        if start_time is not None and start_time > 0:
+            # Geef mpv de startpositie mee bij het openen — geen poll-loop nodig
+            self.player.command('loadfile', path, 'replace',
+                                f'start={start_time:.3f}')
+        else:
+            self.player.play(path)
         self.player.pause = False   # always start playing, even if previously paused
         film = db.get_or_create_film(path)
         self._actors_overlay.refresh(film['id'])
@@ -1648,12 +1789,11 @@ class CineMarker(QMainWindow):
             QMessageBox.warning(self, "Fout bij verplaatsen", msg)
 
     def _on_scene_jump(self, film_path, start_time):
-        """Jump to a scene: load film if needed, seek to start"""
+        """Jump to a scene: load film if needed, seek to start."""
         if self._video_path != film_path:
-            self._load_video(film_path)
-            # Don't use a fixed delay — poll until mpv reports a duration,
-            # then seek.  Avoids the SystemError when the file loads slowly.
-            QTimer.singleShot(100, lambda: self._seek_when_ready(start_time))
+            # start_time wordt direct meegegeven aan mpv via loadfile start=
+            # zodat er geen poll-loop nodig is
+            self._load_video(film_path, start_time=start_time)
         else:
             self.player.seek(start_time, 'absolute+exact')
         self.main_tabs.setCurrentIndex(0)
@@ -1681,8 +1821,7 @@ class CineMarker(QMainWindow):
         self._panel.show_search(False)
 
         if self._video_path != first_path:
-            self._load_video(first_path)    # roept _refresh_marker_list aan
-            QTimer.singleShot(100, lambda: self._seek_when_ready(first_time))
+            self._load_video(first_path, start_time=first_time)
         else:
             self._refresh_marker_list()     # selectie-modus activeren
             self.player.seek(first_time, 'absolute+exact')
@@ -2110,6 +2249,22 @@ class CineMarker(QMainWindow):
     def _shortcut_n(self):
         if self.main_tabs.currentWidget() is not self.sorter_panel:
             self._on_seek_key(-1)
+
+    def _shortcut_p(self):
+        """Ga naar de volgende marker in de lijst (wraps rond)."""
+        if not self._video_path:
+            return
+        n = self.marker_list.count()
+        if n == 0:
+            return
+        # Zorg dat het paneel zichtbaar is en op de markers-pagina staat
+        if not self._panel.isVisible():
+            self._panel.show()
+        self._panel.show_search(False)
+        cur = self.marker_list.currentRow()
+        next_row = (cur + 1) % n   # cur == -1 → 0 (eerste marker)
+        self.marker_list.setCurrentRow(next_row)
+        self._on_marker_jump()
 
     def _shortcut_plus(self):
         if self.main_tabs.currentWidget() is self.sorter_panel:
@@ -2546,6 +2701,42 @@ class CineMarker(QMainWindow):
         self.btn_convert.setEnabled(True)
         self.conv_progress.setVisible(False)
         self.conv_status.setText(f"✗ Fout: {err[:200]}")
+
+    # ── Help ──────────────────────────────────
+
+    def _show_help(self):
+        from PyQt6.QtWidgets import QTextEdit
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Toetsen & knoppen")
+        dlg.resize(680, 720)
+        dlg.setStyleSheet("""
+            QDialog   { background: #0e0e0e; }
+            QTextEdit { background: #0e0e0e; border: none;
+                        color: #ccc; font-size: 12px;
+                        font-family: 'Consolas', monospace; }
+            QPushButton { background: #1e1e1e; border: 1px solid #333;
+                          border-radius: 4px; padding: 5px 20px; color: #ccc; }
+            QPushButton:hover { border-color: #e8b86d; color: #e8b86d; }
+        """)
+        v = QVBoxLayout(dlg)
+        v.setContentsMargins(0, 0, 0, 10)
+        v.setSpacing(6)
+
+        te = QTextEdit()
+        te.setReadOnly(True)
+        te.setHtml(_HELP_HTML)
+        v.addWidget(te)
+
+        btn_close = QPushButton("Sluiten")
+        btn_close.setFixedWidth(100)
+        btn_close.clicked.connect(dlg.accept)
+        bh = QHBoxLayout()
+        bh.addStretch()
+        bh.addWidget(btn_close)
+        bh.addStretch()
+        v.addLayout(bh)
+
+        dlg.exec()
 
     # ── Cleanup ───────────────────────────────
 

@@ -1994,6 +1994,9 @@ class ActorsPanel(QWidget):
     # ── Scan ─────────────────────────────────────
 
     def _scan_folder(self, folder):
+        # Nieuwe foto's in acteurfotos/ omzetten naar acteurs in de DB
+        db.auto_link_actor_photos()
+
         self.grid.clear()
         self._all_items.clear()
         self._delegate._cache.clear()

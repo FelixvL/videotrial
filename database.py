@@ -533,30 +533,46 @@ init_db()
 # ── Auto-link actor photos ────────────────────
 
 def auto_link_actor_photos():
-    """Scan acteurfotos/ and link any photo whose stem matches an actor name."""
+    """Scan acteurfotos/ en verwerk elke foto:
+    - Bestaat er al een acteur met die naam?  → foto koppelen als dat nog niet gedaan is.
+    - Bestaat de acteur nog niet?             → acteur aanmaken én foto koppelen.
+    De bestandsnaam (zonder extensie) is de naam van de acteur."""
     import os
     folder = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'acteurfotos')
     if not os.path.isdir(folder):
         return
     exts = {'.jpg', '.jpeg', '.png', '.webp', '.bmp', '.gif', '.tiff', '.tif'}
-    photos_by_stem = {}
-    for f in Path(folder).iterdir():
-        if f.suffix.lower() in exts:
-            photos_by_stem[f.stem.lower()] = str(f)
+
+    photos = [
+        (f.stem, str(f))
+        for f in Path(folder).iterdir()
+        if f.suffix.lower() in exts
+    ]
+    if not photos:
+        return
 
     conn = get_connection()
-    actors = conn.execute("SELECT id, name FROM actors").fetchall()
-    for actor in actors:
-        stem = actor['name'].lower()
-        if stem not in photos_by_stem:
-            continue
-        existing = conn.execute(
-            "SELECT id FROM actor_photos WHERE actor_id=?", (actor['id'],)
+    for name, photo_path in photos:
+        # Zoek acteur (hoofdletter-onafhankelijk)
+        row = conn.execute(
+            "SELECT id FROM actors WHERE lower(name)=lower(?)", (name,)
         ).fetchone()
-        if not existing:
+        if row:
+            actor_id = row['id']
+        else:
+            # Nieuwe acteur aanmaken op basis van bestandsnaam
+            cur = conn.execute("INSERT INTO actors (name) VALUES (?)", (name,))
+            actor_id = cur.lastrowid
+
+        # Foto koppelen als dat nog niet gedaan is
+        already = conn.execute(
+            "SELECT id FROM actor_photos WHERE actor_id=? AND photo_path=?",
+            (actor_id, photo_path)
+        ).fetchone()
+        if not already:
             conn.execute(
                 "INSERT INTO actor_photos (actor_id, photo_path) VALUES (?, ?)",
-                (actor['id'], photos_by_stem[stem])
+                (actor_id, photo_path)
             )
     conn.commit()
     conn.close()
