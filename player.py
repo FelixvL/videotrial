@@ -150,7 +150,7 @@ _HELP_HTML = """
 <tr><td>O</td><td>Vorige marker in de lijst (wraps rond)</td></tr>
 <tr><td>P</td><td>Volgende marker in de lijst (wraps rond)</td></tr>
 <tr><td>X</td><td>Negatieve marker zetten op huidige positie</td></tr>
-<tr><td>[ &nbsp;/&nbsp; ]</td><td>Afspeelsnelheid omlaag / omhoog (0.25 → 0.5 → 0.75 → 1 → 1.25 → 1.5 → 2 → 3)</td></tr>
+<tr><td>[ &nbsp;/&nbsp; ]</td><td>Afspeelsnelheid omlaag / omhoog (0.25 → 0.5 → 0.75 → 1 → 1.25 → 1.5 → 2 → 3 → 4 → 5 → 6 → 8 → 10)</td></tr>
 <tr><td>+ / = &nbsp;/&nbsp; −</td><td>Inzoomen / uitzoomen op video</td></tr>
 <tr><td>0</td><td>Zoom en pan resetten</td></tr>
 <tr><td>T</td><td>Thumbnail exporteren (bestandskeuze)</td></tr>
@@ -2003,7 +2003,7 @@ class CineMarker(QMainWindow):
 
     # ── Playback speed ────────────────────────
 
-    _SPEED_STEPS = [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0]
+    _SPEED_STEPS = [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0, 4.0, 5.0, 6.0, 8.0, 10.0]
 
     def _speed_up(self):
         steps = self._SPEED_STEPS
