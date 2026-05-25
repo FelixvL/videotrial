@@ -6,6 +6,7 @@ Toont alle markers van alle acteurs in alle films, filterbaar op categorie en ac
 
 import os
 import json
+import random
 from pathlib import Path
 
 from PyQt6.QtWidgets import (
@@ -422,18 +423,27 @@ class MarkersPanel(QWidget):
         )
 
     def _on_frame_ready(self, row_idx: int, cache_path: str):
-        """Stel het thumbnail in voor het item op row_idx."""
-        if row_idx < len(self._all_items):
-            item = self._all_items[row_idx]
-            try:
-                d = item.data(Qt.ItemDataRole.UserRole)
-                if d:
-                    d['cache_path'] = cache_path
-                    item.setData(Qt.ItemDataRole.UserRole, d)
-                    self._delegate.invalidate_cache()
-                    self._grid.update(self._grid.model().index(row_idx, 0))
-            except RuntimeError:
-                pass  # item al verwijderd door nieuwe filter
+        """Plan de visuele update met een willekeurige vertraging zodat thumbnails
+        niet allemaal tegelijk binnenkomen en het scherm flipt."""
+        delay = 1000 + random.randint(0, 1000)
+        QTimer.singleShot(delay, lambda: self._show_thumb(row_idx, cache_path))
+
+    def _show_thumb(self, row_idx: int, cache_path: str):
+        """Pas het thumbnail aan voor één item, zonder de volledige cache te wissen."""
+        if row_idx >= len(self._all_items):
+            return
+        item = self._all_items[row_idx]
+        try:
+            d = item.data(Qt.ItemDataRole.UserRole)
+            if d:
+                d['cache_path'] = cache_path
+                item.setData(Qt.ItemDataRole.UserRole, d)
+                # Geen invalidate_cache() — het nieuwe pad zat nog nooit in de
+                # delegate-cache (bestand bestond nog niet), dus het laadt vanzelf
+                # vers op de volgende paint van dit ene item.
+                self._grid.update(self._grid.model().index(row_idx, 0))
+        except RuntimeError:
+            pass  # item al verwijderd door nieuwe filter
 
     def _on_item_jump(self, item: QListWidgetItem):
         d = item.data(Qt.ItemDataRole.UserRole)
