@@ -943,6 +943,7 @@ class CineMarker(QMainWindow):
         self._pan_y = 0.0
         self._drag_active = False
         self._drag_last = None
+        self._current_speed = 1.0
 
         # Multi-tap seek state
         self._seek_count = 0
@@ -1135,6 +1136,18 @@ class CineMarker(QMainWindow):
         self._lbl_time.setFixedWidth(130)
         _ph.addWidget(self._lbl_time)
 
+        self._btn_speed = QPushButton("1×")
+        self._btn_speed.setFixedSize(40, 26)
+        self._btn_speed.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._btn_speed.setToolTip("Afspeelsnelheid  [ = langzamer  ] = sneller  klik = reset 1×")
+        self._btn_speed.clicked.connect(self._reset_speed)
+        self._btn_speed.setStyleSheet(
+            "QPushButton { background: transparent; border: none;"
+            "  color: #444; font-size: 11px; font-family: 'Consolas', monospace; }"
+            "QPushButton:hover { color: #888; }"
+        )
+        _ph.addWidget(self._btn_speed)
+
         btn_next = QPushButton("⏭")
         btn_next.setFixedSize(26, 26)
         btn_next.setToolTip("Volgende film in de lijst")
@@ -1251,6 +1264,7 @@ class CineMarker(QMainWindow):
         self._actors_tb.setVisible(idx == actors_idx)
         player_idx = self.main_tabs.indexOf(self._player_widget)
         on_player = (idx == player_idx)
+        on_actors = (idx == actors_idx)
         self._player_tb.setVisible(on_player)
         self._panel.setVisible(on_player)
         if on_player and self._video_path:
@@ -1261,6 +1275,10 @@ class CineMarker(QMainWindow):
         if on_player:
             # Give focus to video_container so no text field is active on entry
             QTimer.singleShot(0, lambda: self.video_container.setFocus(
+                Qt.FocusReason.OtherFocusReason))
+        elif on_actors:
+            # Give focus to the actor search bar immediately
+            QTimer.singleShot(0, lambda: self.actors_panel.search_input.setFocus(
                 Qt.FocusReason.OtherFocusReason))
         else:
             self._player_search.clear()
@@ -1457,6 +1475,8 @@ class CineMarker(QMainWindow):
         QShortcut(QKeySequence("Ctrl+L"), self).activated.connect(self._show_actor_overlay)
         QShortcut(QKeySequence("Home"), self).activated.connect(self.go_to_start)
         QShortcut(QKeySequence("End"), self).activated.connect(self.go_to_end)
+        QShortcut(QKeySequence("]"), self).activated.connect(self._speed_up)
+        QShortcut(QKeySequence("["), self).activated.connect(self._speed_down)
 
     # ── Timer ─────────────────────────────────
 
@@ -1673,6 +1693,53 @@ class CineMarker(QMainWindow):
     def go_to_end(self):
         if self._video_path and self._duration:
             self.player.seek(self._duration - 0.1, 'absolute+exact')
+
+    # ── Playback speed ────────────────────────
+
+    _SPEED_STEPS = [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0]
+
+    def _speed_up(self):
+        steps = self._SPEED_STEPS
+        cur = self._current_speed
+        faster = [s for s in steps if s > cur]
+        self._apply_speed(faster[0] if faster else steps[-1])
+
+    def _speed_down(self):
+        steps = self._SPEED_STEPS
+        cur = self._current_speed
+        slower = [s for s in steps if s < cur]
+        self._apply_speed(slower[-1] if slower else steps[0])
+
+    def _reset_speed(self):
+        self._apply_speed(1.0)
+
+    def _apply_speed(self, speed: float):
+        self._current_speed = speed
+        try:
+            self.player.speed = speed
+        except Exception:
+            pass
+        self._update_speed_label(speed)
+
+    def _update_speed_label(self, speed: float):
+        if speed == int(speed):
+            label = f"{int(speed)}×"
+        else:
+            label = f"{speed}×"
+        self._btn_speed.setText(label)
+        if speed != 1.0:
+            self._btn_speed.setStyleSheet(
+                "QPushButton { background: transparent; border: none;"
+                "  color: #e8b86d; font-size: 11px; font-family: 'Consolas', monospace;"
+                "  font-weight: bold; }"
+                "QPushButton:hover { color: #f0ca8a; }"
+            )
+        else:
+            self._btn_speed.setStyleSheet(
+                "QPushButton { background: transparent; border: none;"
+                "  color: #444; font-size: 11px; font-family: 'Consolas', monospace; }"
+                "QPushButton:hover { color: #888; }"
+            )
 
     def _on_timeline_seek(self, fraction):
         if self._video_path and self._duration and not self._updating_slider:
