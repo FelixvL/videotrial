@@ -25,6 +25,23 @@ from PyQt6.QtGui import QPixmap, QFont, QIcon, QPen, QColor, QPainter, QBrush
 import database as db
 
 
+def _count_actor_markers(actor_id: int, films: list) -> int:
+    """Count how many markers across all films reference this actor."""
+    count = 0
+    for film in films:
+        p = Path(film['file_path'])
+        mf = p.parent / f".{p.stem}_markers.json"
+        if mf.exists():
+            try:
+                import json as _json
+                for m in _json.load(open(str(mf), 'r')):
+                    if actor_id in (m.get('actors') or []):
+                        count += 1
+            except Exception:
+                pass
+    return count
+
+
 # ─────────────────────────────────────────────
 #  FFmpeg Scene Export Worker
 # ─────────────────────────────────────────────
@@ -208,6 +225,31 @@ class ActorCardDelegate(QStyledItemDelegate):
         painter.setFont(af)
         painter.setPen(QColor('#e8b86d'))
         painter.drawText(ar, Qt.AlignmentFlag.AlignCenter, '›')
+
+        # ── Film- en markertellingen (linksonder) ─
+        film_count   = data.get('film_count', 0)
+        marker_count = data.get('marker_count', 0)
+        if film_count or marker_count:
+            bf = QFont(painter.font())
+            bf.setPointSize(7)
+            bf.setBold(False)
+            painter.setFont(bf)
+            badge_y = r.bottom() - 38
+            x_cur   = r.x() + 3
+            for symbol, count, col in (
+                ('▶', film_count,   '#e8b86d'),
+                ('◉', marker_count, '#6db8e8'),
+            ):
+                if count == 0:
+                    continue
+                txt = f"{symbol}{count}"
+                fm  = painter.fontMetrics()
+                tw  = fm.horizontalAdvance(txt) + 6
+                br  = QRect(x_cur, badge_y, tw, 14)
+                painter.fillRect(br, QColor(0, 0, 0, 160))
+                painter.setPen(QColor(col))
+                painter.drawText(br, Qt.AlignmentFlag.AlignCenter, txt)
+                x_cur += tw + 3
 
         # ── Niet in DB overlay ────────────────────
         if not in_db:
@@ -1482,6 +1524,10 @@ class ActorsPanel(QWidget):
             # in_db = heeft zinvolle metadata (voornaam of achternaam ingevuld)
             in_db = bool(meta.get('voornaam') or meta.get('achternaam'))
 
+            films       = db.get_films_for_actor(actor['id']) if actor else []
+            film_count  = len(films)
+            marker_count = _count_actor_markers(actor['id'], films) if actor else 0
+
             cw, ch = self._zoom_size()
             item = QListWidgetItem()
             item.setSizeHint(QSize(cw, ch))
@@ -1492,6 +1538,8 @@ class ActorsPanel(QWidget):
                 'in_db': in_db,
                 'meta': meta,
                 'cell_size': QSize(cw, ch),
+                'film_count': film_count,
+                'marker_count': marker_count,
             })
             self.grid.addItem(item)
             self._all_items.append(item)
