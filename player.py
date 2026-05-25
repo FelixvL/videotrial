@@ -207,13 +207,18 @@ class ConvertWorker(QThread):
 # ─────────────────────────────────────────────
 
 class TimelineSlider(QSlider):
-    """Slider that supports click-to-seek anywhere"""
+    """Slider that supports click-to-seek anywhere, with negative-zone overlay."""
     seeked = pyqtSignal(float)
 
     def __init__(self):
         super().__init__(Qt.Orientation.Horizontal)
         self.setRange(0, 10000)
-        self._markers = []
+        self._markers  = []
+        self._neg_zones: list = []   # [(start_frac, end_frac), ...]
+
+    def set_neg_zones(self, zones: list):
+        self._neg_zones = zones
+        self.update()
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
@@ -232,6 +237,31 @@ class TimelineSlider(QSlider):
     def _pos_to_value(self, x):
         w = self.width()
         return int(max(0, min(10000, x / w * 10000)))
+
+    def paintEvent(self, _event):
+        from PyQt6.QtGui import QPainter, QColor
+        w, h = self.width(), self.height()
+        if w <= 0 or h <= 0:
+            return
+        p = QPainter(self)
+
+        # Background
+        p.fillRect(0, 0, w, h, QColor('#141414'))
+
+        # Played portion (amber)
+        val_f = self.value() / self.maximum() if self.maximum() > 0 else 0
+        played_w = int(val_f * w)
+        if played_w > 0:
+            p.fillRect(0, 0, played_w, h, QColor('#e8b86d'))
+
+        # Negative zones — red overlay on top of everything
+        for start_f, end_f in self._neg_zones:
+            x0 = int(start_f * w)
+            x1 = int(end_f   * w)
+            if x1 > x0:
+                p.fillRect(x0, 0, max(2, x1 - x0), h, QColor('#8b2020'))
+
+        p.end()
 
 
 class ClickableLabel(QLabel):
@@ -901,6 +931,8 @@ class CineMarker(QMainWindow):
         self._duration = 0
         self._markers = []
         self._updating_slider = False
+        self._skip_negative    = db.get_setting('skip_negative', '1') == '1'
+        self._neg_zones_cache: list = []
         self._convert_worker = None
         self._thumb_worker = None
 
@@ -1086,6 +1118,7 @@ class CineMarker(QMainWindow):
         btn_del_film = QPushButton("🗑")
         btn_del_film.setFixedSize(26, 26)
         btn_del_film.setToolTip("Verplaats huidige film naar map 'deleted'")
+        btn_del_film.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         btn_del_film.setStyleSheet(
             "QPushButton { background: transparent; border: none; color: #443333; font-size: 14px; }"
             "QPushButton:hover { color: #cc4444; }"
@@ -1103,6 +1136,7 @@ class CineMarker(QMainWindow):
         btn_next = QPushButton("⏭")
         btn_next.setFixedSize(26, 26)
         btn_next.setToolTip("Volgende film in de lijst")
+        btn_next.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         btn_next.setStyleSheet(
             "QPushButton { background: transparent; border: none; color: #444; font-size: 14px; }"
             "QPushButton:hover { color: #e8b86d; }"
@@ -1110,10 +1144,28 @@ class CineMarker(QMainWindow):
         btn_next.clicked.connect(self._next_film)
         _ph.addWidget(btn_next)
 
+        self._btn_skip_neg = QPushButton("⊘")
+        self._btn_skip_neg.setFixedSize(26, 26)
+        self._btn_skip_neg.setCheckable(True)
+        self._btn_skip_neg.setChecked(self._skip_negative)
+        self._btn_skip_neg.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._btn_skip_neg.setToolTip("Negatieve perioden overslaan (aan/uit)")
+        self._btn_skip_neg.setStyleSheet(
+            "QPushButton { background: transparent; border: none; color: #333; font-size: 14px; }"
+            "QPushButton:checked { color: #cc4444; }"
+            "QPushButton:hover { color: #888; }"
+            "QPushButton:checked:hover { color: #ff6666; }"
+        )
+        self._btn_skip_neg.clicked.connect(self._toggle_skip_negative)
+        _ph.addWidget(self._btn_skip_neg)
+
         self._player_search = QLineEdit()
         self._player_search.setPlaceholderText("Acteur zoeken…")
         self._player_search.setFixedWidth(160)
         self._player_search.setFixedHeight(26)
+        # Only receive focus when the user explicitly clicks — never from keyboard
+        # tab-order or any other indirect focus transfer (zoom, drag, etc.)
+        self._player_search.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
         self._player_search.textChanged.connect(self._on_player_search)
         _ph.addWidget(self._player_search)
 
@@ -1131,12 +1183,8 @@ class CineMarker(QMainWindow):
 
         self.timeline = TimelineSlider()
         self.timeline.seeked.connect(self._on_timeline_seek)
-        self.timeline.setFixedHeight(4)
-        self.timeline.setStyleSheet(
-            "QSlider::groove:horizontal { height: 4px; background: #141414; border-radius: 0; }"
-            "QSlider::sub-page:horizontal { background: #e8b86d; border-radius: 0; }"
-            "QSlider::handle:horizontal { background: transparent; width: 0; margin: 0; }"
-        )
+        self.timeline.setFixedHeight(6)   # slightly taller so neg-zones are visible
+        self.timeline.setStyleSheet("")    # paintEvent handles all drawing
         pv.addWidget(self.timeline)
 
         # Floating right panel — top-level transparent window
@@ -1395,6 +1443,7 @@ class CineMarker(QMainWindow):
         QShortcut(QKeySequence(Qt.Key.Key_0), self).activated.connect(self._reset_zoom)
         QShortcut(QKeySequence("T"), self).activated.connect(self.export_thumbnail)
         QShortcut(QKeySequence("V"),      self).activated.connect(self._next_film)
+        QShortcut(QKeySequence("X"),      self).activated.connect(self._add_negative_marker)
         QShortcut(QKeySequence("Ctrl+O"), self).activated.connect(self.open_file)
         QShortcut(QKeySequence("F11"),    self).activated.connect(self._toggle_fullscreen)
         QShortcut(QKeySequence("Ctrl+L"), self).activated.connect(self._show_actor_overlay)
@@ -1420,11 +1469,20 @@ class CineMarker(QMainWindow):
                 self.timeline.setValue(int(pos / dur * 10000))
                 self._updating_slider = False
                 self._lbl_time.setText(f"{_fmt_hms(pos)} / {_fmt_hms(dur)}")
+
+                # Skip negative zones during playback
+                if self._skip_negative and not self.player.pause:
+                    for start, end in self._neg_zones_cache:
+                        if start <= pos < end:
+                            self.player.seek(min(end, dur - 0.05), 'absolute+exact')
+                            break
+
             if dur is not None and self._duration != dur:
                 self._duration = dur
                 if dur > 0 and self._video_path:
                     film = db.get_or_create_film(self._video_path)
                     db.set_film_duration(film['id'], dur)
+                self._refresh_timeline_zones()
         except Exception:
             pass
 
@@ -1443,8 +1501,9 @@ class CineMarker(QMainWindow):
         self._video_path = path
         self._duration = 0
         self._lbl_time.setText("--:-- / --:--")
+        self._neg_zones_cache: list = []
         self._markers = load_markers(path)
-        self._refresh_marker_list()
+        self._refresh_marker_list()   # also calls _refresh_timeline_zones
         self.player.play(path)
         self.player.pause = False   # always start playing, even if previously paused
         film = db.get_or_create_film(path)
@@ -1566,14 +1625,24 @@ class CineMarker(QMainWindow):
         self.player.seek(seconds, 'relative+exact')
 
     def seek_frames(self, n):
-        """Step n frames forward (n>0) or backward (n<0)."""
-        if not self._video_path:
+        """Step n frames forward (n>0) or backward (n<0).
+        Single-frame back uses frame_back_step(); multi-frame back uses a
+        time-based seek because looping frame_back_step() is unreliable in mpv."""
+        if not self._video_path or n == 0:
             return
-        for _ in range(abs(n)):
-            if n > 0:
+        if n > 0:
+            for _ in range(n):
                 self.player.frame_step()
-            else:
-                self.player.frame_back_step()
+        elif n == -1:
+            self.player.frame_back_step()
+        else:
+            # Multiple frames backward — compute the offset from FPS
+            try:
+                fps = float(self.player.container_fps or 25.0)
+                fps = max(1.0, fps)
+            except Exception:
+                fps = 25.0
+            self.player.seek(n / fps, 'relative+exact')
 
     def go_to_start(self):
         if self._video_path:
@@ -1865,8 +1934,8 @@ class CineMarker(QMainWindow):
                     self._drag_last = event.pos()
                     w = self.video_container.width()
                     h = self.video_container.height()
-                    self._pan_x -= delta.x() / w
-                    self._pan_y -= delta.y() / h
+                    self._pan_x += delta.x() / w
+                    self._pan_y += delta.y() / h
                     self._apply_zoom_pan()
                     return True
             elif t == QEvent.Type.MouseButtonRelease:
@@ -1903,6 +1972,64 @@ class CineMarker(QMainWindow):
             save_markers(self._video_path, self._markers)
             self._refresh_marker_list()
             self.status.showMessage(f"  Marker '{name}' geplaatst op {format_time(pos)}")
+
+    # ── Negative-zone helpers ─────────────────────
+
+    def _get_neg_zones(self) -> list:
+        """Returns [(start_sec, end_sec), ...] for each negative period.
+        A zone starts at a negative marker and ends at the next non-negative
+        marker (or end of film).
+        """
+        dur = self._duration
+        if not self._markers or not dur:
+            return []
+        sorted_m = sorted(self._markers, key=lambda m: m.get('time', 0))
+        zones = []
+        for i, m in enumerate(sorted_m):
+            if not m.get('negative'):
+                continue
+            start = m['time']
+            end = dur
+            for j in range(i + 1, len(sorted_m)):
+                if not sorted_m[j].get('negative'):
+                    end = sorted_m[j]['time']
+                    break
+            if end > start:
+                zones.append((start, end))
+        return zones
+
+    def _refresh_timeline_zones(self):
+        zones = self._get_neg_zones()
+        self._neg_zones_cache = zones
+        dur = self._duration or 1
+        self.timeline.set_neg_zones([(s / dur, e / dur) for s, e in zones])
+
+    def _add_negative_marker(self):
+        if not self._video_path:
+            return
+        try:
+            pos = self.player.time_pos or 0
+        except Exception:
+            pos = 0
+        marker = {
+            'time':       pos,
+            'name':       'SKIP',
+            'actors':     [],
+            'categories': [],
+            'negative':   True,
+            'created':    datetime.now().isoformat(),
+        }
+        self._markers.append(marker)
+        self._markers.sort(key=lambda m: m['time'])
+        save_markers(self._video_path, self._markers)
+        self._refresh_marker_list()
+        self.status.showMessage(f"  Negatieve marker gezet op {_fmt_hms(pos)}")
+
+    def _toggle_skip_negative(self):
+        self._skip_negative = self._btn_skip_neg.isChecked()
+        db.set_setting('skip_negative', '1' if self._skip_negative else '0')
+        state = "aan" if self._skip_negative else "uit"
+        self.status.showMessage(f"  Negatieve perioden overslaan: {state}")
 
     def _refresh_marker_list(self):
         self.marker_list.clear()
@@ -1955,36 +2082,53 @@ class CineMarker(QMainWindow):
             return lbl
 
         for idx, m in enumerate(self._markers):
+            is_neg = m.get('negative', False)
+
             item = QListWidgetItem()
             self.marker_list.addItem(item)
 
             row_w = QWidget()
-            row_w.setStyleSheet("background: transparent;")
+            row_w.setStyleSheet(
+                "background: #1f0808;" if is_neg else "background: transparent;"
+            )
             rh = QHBoxLayout(row_w)
             rh.setContentsMargins(4, 0, 4, 0)
             rh.setSpacing(3)
 
-            # Actor photo(s)
-            for aid in (m.get('actors') or []):
-                rh.addWidget(_img_label(_actor_pix(aid), SZ_A, '#222'))
-
-            # Category icon(s)
-            for cid in (m.get('categories') or []):
-                rh.addWidget(_img_label(_cat_pix(cid), SZ_C, '#1a1a2a'))
+            if is_neg:
+                # Negative marker — red ⊘ symbol instead of actor/category icons
+                lbl_neg = QLabel("⊘")
+                lbl_neg.setStyleSheet(
+                    "color:#cc3333; font-size:16px; font-weight:bold; background:transparent;")
+                lbl_neg.setFixedWidth(SZ_A)
+                rh.addWidget(lbl_neg)
+            else:
+                # Actor photo(s)
+                for aid in (m.get('actors') or []):
+                    rh.addWidget(_img_label(_actor_pix(aid), SZ_A, '#222'))
+                # Category icon(s)
+                for cid in (m.get('categories') or []):
+                    rh.addWidget(_img_label(_cat_pix(cid), SZ_C, '#1a1a2a'))
 
             # MM:SS time
             s = int(m.get('time', 0))
             time_str = f"{s // 60:02d}:{s % 60:02d}"
             lbl_t = QLabel(time_str)
             lbl_t.setStyleSheet(
-                "color:#888; font-size:11px; "
-                "font-family:'Consolas',monospace; background:transparent;")
+                ("color:#cc3333;" if is_neg else "color:#888;") +
+                " font-size:11px; font-family:'Consolas',monospace; background:transparent;")
             lbl_t.setFixedWidth(34)
             rh.addWidget(lbl_t)
 
+            if is_neg:
+                lbl_skip = QLabel("SKIP")
+                lbl_skip.setStyleSheet(
+                    "color:#883333; font-size:9px; letter-spacing:2px; background:transparent;")
+                rh.addWidget(lbl_skip)
+
             rh.addStretch()
 
-            # Delete button
+            # Delete button (same for both types)
             btn_del = QPushButton("✕")
             btn_del.setFixedSize(20, 20)
             btn_del.setStyleSheet(
@@ -1997,6 +2141,9 @@ class CineMarker(QMainWindow):
 
             item.setSizeHint(QSize(0, ROW_H))
             self.marker_list.setItemWidget(item, row_w)
+
+        # Keep zones in sync whenever markers change
+        self._refresh_timeline_zones()
 
     def _delete_marker_by_index(self, idx: int):
         if 0 <= idx < len(self._markers):
