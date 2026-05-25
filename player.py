@@ -1616,11 +1616,25 @@ class CineMarker(QMainWindow):
         """Jump to a scene: load film if needed, seek to start"""
         if self._video_path != film_path:
             self._load_video(film_path)
-            # Wait for mpv to load then seek
-            QTimer.singleShot(800, lambda: self.player.seek(start_time, 'absolute+exact'))
+            # Don't use a fixed delay — poll until mpv reports a duration,
+            # then seek.  Avoids the SystemError when the file loads slowly.
+            QTimer.singleShot(100, lambda: self._seek_when_ready(start_time))
         else:
             self.player.seek(start_time, 'absolute+exact')
         self.main_tabs.setCurrentIndex(0)
+
+    def _seek_when_ready(self, target: float, attempts: int = 30):
+        """Seek to target once mpv has finished loading (duration > 0).
+        Retries every 150 ms for up to ~4.5 seconds before giving up."""
+        try:
+            dur = self.player.duration
+            if dur and dur > 0:
+                self.player.seek(target, 'absolute+exact')
+                return
+        except Exception:
+            pass
+        if attempts > 0:
+            QTimer.singleShot(150, lambda: self._seek_when_ready(target, attempts - 1))
 
     def toggle_play(self):
         if not self._video_path:
