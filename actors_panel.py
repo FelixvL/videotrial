@@ -101,16 +101,25 @@ class FrameExtractWorker(QThread):
                 break
             if not os.path.exists(cache_path):
                 try:
-                    subprocess.run([
+                    result = subprocess.run([
                         'ffmpeg', '-y',
                         '-ss', str(time_sec),
                         '-i', film_path,
                         '-frames:v', '1',
-                        '-vf', 'scale=80:45:force_original_aspect_ratio=decrease,'
-                               'pad=80:45:(ow-iw)/2:(oh-ih)/2',
-                        '-q:v', '5',
+                        '-vf', 'scale=80:45',
+                        '-q:v', '3',
                         cache_path,
-                    ], capture_output=True, timeout=20)
+                    ], capture_output=True, timeout=30)
+                    # If scale=80:45 failed try without any filter (raw frame)
+                    if result.returncode != 0 or not os.path.exists(cache_path):
+                        subprocess.run([
+                            'ffmpeg', '-y',
+                            '-ss', str(time_sec),
+                            '-i', film_path,
+                            '-frames:v', '1',
+                            '-q:v', '3',
+                            cache_path,
+                        ], capture_output=True, timeout=30)
                 except Exception:
                     continue
             if os.path.exists(cache_path):
@@ -1328,7 +1337,15 @@ class ActorDetailView(QWidget):
                 if os.path.exists(cache_path):
                     pix = QPixmap(cache_path)
                     if not pix.isNull():
-                        frame_lbl.setPixmap(pix)
+                        scaled = pix.scaled(
+                            FRAME_W, FRAME_H,
+                            Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                            Qt.TransformationMode.SmoothTransformation,
+                        )
+                        ox = (scaled.width()  - FRAME_W) // 2
+                        oy = (scaled.height() - FRAME_H) // 2
+                        frame_lbl.setPixmap(scaled.copy(ox, oy, FRAME_W, FRAME_H))
+                        frame_lbl.setStyleSheet("")
                 rh.addWidget(frame_lbl)
 
                 # Category icons
@@ -1373,11 +1390,20 @@ class ActorDetailView(QWidget):
 
     def _on_frame_ready(self, row_idx: int, cache_path: str):
         lbl = self._marker_row_widgets.get(row_idx)
-        if lbl:
-            pix = QPixmap(cache_path)
-            if not pix.isNull():
-                lbl.setPixmap(pix)
-                lbl.setStyleSheet("")   # remove grey placeholder bg
+        if lbl is None:
+            return
+        pix = QPixmap(cache_path)
+        if pix.isNull():
+            return
+        scaled = pix.scaled(
+            lbl.width(), lbl.height(),
+            Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        ox = (scaled.width()  - lbl.width())  // 2
+        oy = (scaled.height() - lbl.height()) // 2
+        lbl.setPixmap(scaled.copy(ox, oy, lbl.width(), lbl.height()))
+        lbl.setStyleSheet("")   # remove grey placeholder background
 
     @staticmethod
     def _load_markers(video_path: str) -> list:
