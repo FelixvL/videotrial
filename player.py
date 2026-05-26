@@ -1076,6 +1076,7 @@ class CineMarker(QMainWindow):
         self._drag_active = False
         self._drag_last = None
         self._current_speed = 1.0
+        self._reverse_speed = 0.0          # |speed| tijdens achteruit-modus
         self._selection_entries: list = []   # cross-film afspeellijst vanuit markers-tab
         self._current_marker_row: int = -1  # blijft bewaard over list-rebuilds heen
 
@@ -1661,6 +1662,11 @@ class CineMarker(QMainWindow):
         self.timer.timeout.connect(self._update_ui)
         self.timer.start()
 
+        # Timer voor achteruit-spelen (timer-based seeking i.p.v. mpv native reverse)
+        self._reverse_timer = QTimer(self)
+        self._reverse_timer.setInterval(50)
+        self._reverse_timer.timeout.connect(self._reverse_tick)
+
     def _update_ui(self):
         if not self._video_path:
             return
@@ -1985,6 +1991,13 @@ class CineMarker(QMainWindow):
     def toggle_play(self):
         if not self._video_path:
             return
+        if self._current_speed < 0:
+            # Achteruit-modus: reverse timer aan/uit
+            if self._reverse_timer.isActive():
+                self._reverse_timer.stop()
+            else:
+                self._reverse_timer.start(50)
+            return
         self.player.pause = not self.player.pause
 
     def seek_relative(self, seconds):
@@ -2046,11 +2059,51 @@ class CineMarker(QMainWindow):
 
     def _apply_speed(self, speed: float):
         self._current_speed = speed
+        if speed < 0:
+            # Achteruit: mpv pauzeren, zelf via timer seeking doen
+            self._reverse_speed = abs(speed)
+            try:
+                self.player.speed = 1.0
+                self.player.pause = True
+            except Exception:
+                pass
+            self._reverse_timer.start(50)
+        else:
+            # Vooruit of stop: reverse timer uit, mpv speed instellen
+            self._reverse_timer.stop()
+            self._reverse_speed = 0.0
+            try:
+                self.player.speed = speed
+                if speed > 0:
+                    self.player.pause = False
+            except Exception:
+                pass
+        self._update_speed_label(speed)
+
+    def _reverse_tick(self):
+        if not self._video_path:
+            return
         try:
-            self.player.speed = speed
+            pos = self.player.time_pos
+            if pos is None:
+                return
+            seek_amount = self._reverse_speed * 0.05  # 50ms × snelheid = stap in seconden
+            new_pos = pos - seek_amount
+            if new_pos <= 0:
+                self.player.seek(0, 'absolute+exact')
+                self._reverse_timer.stop()
+                self._current_speed = 1.0
+                self._reverse_speed = 0.0
+                try:
+                    self.player.speed = 1.0
+                    self.player.pause = True
+                except Exception:
+                    pass
+                self._update_speed_label(1.0)
+                return
+            self.player.seek(-seek_amount, 'relative+exact')
         except Exception:
             pass
-        self._update_speed_label(speed)
 
     def _update_speed_label(self, speed: float):
         abs_s = abs(speed)
@@ -2771,23 +2824,48 @@ class CineMarker(QMainWindow):
     # ── Help ──────────────────────────────────
 
     def _show_help(self):
-        from PyQt6.QtWidgets import QTextEdit
+        from PyQt6.QtWidgets import QTextEdit, QGroupBox
         dlg = QDialog(self)
-        dlg.setWindowTitle("Toetsen & knoppen")
-        dlg.resize(680, 720)
+        dlg.setWindowTitle("Instellingen & sneltoetsen")
+        dlg.resize(680, 760)
         dlg.setStyleSheet("""
-            QDialog   { background: #0e0e0e; }
-            QTextEdit { background: #0e0e0e; border: none;
-                        color: #ccc; font-size: 12px;
-                        font-family: 'Consolas', monospace; }
+            QDialog    { background: #0e0e0e; }
+            QTextEdit  { background: #0e0e0e; border: none;
+                         color: #ccc; font-size: 12px;
+                         font-family: 'Consolas', monospace; }
+            QGroupBox  { color: #555; font-size: 10px; letter-spacing: 3px;
+                         border: 1px solid #1e1e1e; border-radius: 4px;
+                         margin-top: 6px; padding: 8px 10px 6px; }
+            QGroupBox::title { subcontrol-origin: margin; left: 8px;
+                               padding: 0 4px; }
             QPushButton { background: #1e1e1e; border: 1px solid #333;
-                          border-radius: 4px; padding: 5px 20px; color: #ccc; }
+                          border-radius: 4px; padding: 5px 16px; color: #ccc; }
             QPushButton:hover { border-color: #e8b86d; color: #e8b86d; }
         """)
         v = QVBoxLayout(dlg)
-        v.setContentsMargins(0, 0, 0, 10)
-        v.setSpacing(6)
+        v.setContentsMargins(10, 10, 10, 10)
+        v.setSpacing(8)
 
+        # ── Acties ──────────────────────────────
+        grp = QGroupBox("ACTIES")
+        gh = QHBoxLayout(grp)
+        gh.setSpacing(8)
+
+        btn_refresh_actors = QPushButton("↻  Acteurs herladen")
+        btn_refresh_actors.setToolTip(
+            "Nieuwe foto's in acteurfotos/ oppikken en acteurs-tab vernieuwen"
+        )
+        def _do_refresh():
+            self.actors_panel.refresh()
+            btn_refresh_actors.setText("✓  Herladen")
+            QTimer.singleShot(1500, lambda: btn_refresh_actors.setText("↻  Acteurs herladen"))
+        btn_refresh_actors.clicked.connect(_do_refresh)
+        gh.addWidget(btn_refresh_actors)
+        gh.addStretch()
+
+        v.addWidget(grp)
+
+        # ── Sneltoetsen ─────────────────────────
         te = QTextEdit()
         te.setReadOnly(True)
         te.setHtml(_HELP_HTML)

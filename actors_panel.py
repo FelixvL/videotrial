@@ -1868,12 +1868,6 @@ class ActorsPanel(QWidget):
         btn_folder.clicked.connect(self._pick_folder)
         tb.addWidget(btn_folder)
 
-        btn_refresh = QPushButton("↻")
-        btn_refresh.setFixedSize(28, 28)
-        btn_refresh.setToolTip("Fotomap herladen (nieuwe foto's oppikken)")
-        btn_refresh.clicked.connect(self.refresh)
-        tb.addWidget(btn_refresh)
-
         btn_import = QPushButton("⬆  Import")
         btn_import.setFixedHeight(28)
         btn_import.clicked.connect(self._import_actors)
