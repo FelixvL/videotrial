@@ -39,6 +39,7 @@ SORT_FIELDS = [
     ('date',    'Datum'),
     ('markers', 'Markers'),
     ('duration','Duur'),
+    ('actors',  'Acteurs'),
 ]
 
 
@@ -533,6 +534,8 @@ class FilmsPanel(QWidget):
             return d.get('markers', 0)
         if k == 'duration':
             return d.get('duration', 0)
+        if k == 'actors':
+            return d.get('actor_count', 0)
         return 0
 
     def _sort_and_repopulate(self):
@@ -647,6 +650,7 @@ class FilmsPanel(QWidget):
 
             markers     = _count_film_markers(str(fp))
             neg_markers = _count_neg_film_markers(str(fp))
+            actor_count = len(db.get_actors_for_film(film_id)) if film_id else 0
 
             cw, ch = self._zoom_size()
             item = QListWidgetItem()
@@ -663,6 +667,7 @@ class FilmsPanel(QWidget):
                 'markers':      markers,
                 'neg_markers':  neg_markers,
                 'duration':     duration,
+                'actor_count':  actor_count,
                 'cell_size':    QSize(cw, ch),
                 'thumb_phase':  random.uniform(0.0, 2.0),
             })

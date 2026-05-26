@@ -762,12 +762,34 @@ class _FilmEditPanel(QWidget):
         else:
             self._cv.addWidget(self._dim_lbl("Geen thumbnails opgeslagen"))
 
+        sep2 = QFrame(); sep2.setFrameShape(QFrame.Shape.HLine)
+        sep2.setStyleSheet("QFrame{background:#1e1e1e;max-height:1px;}")
+        self._cv.addWidget(sep2)
+
+        # ── Markers ───────────────────────────────
+        self._cv.addWidget(self._section_lbl("MARKERS"))
+        film = db.get_film(self._film_id)
+        film_path = film['file_path'] if film else None
+        if film_path:
+            markers = load_markers(film_path)
+            actor_markers = [
+                (i, m) for i, m in enumerate(markers)
+                if not m.get('negative') and m.get('actors')
+            ]
+            if actor_markers:
+                for idx, m in actor_markers:
+                    self._cv.addWidget(self._marker_block(m, idx, film_path))
+            else:
+                self._cv.addWidget(self._dim_lbl("Geen markers met acteurs"))
+        else:
+            self._cv.addWidget(self._dim_lbl("Filmpad niet gevonden"))
+
         self._cv.addStretch()
 
         # Auto-size panel height
         self._inner.adjustSize()
         content_h = self._inner.sizeHint().height()
-        self.setFixedHeight(min(400, content_h + 72))
+        self.setFixedHeight(min(520, content_h + 72))
 
     # ── Row builders ─────────────────────────────
 
@@ -845,6 +867,88 @@ class _FilmEditPanel(QWidget):
         btn.clicked.connect(lambda _, t=thumb: self._remove_thumb(t))
         return cell
 
+    def _marker_block(self, marker: dict, marker_idx: int, film_path: str) -> QWidget:
+        """One marker: timestamp + cat icons + indented actor rows."""
+        block = QWidget(); block.setStyleSheet("background:transparent;")
+        v = QVBoxLayout(block)
+        v.setContentsMargins(0, 3, 0, 1)
+        v.setSpacing(1)
+
+        # ── Time + category icons ─────────────────
+        h_top = QHBoxLayout()
+        h_top.setContentsMargins(0, 0, 0, 0)
+        h_top.setSpacing(4)
+
+        t = marker.get('time', 0)
+        s = int(t)
+        time_str = f"{s // 3600:02d}:{(s % 3600) // 60:02d}:{s % 60:02d}"
+        lbl_t = QLabel(time_str)
+        lbl_t.setStyleSheet(
+            "color:#4a4a4a;font-size:10px;"
+            "font-family:'Consolas',monospace;background:transparent;")
+        h_top.addWidget(lbl_t)
+
+        for cat_id in (marker.get('categories') or []):
+            cats = db.get_categories_by_ids([cat_id])
+            if cats:
+                ip = cats[0].get('icon_path', '')
+                if ip and os.path.exists(ip):
+                    pix = QPixmap(ip).scaled(
+                        13, 13,
+                        Qt.AspectRatioMode.KeepAspectRatio,
+                        Qt.TransformationMode.SmoothTransformation,
+                    )
+                    ic = QLabel(); ic.setFixedSize(15, 15)
+                    ic.setPixmap(pix)
+                    ic.setStyleSheet("background:transparent;")
+                    h_top.addWidget(ic)
+
+        h_top.addStretch()
+        v.addLayout(h_top)
+
+        # ── Actor rows (indented) ─────────────────
+        for actor_id in (marker.get('actors') or []):
+            actor = db.get_actor(actor_id)
+            if actor:
+                v.addWidget(self._marker_actor_row(actor, marker_idx, film_path))
+
+        return block
+
+    def _marker_actor_row(self, actor: dict, marker_idx: int, film_path: str) -> QWidget:
+        """Single actor within a marker — indented, with ✕ to unlink from that marker."""
+        row = QWidget(); row.setStyleSheet("background:transparent;")
+        h = QHBoxLayout(row)
+        h.setContentsMargins(14, 0, 0, 0)   # indent under time label
+        h.setSpacing(5)
+
+        # Tiny photo
+        lbl_p = QLabel(); lbl_p.setFixedSize(16, 20)
+        lbl_p.setStyleSheet("background:#161616;border-radius:2px;")
+        photos = db.get_actor_photos(actor['id'])
+        if photos:
+            raw = QPixmap(photos[0]['photo_path'])
+            if not raw.isNull():
+                sc = raw.scaled(16, 20,
+                    Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                    Qt.TransformationMode.SmoothTransformation)
+                ox = (sc.width()  - 16) // 2
+                oy = (sc.height() - 20) // 2
+                lbl_p.setPixmap(sc.copy(ox, oy, 16, 20))
+        h.addWidget(lbl_p)
+
+        name = QLabel(actor.get('name', ''))
+        name.setStyleSheet("color:#777;font-size:10px;background:transparent;")
+        h.addWidget(name, stretch=1)
+
+        btn = QPushButton("✕"); btn.setFixedSize(16, 16)
+        btn.setStyleSheet(self._ROW_STYLE)
+        btn.clicked.connect(
+            lambda _, aid=actor['id'], mi=marker_idx, fp=film_path:
+                self._remove_actor_from_marker(aid, mi, fp)
+        )
+        h.addWidget(btn)
+        return row
+
     # ── Actions ──────────────────────────────────
 
     def _remove_actor(self, actor: dict):
@@ -858,6 +962,16 @@ class _FilmEditPanel(QWidget):
         self._rebuild()
         if self._film_id:
             self.data_changed.emit(self._film_id)
+
+    def _remove_actor_from_marker(self, actor_id: int, marker_idx: int, film_path: str):
+        markers = load_markers(film_path)
+        if 0 <= marker_idx < len(markers):
+            actors = list(markers[marker_idx].get('actors') or [])
+            if actor_id in actors:
+                actors.remove(actor_id)
+                markers[marker_idx]['actors'] = actors
+                save_markers(film_path, markers)
+        self._rebuild()
 
     # ── Position ─────────────────────────────────
 
