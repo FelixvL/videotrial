@@ -59,6 +59,53 @@ def _ffprobe_duration(path: str) -> float:
         return 0.0
 
 
+def _parse_duration_input(s: str) -> float:
+    """Parse user duration string → seconds.  '' = no filter (0.0).
+    Accepted formats:
+      '10'       → 10 minutes
+      '10:30'    → 10 min 30 sec
+      '1:10:30'  → 1 h 10 min 30 sec
+    """
+    s = s.strip()
+    if not s:
+        return 0.0
+    parts = s.split(':')
+    try:
+        if len(parts) == 1:
+            return float(parts[0]) * 60
+        elif len(parts) == 2:
+            return int(parts[0]) * 60 + float(parts[1])
+        elif len(parts) == 3:
+            return int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
+    except (ValueError, IndexError):
+        pass
+    return 0.0
+
+
+def _parse_size_input(s: str) -> float:
+    """Parse user size string → bytes.  '' = no filter (0.0).
+    Accepted formats:
+      '500'      → 500 MB
+      '1.5'      → 1.5 GB  (when 'gb' / 'g' suffix present)
+      '1.5 GB'   → 1.5 GB
+      '500 MB'   → 500 MB
+    Plain number without suffix is always treated as MB.
+    """
+    s = s.strip()
+    if not s:
+        return 0.0
+    sl = s.lower().replace(' ', '')
+    try:
+        if sl.endswith('gb') or sl.endswith('g'):
+            return float(sl.rstrip('gb').rstrip('g')) * 1_073_741_824
+        elif sl.endswith('mb') or sl.endswith('m'):
+            return float(sl.rstrip('mb').rstrip('m')) * 1_048_576
+        else:
+            return float(sl) * 1_048_576   # default: MB
+    except (ValueError, IndexError):
+        return 0.0
+
+
 def _count_film_markers(file_path: str) -> int:
     p = Path(file_path)
     mf = p.parent / f".{p.stem}_markers.json"
@@ -437,15 +484,98 @@ class FilmsPanel(QWidget):
         self._btn_flt_no_markers.clicked.connect(lambda: self._toggle_filter('no_markers'))
         b.addWidget(self._btn_flt_no_markers)
 
+        b.addSpacing(4)
+        b.addWidget(_vsep())
+        b.addSpacing(4)
+
+        # ── Duurfilter (min / max) ────────────────
+        _dur_lbl = QLabel("⏱")
+        _dur_lbl.setStyleSheet("color:#444;font-size:12px;")
+        b.addWidget(_dur_lbl)
+
+        _dur_input_style = (
+            "QLineEdit{background:#111;border:1px solid #252525;border-radius:3px;"
+            "color:#4db8b8;font-size:10px;padding:1px 4px;}"
+            "QLineEdit:focus{border-color:#4db8b8;}"
+            "QLineEdit[hasValue='true']{border-color:#004040;background:#001818;}"
+        )
+
+        self._dur_min_input = QLineEdit()
+        self._dur_min_input.setPlaceholderText("min")
+        self._dur_min_input.setFixedSize(52, 26)
+        self._dur_min_input.setToolTip("Minimale duur  (bijv. 10  of  1:30:00)")
+        self._dur_min_input.setStyleSheet(_dur_input_style)
+        self._dur_min_input.textChanged.connect(self._apply_search_visibility)
+        b.addWidget(self._dur_min_input)
+
+        _dash = QLabel("–")
+        _dash.setStyleSheet("color:#333;")
+        b.addWidget(_dash)
+
+        self._dur_max_input = QLineEdit()
+        self._dur_max_input.setPlaceholderText("max")
+        self._dur_max_input.setFixedSize(52, 26)
+        self._dur_max_input.setToolTip("Maximale duur  (bijv. 30  of  2:00:00)")
+        self._dur_max_input.setStyleSheet(_dur_input_style)
+        self._dur_max_input.textChanged.connect(self._apply_search_visibility)
+        b.addWidget(self._dur_max_input)
+
+        b.addSpacing(4)
+        b.addWidget(_vsep())
+        b.addSpacing(4)
+
+        # ── Groottefilter (min / max MB) ──────────
+        _sz_lbl = QLabel("MB")
+        _sz_lbl.setStyleSheet("color:#444;font-size:9px;letter-spacing:1px;")
+        b.addWidget(_sz_lbl)
+
+        _sz_input_style = (
+            "QLineEdit{background:#111;border:1px solid #252525;border-radius:3px;"
+            "color:#b89060;font-size:10px;padding:1px 4px;}"
+            "QLineEdit:focus{border-color:#b89060;}"
+        )
+
+        self._sz_min_input = QLineEdit()
+        self._sz_min_input.setPlaceholderText("min")
+        self._sz_min_input.setFixedSize(52, 26)
+        self._sz_min_input.setToolTip("Minimale bestandsgrootte  (bijv. 200  of  1.5GB)")
+        self._sz_min_input.setStyleSheet(_sz_input_style)
+        self._sz_min_input.textChanged.connect(self._apply_search_visibility)
+        b.addWidget(self._sz_min_input)
+
+        _sz_dash = QLabel("–")
+        _sz_dash.setStyleSheet("color:#333;")
+        b.addWidget(_sz_dash)
+
+        self._sz_max_input = QLineEdit()
+        self._sz_max_input.setPlaceholderText("max")
+        self._sz_max_input.setFixedSize(52, 26)
+        self._sz_max_input.setToolTip("Maximale bestandsgrootte  (bijv. 2000  of  4GB)")
+        self._sz_max_input.setStyleSheet(_sz_input_style)
+        self._sz_max_input.textChanged.connect(self._apply_search_visibility)
+        b.addWidget(self._sz_max_input)
+
         b.addStretch()
 
         # ── Zoekbalk + actieknoppen ───────────────
         self.search_input = QLineEdit()
         self.search_input.setPlaceholderText("Zoeken...")
-        self.search_input.setFixedWidth(160)
+        self.search_input.setFixedWidth(140)
         self.search_input.setFixedHeight(26)
         self.search_input.textChanged.connect(self._filter)
         b.addWidget(self.search_input)
+
+        btn_reset = QPushButton("⊘")
+        btn_reset.setFixedSize(28, 28)
+        btn_reset.setToolTip("Reset alle filters")
+        btn_reset.setStyleSheet(
+            "QPushButton{background:#1a1a1a;border:1px solid #2a2a2a;border-radius:4px;"
+            "color:#555;font-size:14px;padding:0;}"
+            "QPushButton:hover{border-color:#cc4444;color:#cc4444;}"
+            "QPushButton:pressed{background:#cc4444;color:#fff;}"
+        )
+        btn_reset.clicked.connect(self._reset_all_filters)
+        b.addWidget(btn_reset)
 
         btn_refresh = QPushButton("↻")
         btn_refresh.setFixedSize(28, 28)
@@ -728,6 +858,22 @@ class FilmsPanel(QWidget):
         self._btn_flt_no_markers.setStyleSheet(
             self._FILTER_BTN_ACTIVE if self._flt_no_markers else self._FILTER_BTN_STYLE)
 
+    def _reset_all_filters(self):
+        """Wis alle actieve filters en zoektekst."""
+        self._flt_1thumb       = False
+        self._flt_multithumb   = False
+        self._flt_no_thumb     = False
+        self._flt_with_markers = False
+        self._flt_no_markers   = False
+        for w in (self._dur_min_input, self._dur_max_input,
+                  self._sz_min_input,  self._sz_max_input):
+            w.blockSignals(True)
+            w.clear()
+            w.blockSignals(False)
+        self.search_input.clear()          # triggers _filter → _apply_search_visibility
+        self._update_filter_buttons()
+        self._apply_search_visibility()
+
     def _apply_search_visibility(self):
         q = self.search_input.text().lower()
         for item in self._all_items:
@@ -757,6 +903,28 @@ class FilmsPanel(QWidget):
                     item.setHidden(True)
                     continue
                 if self._flt_no_markers and marker_count > 0:
+                    item.setHidden(True)
+                    continue
+
+                # Duration filter
+                dur   = d.get('duration', 0) or 0
+                min_s = _parse_duration_input(self._dur_min_input.text())
+                max_s = _parse_duration_input(self._dur_max_input.text())
+                if min_s > 0 and dur < min_s:
+                    item.setHidden(True)
+                    continue
+                if max_s > 0 and dur > max_s:
+                    item.setHidden(True)
+                    continue
+
+                # Size filter
+                size_b    = d.get('size', 0) or 0
+                min_bytes = _parse_size_input(self._sz_min_input.text())
+                max_bytes = _parse_size_input(self._sz_max_input.text())
+                if min_bytes > 0 and size_b < min_bytes:
+                    item.setHidden(True)
+                    continue
+                if max_bytes > 0 and size_b > max_bytes:
                     item.setHidden(True)
                     continue
 
