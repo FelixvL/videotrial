@@ -150,7 +150,7 @@ _HELP_HTML = """
 <tr><td>O</td><td>Vorige marker in de lijst (wraps rond)</td></tr>
 <tr><td>P</td><td>Volgende marker in de lijst (wraps rond)</td></tr>
 <tr><td>X</td><td>Negatieve marker zetten op huidige positie</td></tr>
-<tr><td>[ &nbsp;/&nbsp; ]</td><td>Afspeelsnelheid omlaag / omhoog (0.25 → … → 1 → … → 3 → 4 → 5 → 6 → 8 → 10 → 15 → 20 → 30 → 50)</td></tr>
+<tr><td>[ &nbsp;/&nbsp; ]</td><td>Afspeelsnelheid omlaag / omhoog — −50× … −1× … −0.25 · 0.25 … 1× … 50× · klik knop = reset 1×</td></tr>
 <tr><td>+ / = &nbsp;/&nbsp; −</td><td>Inzoomen / uitzoomen op video</td></tr>
 <tr><td>0</td><td>Zoom en pan resetten</td></tr>
 <tr><td>T</td><td>Thumbnail exporteren (bestandskeuze)</td></tr>
@@ -208,6 +208,7 @@ _HELP_HTML = """
 <tr><td>Kleur / Rating / Grootte / Dec filters</td><td>Acteurs filteren op eigenschap (meerdere tegelijk)</td></tr>
 <tr><td>Decennia / Grootte / Kleur / Markers / Films</td><td>Sorteren — eerste klik hoog→laag · tweede klik omgekeerd · ↺ reset</td></tr>
 <tr><td>BUITEN DB knop</td><td>Wisselen naar map-modus: klik acteur om eigenschap direct in te stellen</td></tr>
+<tr><td>↻</td><td>Fotomap herladen — nieuwe foto's in acteurfotos/ oppikken zonder herstart</td></tr>
 <tr><td>📁 Map</td><td>Acteur-fotomap instellen</td></tr>
 <tr><td>⬆ Import</td><td>Acteurs importeren uit CSV / TSV</td></tr>
 <tr><td>− / + <span class="dim">(foto-grid)</span></td><td>Thumbnail-formaat aanpassen</td></tr>
@@ -1282,7 +1283,7 @@ class CineMarker(QMainWindow):
         _ph.addWidget(self._lbl_time)
 
         self._btn_speed = QPushButton("1×")
-        self._btn_speed.setFixedSize(40, 26)
+        self._btn_speed.setFixedSize(56, 26)
         self._btn_speed.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._btn_speed.setToolTip("Afspeelsnelheid  [ = langzamer  ] = sneller  klik = reset 1×")
         self._btn_speed.clicked.connect(self._reset_speed)
@@ -1444,6 +1445,24 @@ class CineMarker(QMainWindow):
             return
         actors = [a for a in db.get_all_actors()
                   if q in a.get('name', '').lower()]
+
+        def _sort_key(a):
+            films = db.get_films_for_actor(a['id'])
+            film_count = len(films)
+            marker_count = 0
+            for f in films:
+                p = Path(f['file_path'])
+                mf = p.parent / f".{p.stem}_markers.json"
+                if mf.exists():
+                    try:
+                        for m in json.loads(mf.read_text('utf-8')):
+                            if a['id'] in (m.get('actors') or []):
+                                marker_count += 1
+                    except Exception:
+                        pass
+            return (-film_count, -marker_count)
+
+        actors.sort(key=_sort_key)
         self._panel._search_page.update_results(actors)
         self._panel.show_search(True)
         if not self._panel.isVisible():
@@ -2003,7 +2022,12 @@ class CineMarker(QMainWindow):
 
     # ── Playback speed ────────────────────────
 
-    _SPEED_STEPS = [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0, 4.0, 5.0, 6.0, 8.0, 10.0, 15.0, 20.0, 30.0, 50.0]
+    _SPEED_STEPS = [
+        -50.0, -30.0, -20.0, -15.0, -10.0, -8.0, -6.0, -5.0, -4.0,
+        -3.0, -2.0, -1.5, -1.25, -1.0, -0.75, -0.5, -0.25,
+        0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0, 4.0, 5.0, 6.0,
+        8.0, 10.0, 15.0, 20.0, 30.0, 50.0,
+    ]
 
     def _speed_up(self):
         steps = self._SPEED_STEPS
@@ -2029,12 +2053,19 @@ class CineMarker(QMainWindow):
         self._update_speed_label(speed)
 
     def _update_speed_label(self, speed: float):
-        if speed == int(speed):
-            label = f"{int(speed)}×"
-        else:
-            label = f"{speed}×"
+        abs_s = abs(speed)
+        label = f"{int(speed)}×" if abs_s == int(abs_s) else f"{speed}×"
         self._btn_speed.setText(label)
-        if speed != 1.0:
+        if speed < 0:
+            # achteruit — blauw
+            self._btn_speed.setStyleSheet(
+                "QPushButton { background: transparent; border: none;"
+                "  color: #6db8e8; font-size: 11px; font-family: 'Consolas', monospace;"
+                "  font-weight: bold; }"
+                "QPushButton:hover { color: #90cef0; }"
+            )
+        elif speed != 1.0:
+            # vooruit afwijkend — amber
             self._btn_speed.setStyleSheet(
                 "QPushButton { background: transparent; border: none;"
                 "  color: #e8b86d; font-size: 11px; font-family: 'Consolas', monospace;"
@@ -2042,6 +2073,7 @@ class CineMarker(QMainWindow):
                 "QPushButton:hover { color: #f0ca8a; }"
             )
         else:
+            # 1× normaal — grijs
             self._btn_speed.setStyleSheet(
                 "QPushButton { background: transparent; border: none;"
                 "  color: #444; font-size: 11px; font-family: 'Consolas', monospace; }"
