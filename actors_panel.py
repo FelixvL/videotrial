@@ -1212,6 +1212,7 @@ class ActorDetailView(QWidget):
         self._markers_zoom_level: int  = int(db.get_setting('zoom_detail_markers', '0') or '0')
         self._markers_all_items:  list = []
         self._markers_cat_filter: set  = set()   # cat IDs to filter by; empty = show all
+        self._markers_film_filter: str = ''       # file_path to filter by; '' = show all
         self._build_ui()
 
     def _build_ui(self):
@@ -1403,6 +1404,7 @@ class ActorDetailView(QWidget):
         )
         self.films_list.setItemDelegate(_FilmGridDelegate())
         self.films_list.itemDoubleClicked.connect(self._open_film)
+        self.films_list.itemClicked.connect(self._on_film_filter_clicked)
         fv.addWidget(self.films_list)
 
         # Animation timer — cycles multi-thumbnail films every 2 s
@@ -1528,7 +1530,8 @@ class ActorDetailView(QWidget):
         self._set_combo(self.cmb_dec,     meta.get('decennia', ''))
 
         self._refresh_films()
-        self._markers_cat_filter = set()   # reset filter for new actor
+        self._markers_cat_filter  = set()   # reset filter for new actor
+        self._markers_film_filter = ''
         self._refresh_markers()
 
     def _open_film(self, item):
@@ -1815,15 +1818,39 @@ class ActorDetailView(QWidget):
             self._markers_cat_filter.discard(cat_id)
         self._markers_apply_cat_filter()
 
+    def _on_film_filter_clicked(self, item):
+        """Toggle film filter on single click; click same film again to show all."""
+        d  = item.data(Qt.ItemDataRole.UserRole)
+        fp = d.get('file_path', '') if d else ''
+        if self._markers_film_filter == fp:
+            # Already active → deselect and show all
+            self._markers_film_filter = ''
+            self.films_list.clearSelection()
+        else:
+            self._markers_film_filter = fp
+        self._apply_markers_filter()
+
     def _markers_apply_cat_filter(self):
-        """Show/hide marker items based on the active category filter."""
+        self._apply_markers_filter()
+
+    def _apply_markers_filter(self):
+        """Show/hide marker items based on the active film + category filter."""
         for item in self._markers_all_items:
-            d = item.data(Qt.ItemDataRole.UserRole)
+            d         = item.data(Qt.ItemDataRole.UserRole)
             item_cats = set(d.get('cat_ids', []) if d else [])
-            if not self._markers_cat_filter:
-                item.setHidden(False)
-            else:
-                item.setHidden(not bool(item_cats & self._markers_cat_filter))
+            item_fp   = d.get('film_path', '') if d else ''
+
+            # Film filter
+            if self._markers_film_filter and item_fp != self._markers_film_filter:
+                item.setHidden(True)
+                continue
+
+            # Category filter
+            if self._markers_cat_filter and not (item_cats & self._markers_cat_filter):
+                item.setHidden(True)
+                continue
+
+            item.setHidden(False)
 
     @staticmethod
     def _load_markers(video_path: str) -> list:
