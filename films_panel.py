@@ -265,6 +265,16 @@ class FilmsPanel(QWidget):
         "color:#e8b86d;font-size:10px;padding:2px 7px;}"
         "QPushButton:hover{border-color:#e8b86d;}"
     )
+    _FILTER_BTN_STYLE = (
+        "QPushButton{background:#111;border:1px solid #252525;border-radius:3px;"
+        "color:#444;font-size:10px;padding:2px 7px;}"
+        "QPushButton:hover{color:#888;border-color:#444;}"
+    )
+    _FILTER_BTN_ACTIVE = (
+        "QPushButton{background:#001818;border:1px solid #004040;border-radius:3px;"
+        "color:#4db8b8;font-size:10px;padding:2px 7px;}"
+        "QPushButton:hover{border-color:#4db8b8;}"
+    )
 
     def __init__(self):
         super().__init__()
@@ -273,6 +283,11 @@ class FilmsPanel(QWidget):
         self._sort_asc:   bool = True
         self._sort_btns:  dict = {}
         self._zoom_level: int  = int(db.get_setting('zoom_films_panel', '0') or '0')
+        # Filter toggles
+        self._flt_1thumb:       bool = False
+        self._flt_multithumb:   bool = False
+        self._flt_with_markers: bool = False
+        self._flt_no_markers:   bool = False
         self._build_ui()
         folder = db.get_setting('film_folder', '')
         if folder:
@@ -368,6 +383,47 @@ class FilmsPanel(QWidget):
         sb.addStretch()
         v.addWidget(sort_bar)
         self._update_sort_buttons()
+
+        # ── Filter bar ───────────────────────────
+        filter_bar = QFrame()
+        filter_bar.setFixedHeight(30)
+        filter_bar.setStyleSheet(
+            "QFrame { background: #060606; border-bottom: 1px solid #131313; }"
+        )
+        fb = QHBoxLayout(filter_bar)
+        fb.setContentsMargins(8, 3, 8, 3)
+        fb.setSpacing(4)
+
+        filter_lbl = QLabel("Filter:")
+        filter_lbl.setStyleSheet("color: #333; font-size: 10px;")
+        fb.addWidget(filter_lbl)
+
+        self._btn_flt_1thumb = QPushButton("1 thumbnail")
+        self._btn_flt_1thumb.setFixedHeight(22)
+        self._btn_flt_1thumb.setStyleSheet(self._FILTER_BTN_STYLE)
+        self._btn_flt_1thumb.clicked.connect(lambda: self._toggle_filter('1thumb'))
+        fb.addWidget(self._btn_flt_1thumb)
+
+        self._btn_flt_multithumb = QPushButton("meerdere thumbnails")
+        self._btn_flt_multithumb.setFixedHeight(22)
+        self._btn_flt_multithumb.setStyleSheet(self._FILTER_BTN_STYLE)
+        self._btn_flt_multithumb.clicked.connect(lambda: self._toggle_filter('multithumb'))
+        fb.addWidget(self._btn_flt_multithumb)
+
+        self._btn_flt_with_markers = QPushButton("met markers")
+        self._btn_flt_with_markers.setFixedHeight(22)
+        self._btn_flt_with_markers.setStyleSheet(self._FILTER_BTN_STYLE)
+        self._btn_flt_with_markers.clicked.connect(lambda: self._toggle_filter('with_markers'))
+        fb.addWidget(self._btn_flt_with_markers)
+
+        self._btn_flt_no_markers = QPushButton("geen markers")
+        self._btn_flt_no_markers.setFixedHeight(22)
+        self._btn_flt_no_markers.setStyleSheet(self._FILTER_BTN_STYLE)
+        self._btn_flt_no_markers.clicked.connect(lambda: self._toggle_filter('no_markers'))
+        fb.addWidget(self._btn_flt_no_markers)
+
+        fb.addStretch()
+        v.addWidget(filter_bar)
 
         # ── Grid ─────────────────────────────────
         self.film_list = QListWidget()
@@ -581,12 +637,58 @@ class FilmsPanel(QWidget):
     def _filter(self, query: str):
         self._apply_search_visibility()
 
+    def _toggle_filter(self, key: str):
+        if key == '1thumb':
+            self._flt_1thumb = not self._flt_1thumb
+        elif key == 'multithumb':
+            self._flt_multithumb = not self._flt_multithumb
+        elif key == 'with_markers':
+            self._flt_with_markers = not self._flt_with_markers
+        elif key == 'no_markers':
+            self._flt_no_markers = not self._flt_no_markers
+        self._update_filter_buttons()
+        self._apply_search_visibility()
+
+    def _update_filter_buttons(self):
+        self._btn_flt_1thumb.setStyleSheet(
+            self._FILTER_BTN_ACTIVE if self._flt_1thumb else self._FILTER_BTN_STYLE)
+        self._btn_flt_multithumb.setStyleSheet(
+            self._FILTER_BTN_ACTIVE if self._flt_multithumb else self._FILTER_BTN_STYLE)
+        self._btn_flt_with_markers.setStyleSheet(
+            self._FILTER_BTN_ACTIVE if self._flt_with_markers else self._FILTER_BTN_STYLE)
+        self._btn_flt_no_markers.setStyleSheet(
+            self._FILTER_BTN_ACTIVE if self._flt_no_markers else self._FILTER_BTN_STYLE)
+
     def _apply_search_visibility(self):
         q = self.search_input.text().lower()
         for item in self._all_items:
             d    = item.data(Qt.ItemDataRole.UserRole)
             name = d.get('name', '').lower() if d else ''
-            item.setHidden(bool(q) and q not in name)
+
+            # Text search
+            if q and q not in name:
+                item.setHidden(True)
+                continue
+
+            # Thumbnail & marker filters
+            if d:
+                thumb_count  = len(d.get('thumbnails', []))
+                marker_count = (d.get('markers', 0) or 0) + (d.get('neg_markers', 0) or 0)
+
+                if self._flt_1thumb and thumb_count != 1:
+                    item.setHidden(True)
+                    continue
+                if self._flt_multithumb and thumb_count <= 1:
+                    item.setHidden(True)
+                    continue
+                if self._flt_with_markers and marker_count == 0:
+                    item.setHidden(True)
+                    continue
+                if self._flt_no_markers and marker_count > 0:
+                    item.setHidden(True)
+                    continue
+
+            item.setHidden(False)
         self._update_count()
 
     def _update_count(self):

@@ -246,6 +246,57 @@ _HELP_HTML = """
 """
 
 # ─────────────────────────────────────────────
+#  Subtle UI click-sound (instant mouse feedback)
+# ─────────────────────────────────────────────
+
+def _build_click_wav(freq: int = 1100, duration_ms: int = 28,
+                     volume: float = 0.13, sample_rate: int = 22050) -> bytes:
+    """Build a tiny mono 16-bit PCM WAV for instant click feedback."""
+    import math, struct
+    n    = int(sample_rate * duration_ms / 1000)
+    fade = max(1, n // 5)          # 20 % fade-in / fade-out to avoid pops
+    pcm  = bytearray(n * 2)
+    for i in range(n):
+        env = min(i, n - 1 - i, fade) / fade          # 0.0 → 1.0 → 0.0
+        val = int(volume * env * 32767
+                  * math.sin(2 * math.pi * freq * i / sample_rate))
+        struct.pack_into('<h', pcm, i * 2, max(-32768, min(32767, val)))
+    data_size = len(pcm)
+    header = (
+        b'RIFF'                           + struct.pack('<I', 36 + data_size) +
+        b'WAVEfmt '                       + struct.pack('<I', 16)             +
+        struct.pack('<H', 1)              +   # PCM
+        struct.pack('<H', 1)              +   # mono
+        struct.pack('<I', sample_rate)    +
+        struct.pack('<I', sample_rate*2)  +   # byte rate
+        struct.pack('<H', 2)              +   # block align
+        struct.pack('<H', 16)             +   # bits/sample
+        b'data'                           + struct.pack('<I', data_size)
+    )
+    return bytes(header) + bytes(pcm)
+
+
+try:
+    import winsound as _winsound
+    _CLICK_WAV   = _build_click_wav()
+    _CLICK_FLAGS = (_winsound.SND_MEMORY | _winsound.SND_ASYNC
+                    | _winsound.SND_NODEFAULT)
+except Exception:
+    _winsound    = None   # type: ignore[assignment]
+    _CLICK_WAV   = None
+    _CLICK_FLAGS = 0
+
+
+def _play_ui_click() -> None:
+    """Play the subtle click WAV asynchronously (non-blocking)."""
+    if _winsound and _CLICK_WAV:
+        try:
+            _winsound.PlaySound(_CLICK_WAV, _CLICK_FLAGS)
+        except Exception:
+            pass
+
+
+# ─────────────────────────────────────────────
 #  FFmpeg worker threads
 # ─────────────────────────────────────────────
 
@@ -402,6 +453,86 @@ class ClickableLabel(QLabel):
     clicked = pyqtSignal()
     def mousePressEvent(self, e):
         self.clicked.emit()
+
+
+class _ClickFlash(QWidget):
+    """Brief ✓ that appears in the centre of the video on each mouse click.
+    Runs as a transparent top-level Tool window (same pattern as the other
+    overlays) so it floats above the mpv surface without intercepting input."""
+
+    SIZE = 72
+
+    def __init__(self, main_win, video_container):
+        super().__init__(
+            main_win,
+            Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.Tool
+            | Qt.WindowType.WindowTransparentForInput,
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setFixedSize(self.SIZE, self.SIZE)
+        self._vc    = video_container
+        self._phase = 1.0             # 1.0 = invisible
+        self._timer = QTimer(self)
+        self._timer.setInterval(16)   # ~60 fps
+        self._timer.timeout.connect(self._tick)
+        self.hide()
+
+    # ── derived opacity ──────────────────────────
+    @property
+    def _opacity(self) -> float:
+        if self._phase < 0.25:        # hold full-bright for first ~90 ms
+            return 1.0
+        return max(0.0, 1.0 - (self._phase - 0.25) / 0.75)  # then fade
+
+    # ── public ───────────────────────────────────
+    def trigger(self):
+        vc = self._vc
+        c  = vc.mapToGlobal(vc.rect().center())
+        self.move(c.x() - self.SIZE // 2, c.y() - self.SIZE // 2)
+        self._phase = 0.0
+        self.show()
+        self.raise_()
+        self.update()
+        if not self._timer.isActive():
+            self._timer.start()
+
+    # ── animation ────────────────────────────────
+    def _tick(self):
+        self._phase += 0.044          # ~23 ticks → ~370 ms total
+        self.update()
+        if self._phase >= 1.0:
+            self._timer.stop()
+            self.hide()
+
+    # ── paint ────────────────────────────────────
+    def paintEvent(self, _event):
+        op = self._opacity
+        if op <= 0:
+            return
+        from PyQt6.QtGui import QPainter, QColor, QFont as _QFont
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        sz = self.SIZE
+
+        # Semi-transparent dark circle
+        p.setBrush(QColor(0, 0, 0, int(op * 155)))
+        p.setPen(Qt.PenStyle.NoPen)
+        p.drawEllipse(0, 0, sz, sz)
+
+        # Subtle ring
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        from PyQt6.QtGui import QPen as _QPen
+        p.setPen(_QPen(QColor(255, 255, 255, int(op * 40)), 1))
+        p.drawEllipse(1, 1, sz - 2, sz - 2)
+
+        # ✓ glyph
+        f = _QFont('Segoe UI')
+        f.setPointSize(28)
+        f.setWeight(_QFont.Weight.Bold)
+        p.setFont(f)
+        p.setPen(QColor(255, 255, 255, int(op * 230)))
+        p.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, '✓')
 
 
 # ─────────────────────────────────────────────
@@ -1361,6 +1492,9 @@ class CineMarker(QMainWindow):
         self._actors_overlay.marker_requested.connect(self._quick_marker)
         self._actors_overlay.thumbnail_requested.connect(self._capture_thumbnail)
         self._actors_overlay.hide()
+
+        # Click-flash ✓ overlay — centre of video, fades after ~370 ms
+        self._click_flash = _ClickFlash(self, self.video_container)
 
         # Floating actor-link overlay (child of player_widget)
         self._actor_overlay = _ActorLinkOverlay(player_widget)
@@ -2433,11 +2567,14 @@ class CineMarker(QMainWindow):
                 # Any click on the video area reclaims focus from _player_search
                 # (or any other text field that may have retained it)
                 self.video_container.setFocus(Qt.FocusReason.MouseFocusReason)
-                if event.button() == Qt.MouseButton.LeftButton and self._zoom_level > 0:
-                    self._drag_active = True
-                    self._drag_last = event.pos()
-                    self.video_container.setCursor(Qt.CursorShape.ClosedHandCursor)
-                    return True
+                if event.button() == Qt.MouseButton.LeftButton:
+                    _play_ui_click()          # instant audible confirmation
+                    self._click_flash.trigger()   # brief ✓ flash at centre
+                    if self._zoom_level > 0:
+                        self._drag_active = True
+                        self._drag_last = event.pos()
+                        self.video_container.setCursor(Qt.CursorShape.ClosedHandCursor)
+                        return True
             elif t == QEvent.Type.MouseMove:
                 if self._drag_active:
                     delta = event.pos() - self._drag_last
