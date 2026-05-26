@@ -19,7 +19,7 @@ from PyQt6.QtWidgets import (
     QProgressBar, QCheckBox, QSizePolicy, QStackedWidget,
     QStyledItemDelegate, QApplication, QComboBox, QStyle, QListView
 )
-from PyQt6.QtCore import Qt, QSize, QThread, pyqtSignal, QTimer, QRect
+from PyQt6.QtCore import Qt, QSize, QThread, pyqtSignal, QTimer, QRect, QEvent
 from PyQt6.QtGui import QPixmap, QFont, QIcon, QPen, QColor, QPainter, QBrush
 
 import database as db
@@ -139,12 +139,22 @@ class FrameExtractWorker(QThread):
 class MarkerGridDelegate(QStyledItemDelegate):
     """Paints a marker grid cell: frame thumbnail + category icon overlay + time bar."""
 
+    remove_requested = pyqtSignal(dict)   # emits the item's UserRole data dict
+
+    _BTN_SZ = 16   # ✕ button size in pixels
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._thumb_cache: dict = {}   # only caches successful loads
 
     def invalidate_cache(self):
         self._thumb_cache.clear()
+
+    def _remove_btn_rect(self, cell_rect: QRect) -> QRect:
+        """Top-right corner ✕ hit area."""
+        return QRect(cell_rect.right() - self._BTN_SZ,
+                     cell_rect.top(),
+                     self._BTN_SZ, self._BTN_SZ)
 
     def _get_pix(self, path: str, w: int, h: int):
         """Return scaled-and-cropped QPixmap or None. Only caches successes."""
@@ -230,7 +240,35 @@ class MarkerGridDelegate(QStyledItemDelegate):
             painter.setPen(QPen(QColor('#e8b86d'), 2))
             painter.drawRect(r.adjusted(1, 1, -1, -1))
 
+        # ✕ remove button — top-right corner, shown on hover
+        hovered = bool(option.state & QStyle.StateFlag.State_MouseOver)
+        btn_r = self._remove_btn_rect(r)
+        if hovered:
+            painter.fillRect(btn_r, QColor(160, 20, 20, 220))
+            xf = QFont(painter.font())
+            xf.setPointSize(7)
+            xf.setBold(True)
+            painter.setFont(xf)
+            painter.setPen(QColor('#ffffff'))
+            painter.drawText(btn_r, Qt.AlignmentFlag.AlignCenter, '✕')
+        else:
+            painter.fillRect(btn_r, QColor(0, 0, 0, 120))
+            xf = QFont(painter.font())
+            xf.setPointSize(7)
+            painter.setFont(xf)
+            painter.setPen(QColor('#444444'))
+            painter.drawText(btn_r, Qt.AlignmentFlag.AlignCenter, '✕')
+
         painter.restore()
+
+    def editorEvent(self, event, model, option, index):
+        if event.type() == QEvent.Type.MouseButtonRelease:
+            if self._remove_btn_rect(option.rect).contains(event.pos()):
+                data = index.data(Qt.ItemDataRole.UserRole)
+                if data:
+                    self.remove_requested.emit(data)
+                return True
+        return super().editorEvent(event, model, option, index)
 
 
 # ─────────────────────────────────────────────
@@ -1429,7 +1467,9 @@ class ActorDetailView(QWidget):
             "QListWidget::item { padding: 0; margin: 0; background: transparent; }"
             "QListWidget::item:selected { background: transparent; }"
         )
-        self.markers_list.setItemDelegate(MarkerGridDelegate())
+        _marker_delegate = MarkerGridDelegate()
+        self.markers_list.setItemDelegate(_marker_delegate)
+        _marker_delegate.remove_requested.connect(self._remove_actor_from_marker)
         self.markers_list.itemDoubleClicked.connect(self._jump_to_marker)
         mv.addWidget(self.markers_list)
 
@@ -1796,6 +1836,38 @@ class ActorDetailView(QWidget):
             except Exception:
                 return []
         return []
+
+    @staticmethod
+    def _save_markers(video_path: str, markers: list):
+        p = Path(video_path)
+        mf = p.parent / f".{p.stem}_markers.json"
+        try:
+            with open(str(mf), 'w') as f:
+                json.dump(markers, f, indent=2)
+        except Exception:
+            pass
+
+    def _remove_actor_from_marker(self, data: dict):
+        """Remove the current actor from the marker described by `data`."""
+        if not self._actor:
+            return
+        film_path = data.get('film_path', '')
+        time_val  = data.get('time')
+        if not film_path or time_val is None:
+            return
+        actor_id = self._actor['id']
+        markers  = self._load_markers(film_path)
+        changed  = False
+        for m in markers:
+            if abs(m.get('time', -1) - time_val) < 0.01:
+                actors = list(m.get('actors') or [])
+                if actor_id in actors:
+                    actors.remove(actor_id)
+                    m['actors'] = actors
+                    changed = True
+        if changed:
+            self._save_markers(film_path, markers)
+            self._refresh_markers()
 
     @staticmethod
     def _fmt_time(seconds: float) -> str:
