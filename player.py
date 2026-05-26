@@ -1132,7 +1132,7 @@ class _FilmActorsOverlay(QWidget):
                 p.fillRect(x, self.PAD, self.TW, self.TH, QColor('#2a2a2a'))
             if sel:
                 from PyQt6.QtGui import QPen as _Pen
-                p.setPen(_Pen(QColor('#e8b86d'), 2))
+                p.setPen(_Pen(QColor('#ff2222'), 4))
                 p.setBrush(Qt.BrushStyle.NoBrush)
                 p.drawRect(x, self.PAD, self.TW - 1, self.TH - 1)
                 p.setPen(Qt.PenStyle.NoPen)
@@ -3132,6 +3132,34 @@ class CineMarker(QMainWindow):
                     f"background:{fallback_color}; border-radius:3px;")
             return lbl
 
+        def _actor_cell(pix, aid, marker_idx):
+            """Actor photo with a tiny ✕ button overlaid top-right corner."""
+            cell = QWidget()
+            cell.setFixedSize(SZ_A, SZ_A)
+            cell.setStyleSheet("background:transparent;")
+
+            lbl = QLabel(cell)
+            lbl.setFixedSize(SZ_A, SZ_A)
+            lbl.move(0, 0)
+            if pix:
+                lbl.setPixmap(pix)
+            else:
+                lbl.setStyleSheet("background:#222;border-radius:3px;")
+
+            btn = QPushButton("✕", cell)
+            btn.setFixedSize(13, 13)
+            btn.move(SZ_A - 14, 0)
+            btn.setStyleSheet(
+                "QPushButton{background:rgba(140,20,20,210);border:none;"
+                "border-radius:2px;color:#fff;font-size:8px;padding:0;}"
+                "QPushButton:hover{background:rgba(220,40,40,240);}"
+            )
+            btn.clicked.connect(
+                lambda _, a=aid, mi=marker_idx:
+                    self._remove_actor_from_marker_in_list(a, mi)
+            )
+            return cell
+
         for idx, m in enumerate(self._markers):
             is_neg = m.get('negative', False)
 
@@ -3154,9 +3182,9 @@ class CineMarker(QMainWindow):
                 lbl_neg.setFixedWidth(SZ_A)
                 rh.addWidget(lbl_neg)
             else:
-                # Actor photo(s)
+                # Actor photo(s) — each with a small ✕ to remove from this marker
                 for aid in (m.get('actors') or []):
-                    rh.addWidget(_img_label(_actor_pix(aid), SZ_A, '#222'))
+                    rh.addWidget(_actor_cell(_actor_pix(aid), aid, idx))
                 # Category icon(s)
                 for cid in (m.get('categories') or []):
                     rh.addWidget(_img_label(_cat_pix(cid), SZ_C, '#1a1a2a'))
@@ -3199,6 +3227,16 @@ class CineMarker(QMainWindow):
     def _delete_marker_by_index(self, idx: int):
         if 0 <= idx < len(self._markers):
             self._markers.pop(idx)
+            save_markers(self._video_path, self._markers)
+            self._refresh_marker_list()
+
+    def _remove_actor_from_marker_in_list(self, actor_id: int, marker_idx: int):
+        if not self._video_path or not (0 <= marker_idx < len(self._markers)):
+            return
+        actors = list(self._markers[marker_idx].get('actors') or [])
+        if actor_id in actors:
+            actors.remove(actor_id)
+            self._markers[marker_idx]['actors'] = actors
             save_markers(self._video_path, self._markers)
             self._refresh_marker_list()
 

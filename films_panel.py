@@ -6,6 +6,7 @@ CineMarker — Films browser panel  (grid view, sortable)
 import os
 import json
 import random
+import subprocess
 import time
 from pathlib import Path
 
@@ -41,6 +42,21 @@ SORT_FIELDS = [
     ('duration','Duur'),
     ('actors',  'Acteurs'),
 ]
+
+
+def _ffprobe_duration(path: str) -> float:
+    """Return duration in seconds via ffprobe; 0.0 on any failure."""
+    try:
+        r = subprocess.run(
+            ['ffprobe', '-v', 'error',
+             '-show_entries', 'format=duration',
+             '-of', 'default=noprint_wrappers=1:nokey=1',
+             path],
+            capture_output=True, text=True, timeout=6,
+        )
+        return float(r.stdout.strip())
+    except Exception:
+        return 0.0
 
 
 def _count_film_markers(file_path: str) -> int:
@@ -184,56 +200,56 @@ class FilmGridDelegate(QStyledItemDelegate):
             else:
                 _placeholder()
 
-        # Bottom info bar — always visible when not hovered
+        # Bottom info bar — always visible
         bar_h = 20
         bar_r = QRect(r.x(), r.bottom() - bar_h, w, bar_h)
-        if not hovered:
-            painter.fillRect(bar_r, QColor(0, 0, 0, 170))
-            bf = QFont(painter.font())
-            bf.setPointSize(7)
-            painter.setFont(bf)
+        painter.fillRect(bar_r, QColor(0, 0, 0, 170))
+        bf = QFont(painter.font())
+        bf.setPointSize(7)
+        painter.setFont(bf)
 
-            duration = data.get('duration', 0) or 0
-            markers  = data.get('markers',  0) or 0
-            size_b   = data.get('size',     0) or 0
+        duration = data.get('duration', 0) or 0
+        markers  = data.get('markers',  0) or 0
+        size_b   = data.get('size',     0) or 0
 
-            # File size — right-aligned
-            if size_b > 0:
-                gb = size_b / 1_073_741_824
-                mb = size_b / 1_048_576
-                size_str = (f"{gb:.1f} GB" if gb >= 1 else f"{mb:.0f} MB")
-                painter.setPen(QColor('#888888'))
-                painter.drawText(bar_r.adjusted(0, 0, -5, 0),
-                    Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
-                    size_str)
+        # File size — right-aligned
+        size_str = ''
+        if size_b > 0:
+            gb = size_b / 1_073_741_824
+            mb = size_b / 1_048_576
+            size_str = (f"{gb:.1f} GB" if gb >= 1 else f"{mb:.0f} MB")
+            painter.setPen(QColor('#888888'))
+            painter.drawText(bar_r.adjusted(0, 0, -5, 0),
+                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                size_str)
 
-            # Duration — to the left of file size
-            if duration > 0:
-                s = int(duration)
-                dur_str = (f"{s//3600}:{(s%3600)//60:02d}:{s%60:02d}"
-                           if s >= 3600 else f"{s//60}:{s%60:02d}")
-                fm = painter.fontMetrics()
-                size_w = (fm.horizontalAdvance(size_str) + 10) if size_b > 0 else 0
-                painter.setPen(QColor('#aaaaaa'))
-                painter.drawText(bar_r.adjusted(0, 0, -(5 + size_w), 0),
-                    Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
-                    dur_str)
+        # Duration — to the left of file size
+        if duration > 0:
+            s = int(duration)
+            dur_str = (f"{s//3600}:{(s%3600)//60:02d}:{s%60:02d}"
+                       if s >= 3600 else f"{s//60}:{s%60:02d}")
+            fm = painter.fontMetrics()
+            size_w = (fm.horizontalAdvance(size_str) + 10) if size_b > 0 else 0
+            painter.setPen(QColor('#aaaaaa'))
+            painter.drawText(bar_r.adjusted(0, 0, -(5 + size_w), 0),
+                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                dur_str)
 
-            # Marker count (blue) + negative count (red) — left-aligned
-            neg_markers = data.get('neg_markers', 0) or 0
-            x_off = 5
-            if markers > 0:
-                txt_m = f'◉{markers}'
-                painter.setPen(QColor('#6db8e8'))
-                painter.drawText(bar_r.adjusted(x_off, 0, 0, 0),
-                    Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-                    txt_m)
-                x_off += painter.fontMetrics().horizontalAdvance(txt_m) + 4
-            if neg_markers > 0:
-                painter.setPen(QColor('#cc3333'))
-                painter.drawText(bar_r.adjusted(x_off, 0, 0, 0),
-                    Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-                    f'⊘{neg_markers}')
+        # Marker count (blue) + negative count (red) — left-aligned
+        neg_markers = data.get('neg_markers', 0) or 0
+        x_off = 5
+        if markers > 0:
+            txt_m = f'◉{markers}'
+            painter.setPen(QColor('#6db8e8'))
+            painter.drawText(bar_r.adjusted(x_off, 0, 0, 0),
+                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                txt_m)
+            x_off += painter.fontMetrics().horizontalAdvance(txt_m) + 4
+        if neg_markers > 0:
+            painter.setPen(QColor('#cc3333'))
+            painter.drawText(bar_r.adjusted(x_off, 0, 0, 0),
+                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                f'⊘{neg_markers}')
 
         # Actor photos (bottom-left, above the info bar)
         film_id = data.get('film_id')
@@ -244,10 +260,10 @@ class FilmGridDelegate(QStyledItemDelegate):
                 painter.drawPixmap(ax, ay, ap)
                 ax += ACT_SZ + 2
 
-        # Hover: dim + name
+        # Hover: dim + name (above info bar)
         if hovered and not selected:
             painter.fillRect(r, QColor(0, 0, 0, 80))
-            name_r = QRect(r.x(), r.bottom() - 22, w, 22)
+            name_r = QRect(r.x(), r.bottom() - bar_h - 22, w, 22)
             painter.fillRect(name_r, QColor(0, 0, 0, 180))
             nf = QFont(painter.font())
             nf.setPointSize(8)
@@ -630,6 +646,10 @@ class FilmsPanel(QWidget):
             film_id   = db_film.get('id')
             thumbnail = db_film.get('thumbnail', '')
             duration  = db_film.get('duration', 0) or 0
+            if duration == 0:
+                duration = _ffprobe_duration(str(fp))
+                if duration > 0 and film_id:
+                    db.set_film_duration(film_id, duration)
 
             # All thumbnails for cycling animation
             if film_id:
