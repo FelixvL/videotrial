@@ -1139,10 +1139,11 @@ class ActorDetailPanel(QWidget):
 
 class ActorDetailView(QWidget):
 
-    back_requested      = pyqtSignal()
-    saved               = pyqtSignal()
-    open_film_requested = pyqtSignal(str)
+    back_requested        = pyqtSignal()
+    saved                 = pyqtSignal()
+    open_film_requested   = pyqtSignal(str)
     marker_jump_requested = pyqtSignal(str, float)
+    navigate_requested    = pyqtSignal(int)   # -1 vorige · +1 volgende
 
     KLEUR_OPTS   = [('', '—'), ('1', 'Wit'), ('2', 'Zwart'), ('3', 'Bruin')]
     GROOTTE_OPTS = [('', '—')] + [(str(i), '★' * i) for i in range(1, 11)]
@@ -1192,6 +1193,44 @@ class ActorDetailView(QWidget):
         btn_back.setFixedHeight(28)
         btn_back.clicked.connect(self.back_requested)
         b.addWidget(btn_back)
+
+        _nav_style_on = (
+            "QPushButton { background: transparent; border: none; padding: 0;"
+            "  color: #666; font-size: 13px; }"
+            "QPushButton:hover { color: #e8b86d; }"
+            "QPushButton:pressed { color: #fff; }"
+        )
+        _nav_style_off = (
+            "QPushButton { background: transparent; border: none; padding: 0;"
+            "  color: #252525; font-size: 13px; }"
+        )
+
+        self._btn_prev = QPushButton("◀")
+        self._btn_prev.setFixedSize(26, 28)
+        self._btn_prev.setToolTip("Vorige acteur  (houdt rekening met filter/sortering)")
+        self._btn_prev.setStyleSheet(_nav_style_off)
+        self._btn_prev.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._btn_prev.clicked.connect(lambda: self.navigate_requested.emit(-1))
+        b.addWidget(self._btn_prev)
+
+        self._lbl_nav = QLabel("")
+        self._lbl_nav.setStyleSheet(
+            "color: #2a2a2a; font-size: 10px; font-family: 'Consolas', monospace;")
+        self._lbl_nav.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._lbl_nav.setFixedWidth(52)
+        b.addWidget(self._lbl_nav)
+
+        self._btn_next = QPushButton("▶")
+        self._btn_next.setFixedSize(26, 28)
+        self._btn_next.setToolTip("Volgende acteur  (houdt rekening met filter/sortering)")
+        self._btn_next.setStyleSheet(_nav_style_off)
+        self._btn_next.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._btn_next.clicked.connect(lambda: self.navigate_requested.emit(1))
+        b.addWidget(self._btn_next)
+
+        # Store styles for enable/disable toggling
+        self._nav_style_on  = _nav_style_on
+        self._nav_style_off = _nav_style_off
 
         self.lbl_stem = QLabel("")
         self.lbl_stem.setStyleSheet("color: #555; font-size: 11px;")
@@ -1402,6 +1441,21 @@ class ActorDetailView(QWidget):
         right.addLayout(fm_row, stretch=1)
         ch.addLayout(right, stretch=1)
         v.addWidget(content, stretch=1)
+
+    def set_nav_info(self, idx: int, total: int):
+        """Update prev/next buttons and position counter."""
+        has_prev = (idx > 0)
+        has_next = (idx < total - 1)
+        self._btn_prev.setEnabled(has_prev)
+        self._btn_prev.setStyleSheet(
+            self._nav_style_on if has_prev else self._nav_style_off)
+        self._btn_next.setEnabled(has_next)
+        self._btn_next.setStyleSheet(
+            self._nav_style_on if has_next else self._nav_style_off)
+        if total > 0:
+            self._lbl_nav.setText(f"{idx + 1} / {total}")
+        else:
+            self._lbl_nav.setText("")
 
     def load(self, data: dict):
         if self._frame_worker:
@@ -1798,6 +1852,7 @@ class ActorsPanel(QWidget):
         super().__init__()
         self.player = player
         self._all_items: list = []
+        self._current_detail_stem: str = ''
         self._zoom_level = int(
             db.get_setting('zoom_actors_panel', str(self.ZOOM_DEFAULT_LEVEL))
             or str(self.ZOOM_DEFAULT_LEVEL)
@@ -2005,6 +2060,7 @@ class ActorsPanel(QWidget):
         self._detail_view.saved.connect(self._on_detail_saved)
         self._detail_view.open_film_requested.connect(self._on_detail_open_film)
         self._detail_view.marker_jump_requested.connect(self.scene_jump_requested)
+        self._detail_view.navigate_requested.connect(self._navigate_actor)
         self._stack.addWidget(self._detail_view)
 
     def _cb_group(self, layout: QHBoxLayout, label: str,
@@ -2362,9 +2418,41 @@ class ActorsPanel(QWidget):
         if full_name:
             QApplication.clipboard().setText(full_name)
 
+    # ── Detail navigatie ─────────────────────────
+
+    def _visible_items(self) -> list:
+        """Return all items in current sorted order that are not hidden."""
+        return [it for it in self._all_items if not it.isHidden()]
+
     def _open_detail(self, data: dict):
+        self._current_detail_stem = data.get('stem', '')
         self._detail_view.load(data)
+        self._update_nav_info()
         self._stack.setCurrentIndex(1)
+
+    def _update_nav_info(self):
+        visible = self._visible_items()
+        idx = next(
+            (i for i, it in enumerate(visible)
+             if (it.data(Qt.ItemDataRole.UserRole) or {}).get('stem') == self._current_detail_stem),
+            0
+        )
+        self._detail_view.set_nav_info(idx, len(visible))
+
+    def _navigate_actor(self, direction: int):
+        visible = self._visible_items()
+        if not visible:
+            return
+        idx = next(
+            (i for i, it in enumerate(visible)
+             if (it.data(Qt.ItemDataRole.UserRole) or {}).get('stem') == self._current_detail_stem),
+            -1
+        )
+        new_idx = idx + direction
+        if 0 <= new_idx < len(visible):
+            data = visible[new_idx].data(Qt.ItemDataRole.UserRole)
+            if data:
+                self._open_detail(data)
 
     def _on_detail_back(self):
         self._stack.setCurrentIndex(0)

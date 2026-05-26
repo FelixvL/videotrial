@@ -132,26 +132,56 @@ class FilmGridDelegate(QStyledItemDelegate):
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
 
-        # Thumbnail — elke film heeft z'n eigen tijdsfase zodat switches gespreid zijn
-        thumbs = data.get('thumbnails', [])
-        if len(thumbs) > 1:
-            phase      = data.get('thumb_phase', 0.0)
-            idx        = int((time.time() + phase) / 2.0) % len(thumbs)
-            thumb_path = thumbs[idx]
-        elif thumbs:
-            thumb_path = thumbs[0]
-        else:
-            thumb_path = data.get('thumbnail', '')
-        pix = self._thumb(thumb_path, w, h)
-        if pix:
-            painter.drawPixmap(r.x(), r.y(), pix)
-        else:
+        # Thumbnail met 0.2s crossfade tussen switches
+        FADE_DUR = 0.2
+        thumbs   = data.get('thumbnails', [])
+
+        def _placeholder():
             painter.fillRect(r, QColor('#0d0d0d'))
-            f = QFont(painter.font())
-            f.setPointSize(18)
-            painter.setFont(f)
+            _f = QFont(painter.font())
+            _f.setPointSize(18)
+            painter.setFont(_f)
             painter.setPen(QColor('#252525'))
             painter.drawText(r, Qt.AlignmentFlag.AlignCenter, '▶')
+
+        if len(thumbs) > 1:
+            phase   = data.get('thumb_phase', 0.0)
+            t       = time.time() + phase
+            period  = t % 2.0                          # positie in 2s cyclus
+            idx_cur = int(t / 2.0) % len(thumbs)
+            pix_cur = self._thumb(thumbs[idx_cur], w, h)
+
+            if period > (2.0 - FADE_DUR):
+                # Overgangsfase: fade in de volgende thumbnail
+                fade     = (period - (2.0 - FADE_DUR)) / FADE_DUR   # 0.0 → 1.0
+                idx_next = (idx_cur + 1) % len(thumbs)
+                pix_next = self._thumb(thumbs[idx_next], w, h)
+                if pix_cur:
+                    painter.drawPixmap(r.x(), r.y(), pix_cur)
+                else:
+                    _placeholder()
+                if pix_next:
+                    painter.setOpacity(fade)
+                    painter.drawPixmap(r.x(), r.y(), pix_next)
+                    painter.setOpacity(1.0)
+            else:
+                # Stabiele fase
+                if pix_cur:
+                    painter.drawPixmap(r.x(), r.y(), pix_cur)
+                else:
+                    _placeholder()
+        elif thumbs:
+            pix = self._thumb(thumbs[0], w, h)
+            if pix:
+                painter.drawPixmap(r.x(), r.y(), pix)
+            else:
+                _placeholder()
+        else:
+            pix = self._thumb(data.get('thumbnail', ''), w, h)
+            if pix:
+                painter.drawPixmap(r.x(), r.y(), pix)
+            else:
+                _placeholder()
 
         # Bottom info bar — always visible when not hovered
         bar_h = 20
@@ -275,6 +305,13 @@ class FilmsPanel(QWidget):
         "color:#4db8b8;font-size:10px;padding:2px 7px;}"
         "QPushButton:hover{border-color:#4db8b8;}"
     )
+    # Kleine vierkante icoontjesknopjes — padding:0 zodat het karakter zichtbaar blijft
+    _ICON_BTN_STYLE = (
+        "QPushButton{background:#1a1a1a;border:1px solid #2a2a2a;border-radius:4px;"
+        "color:#888;font-size:14px;padding:0;}"
+        "QPushButton:hover{border-color:#e8b86d;color:#e8b86d;}"
+        "QPushButton:pressed{background:#e8b86d;color:#000;}"
+    )
 
     def __init__(self):
         super().__init__()
@@ -396,17 +433,20 @@ class FilmsPanel(QWidget):
         btn_refresh = QPushButton("↻")
         btn_refresh.setFixedSize(28, 28)
         btn_refresh.setToolTip("Herlaad map")
+        btn_refresh.setStyleSheet(self._ICON_BTN_STYLE)
         btn_refresh.clicked.connect(self._refresh)
         b.addWidget(btn_refresh)
 
         btn_folder = QPushButton("📁")
         btn_folder.setFixedSize(28, 28)
         btn_folder.setToolTip("Kies filmmap")
+        btn_folder.setStyleSheet(self._ICON_BTN_STYLE)
         btn_folder.clicked.connect(self._pick_folder)
         b.addWidget(btn_folder)
 
         btn_zoom_out = QPushButton("−")
         btn_zoom_out.setFixedSize(28, 28)
+        btn_zoom_out.setStyleSheet(self._ICON_BTN_STYLE)
         btn_zoom_out.setAutoRepeat(True)
         btn_zoom_out.setAutoRepeatDelay(400)
         btn_zoom_out.setAutoRepeatInterval(80)
@@ -415,6 +455,7 @@ class FilmsPanel(QWidget):
 
         btn_zoom_in = QPushButton("+")
         btn_zoom_in.setFixedSize(28, 28)
+        btn_zoom_in.setStyleSheet(self._ICON_BTN_STYLE)
         btn_zoom_in.setAutoRepeat(True)
         btn_zoom_in.setAutoRepeatDelay(400)
         btn_zoom_in.setAutoRepeatInterval(80)
@@ -451,7 +492,7 @@ class FilmsPanel(QWidget):
         # per-item thumbnail-wissels (elke ~2s, eigen fase) zichtbaar worden
         self._tick = 0
         self._anim_timer = QTimer(self)
-        self._anim_timer.setInterval(500)
+        self._anim_timer.setInterval(33)   # ~30 fps voor vloeiende crossfade
         self._anim_timer.timeout.connect(self._anim_tick)
         self._anim_timer.start()
 

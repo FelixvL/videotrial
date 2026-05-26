@@ -637,6 +637,250 @@ class _ActorLinkOverlay(QFrame):
 from PyQt6.QtCore import pyqtSignal as _pyqtSignal
 
 
+# ─────────────────────────────────────────────
+#  Film edit panel (remove actors / thumbnails)
+# ─────────────────────────────────────────────
+
+class _FilmEditPanel(QWidget):
+    """Kleine bewerkoverlap: acteurs ontkoppelen, thumbnails verwijderen."""
+
+    data_changed = _pyqtSignal(int)   # film_id — emitted after actor/thumb removal
+
+    _ROW_STYLE = (
+        "QPushButton{background:#2a1414;border:1px solid #3a2222;"
+        "border-radius:3px;color:#884444;font-size:10px;padding:0;}"
+        "QPushButton:hover{border-color:#e05555;color:#e05555;background:#3a1a1a;}"
+        "QPushButton:pressed{background:#e05555;color:#fff;}"
+    )
+
+    def __init__(self, main_win, video_container):
+        super().__init__(
+            main_win,
+            Qt.WindowType.FramelessWindowHint | Qt.WindowType.Tool,
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self._vc      = video_container
+        self._film_id = None
+        self.setFixedWidth(264)
+        self._build_ui()
+        self.hide()
+        main_win.installEventFilter(self)
+
+    def _build_ui(self):
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+
+        self._frame = QFrame()
+        self._frame.setStyleSheet(
+            "QFrame { background: rgba(10,10,10,230); border: 1px solid #2e2e2e;"
+            "  border-radius: 8px; }"
+        )
+        fv = QVBoxLayout(self._frame)
+        fv.setContentsMargins(10, 8, 10, 10)
+        fv.setSpacing(6)
+
+        # Header
+        hdr = QHBoxLayout()
+        lbl = QLabel("BEWERKEN")
+        lbl.setStyleSheet(
+            "color:#555;font-size:9px;letter-spacing:3px;background:transparent;")
+        hdr.addWidget(lbl)
+        hdr.addStretch()
+        btn_x = QPushButton("✕")
+        btn_x.setFixedSize(18, 18)
+        btn_x.setStyleSheet(
+            "QPushButton{background:transparent;border:none;color:#444;font-size:10px;padding:0;}"
+            "QPushButton:hover{color:#e0e0e0;}"
+        )
+        btn_x.clicked.connect(self.hide)
+        hdr.addWidget(btn_x)
+        fv.addLayout(hdr)
+
+        sep = QFrame(); sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setStyleSheet("QFrame{background:#222;max-height:1px;}")
+        fv.addWidget(sep)
+
+        # Scroll content
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setStyleSheet(
+            "QScrollArea,QScrollArea>QWidget>QWidget{background:transparent;border:none;}"
+            "QScrollBar:vertical{background:transparent;width:4px;}"
+            "QScrollBar::handle:vertical{background:rgba(60,60,60,180);border-radius:2px;}"
+        )
+        self._inner = QWidget()
+        self._inner.setStyleSheet("background:transparent;")
+        self._cv = QVBoxLayout(self._inner)
+        self._cv.setContentsMargins(0, 0, 0, 0)
+        self._cv.setSpacing(4)
+        scroll.setWidget(self._inner)
+        fv.addWidget(scroll, stretch=1)
+
+        outer.addWidget(self._frame)
+
+    # ── Public ───────────────────────────────────
+
+    def open_for_film(self, film_id: int):
+        self._film_id = film_id
+        self._rebuild()
+        self._reposition()
+        self.show()
+        self.raise_()
+
+    # ── Rebuild content ──────────────────────────
+
+    def _rebuild(self):
+        # Remove old widgets
+        while self._cv.count():
+            it = self._cv.takeAt(0)
+            if it.widget():
+                it.widget().deleteLater()
+        if not self._film_id:
+            return
+
+        # ── Acteurs ──────────────────────────────
+        self._cv.addWidget(self._section_lbl("ACTEURS"))
+        actors = db.get_actors_for_film(self._film_id)
+        if actors:
+            for a in actors:
+                self._cv.addWidget(self._actor_row(a))
+        else:
+            self._cv.addWidget(self._dim_lbl("Geen acteurs gekoppeld"))
+
+        sep = QFrame(); sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setStyleSheet("QFrame{background:#1e1e1e;max-height:1px;}")
+        self._cv.addWidget(sep)
+
+        # ── Thumbnails ────────────────────────────
+        self._cv.addWidget(self._section_lbl("THUMBNAILS"))
+        thumbs = db.get_film_thumbnails(self._film_id)
+        if thumbs:
+            TW, TH = 68, 38
+            for i in range(0, len(thumbs), 3):
+                self._cv.addWidget(self._thumb_row(thumbs[i:i + 3], TW, TH))
+        else:
+            self._cv.addWidget(self._dim_lbl("Geen thumbnails opgeslagen"))
+
+        self._cv.addStretch()
+
+        # Auto-size panel height
+        self._inner.adjustSize()
+        content_h = self._inner.sizeHint().height()
+        self.setFixedHeight(min(400, content_h + 72))
+
+    # ── Row builders ─────────────────────────────
+
+    def _section_lbl(self, text: str) -> QLabel:
+        lbl = QLabel(text)
+        lbl.setStyleSheet(
+            "color:#555;font-size:9px;letter-spacing:2px;background:transparent;")
+        return lbl
+
+    def _dim_lbl(self, text: str) -> QLabel:
+        lbl = QLabel(text)
+        lbl.setStyleSheet("color:#2e2e2e;font-size:10px;background:transparent;")
+        return lbl
+
+    def _actor_row(self, actor: dict) -> QWidget:
+        row = QWidget(); row.setStyleSheet("background:transparent;")
+        h = QHBoxLayout(row); h.setContentsMargins(0, 1, 0, 1); h.setSpacing(6)
+
+        # Tiny photo
+        lbl_p = QLabel(); lbl_p.setFixedSize(22, 28)
+        lbl_p.setStyleSheet("background:#161616;border-radius:2px;")
+        photos = db.get_actor_photos(actor['id'])
+        if photos:
+            raw = QPixmap(photos[0]['photo_path'])
+            if not raw.isNull():
+                sc = raw.scaled(22, 28,
+                    Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                    Qt.TransformationMode.SmoothTransformation)
+                ox = (sc.width()  - 22) // 2
+                oy = (sc.height() - 28) // 2
+                lbl_p.setPixmap(sc.copy(ox, oy, 22, 28))
+        h.addWidget(lbl_p)
+
+        name = QLabel(actor.get('name', ''))
+        name.setStyleSheet("color:#ccc;font-size:11px;background:transparent;")
+        h.addWidget(name, stretch=1)
+
+        btn = QPushButton("✕"); btn.setFixedSize(20, 20)
+        btn.setStyleSheet(self._ROW_STYLE)
+        btn.clicked.connect(lambda _, a=actor: self._remove_actor(a))
+        h.addWidget(btn)
+        return row
+
+    def _thumb_row(self, thumbs: list, tw: int, th: int) -> QWidget:
+        row = QWidget(); row.setStyleSheet("background:transparent;")
+        h = QHBoxLayout(row); h.setContentsMargins(0, 0, 0, 0); h.setSpacing(4)
+        for t in thumbs:
+            h.addWidget(self._thumb_cell(t, tw, th))
+        h.addStretch()
+        return row
+
+    def _thumb_cell(self, thumb: dict, tw: int, th: int) -> QWidget:
+        cell = QWidget(); cell.setFixedSize(tw, th + 20)
+        cell.setStyleSheet("background:transparent;")
+
+        lbl = QLabel(cell); lbl.setFixedSize(tw, th); lbl.move(0, 0)
+        lbl.setStyleSheet("background:#161616;border-radius:2px;")
+        path = thumb.get('path', '')
+        if path and os.path.exists(path):
+            raw = QPixmap(path)
+            if not raw.isNull():
+                sc = raw.scaled(tw, th,
+                    Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                    Qt.TransformationMode.SmoothTransformation)
+                ox = (sc.width()  - tw) // 2
+                oy = (sc.height() - th) // 2
+                lbl.setPixmap(sc.copy(ox, oy, tw, th))
+
+        btn = QPushButton("✕", cell); btn.setFixedSize(16, 16); btn.move(tw - 18, 2)
+        btn.setStyleSheet(
+            "QPushButton{background:rgba(160,30,30,200);border:none;"
+            "border-radius:3px;color:#fff;font-size:9px;padding:0;}"
+            "QPushButton:hover{background:rgba(220,50,50,240);}"
+        )
+        btn.clicked.connect(lambda _, t=thumb: self._remove_thumb(t))
+        return cell
+
+    # ── Actions ──────────────────────────────────
+
+    def _remove_actor(self, actor: dict):
+        if self._film_id:
+            db.unlink_actor_film(actor['id'], self._film_id)
+            self._rebuild()
+            self.data_changed.emit(self._film_id)
+
+    def _remove_thumb(self, thumb: dict):
+        db.delete_film_thumbnail(thumb['id'])
+        self._rebuild()
+        if self._film_id:
+            self.data_changed.emit(self._film_id)
+
+    # ── Position ─────────────────────────────────
+
+    def eventFilter(self, obj, event):
+        if event.type() in (QEvent.Type.Resize, QEvent.Type.Move,
+                            QEvent.Type.Show, QEvent.Type.WindowStateChange):
+            self._reposition()
+        return False
+
+    def _reposition(self):
+        vc = self._vc
+        if not vc.isVisible():
+            return
+        tl = vc.mapToGlobal(vc.rect().topLeft())
+        # Just above the actors overlay (TOTAL_H=154, margin=8)
+        y = tl.y() + vc.height() - 154 - 8 - self.height() - 6
+        self.move(tl.x() + 8, max(tl.y() + 4, y))
+
+
+# ─────────────────────────────────────────────
+#  Film actors overlay (floating, selectable)
+# ─────────────────────────────────────────────
+
 class _FilmActorsOverlay(QWidget):
     """Floating overlay at bottom-left of video.
     Row 1: actor thumbnails. Row 2: category icons.
@@ -644,6 +888,7 @@ class _FilmActorsOverlay(QWidget):
 
     marker_requested    = _pyqtSignal(list, list)   # actors, categories
     thumbnail_requested = _pyqtSignal()
+    edit_requested      = _pyqtSignal(int)           # film_id
 
     TW, TH   = 52, 62   # actor thumb dims
     CW, CH   = 42, 42   # category icon dims
@@ -670,6 +915,8 @@ class _FilmActorsOverlay(QWidget):
         self._cats:      list = []
         self._cat_pixes: list = []
         self._cat_sel:   set  = set()   # category ids
+
+        self._film_id: int | None = None
 
         self.setFixedHeight(self.TOTAL_H)
         main_win.installEventFilter(self)
@@ -702,6 +949,19 @@ class _FilmActorsOverlay(QWidget):
         )
         self._btn_add_cat.clicked.connect(self._add_category)
 
+        self._btn_edit = QPushButton("−", self)
+        self._btn_edit.setFixedSize(self.BTN_W, self.BTN_W)
+        self._btn_edit.setToolTip("Acteurs en thumbnails beheren")
+        self._btn_edit.setStyleSheet(
+            "QPushButton { background: #1a0a0a; border: 1px solid #6b1f1f;"
+            "  border-radius: 4px; color: #cc4444; font-size: 18px; font-weight: bold; }"
+            "QPushButton:hover { background: #2a1010; border-color: #cc4444; }"
+            "QPushButton:pressed { background: #cc4444; color: #fff; }"
+        )
+        self._btn_edit.clicked.connect(
+            lambda: self.edit_requested.emit(self._film_id) if self._film_id else None
+        )
+
         self._place_buttons()
         main_win.installEventFilter(self)
 
@@ -719,8 +979,9 @@ class _FilmActorsOverlay(QWidget):
         return max(self._actor_row_width(), self._cat_row_width())
 
     def _total_width(self):
-        # Cat row: icons + spacing + (+) button + spacing + thumb button
-        cat_total = self._cat_row_width() + self.SPACING + self.BTN_W + self.SPACING + self.BTN_TW
+        # Cat row: icons + spacing + (−) edit button + spacing + (+) button + spacing + thumb button
+        cat_total = (self._cat_row_width() + self.SPACING + self.BTN_W
+                     + self.SPACING + self.BTN_W + self.SPACING + self.BTN_TW)
         return self.PAD + max(self._actor_row_width(), cat_total) + self.PAD
 
     def _place_buttons(self):
@@ -731,6 +992,9 @@ class _FilmActorsOverlay(QWidget):
         # + button — just left of the thumbnail button
         plus_x = thumb_x - self.SPACING - self.BTN_W
         self._btn_add_cat.move(plus_x, cat_row_y + (self.CELL_C - self.BTN_W) // 2)
+        # − edit button — just left of the + button
+        edit_x = plus_x - self.SPACING - self.BTN_W
+        self._btn_edit.move(edit_x, cat_row_y + (self.CELL_C - self.BTN_W) // 2)
 
     # ── Paint ────────────────────────────────────
 
@@ -894,6 +1158,7 @@ class _FilmActorsOverlay(QWidget):
     # ── Data ─────────────────────────────────────
 
     def refresh(self, film_id: int | None):
+        self._film_id = film_id
         self._actors.clear(); self._pixmaps.clear(); self._selected.clear()
         self._cat_sel.clear()
 
@@ -1373,6 +1638,12 @@ class CineMarker(QMainWindow):
         self.btn_fs = QPushButton("⛶")
         self.btn_fs.setFixedSize(28, 28)
         self.btn_fs.setToolTip("Volledig scherm  F11")
+        self.btn_fs.setStyleSheet(
+            "QPushButton { background: #1e1e1e; border: 1px solid #333; border-radius: 4px;"
+            "  color: #e0e0e0; font-size: 14px; padding: 0; }"
+            "QPushButton:hover { border-color: #e8b86d; color: #e8b86d; }"
+            "QPushButton:pressed { background: #e8b86d; color: #000; }"
+        )
         self.btn_fs.clicked.connect(self._toggle_fullscreen)
         _ch.addWidget(self.btn_fs)
         btn_help = QPushButton("?")
@@ -1380,7 +1651,7 @@ class CineMarker(QMainWindow):
         btn_help.setToolTip("Toetsen & knoppen overzicht")
         btn_help.setStyleSheet(
             "QPushButton { background: transparent; border: 1px solid #2a2a2a;"
-            "  border-radius: 4px; color: #444; font-size: 13px; font-weight: bold; }"
+            "  border-radius: 4px; color: #444; font-size: 13px; font-weight: bold; padding: 0; }"
             "QPushButton:hover { border-color: #e8b86d; color: #e8b86d; }"
         )
         btn_help.setFocusPolicy(Qt.FocusPolicy.NoFocus)
@@ -1411,7 +1682,7 @@ class CineMarker(QMainWindow):
         btn_del_film.setToolTip("Verplaats huidige film naar map 'deleted'")
         btn_del_film.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         btn_del_film.setStyleSheet(
-            "QPushButton { background: transparent; border: none; color: #443333; font-size: 14px; }"
+            "QPushButton { background: transparent; border: none; color: #443333; font-size: 14px; padding: 0; }"
             "QPushButton:hover { color: #cc4444; }"
         )
         btn_del_film.clicked.connect(self._delete_current_film)
@@ -1430,7 +1701,7 @@ class CineMarker(QMainWindow):
         self._btn_speed.setToolTip("Afspeelsnelheid  [ = langzamer  ] = sneller  klik = reset 1×")
         self._btn_speed.clicked.connect(self._reset_speed)
         self._btn_speed.setStyleSheet(
-            "QPushButton { background: transparent; border: none;"
+            "QPushButton { background: transparent; border: none; padding: 0;"
             "  color: #444; font-size: 11px; font-family: 'Consolas', monospace; }"
             "QPushButton:hover { color: #888; }"
         )
@@ -1441,7 +1712,7 @@ class CineMarker(QMainWindow):
         btn_next.setToolTip("Volgende film in de lijst")
         btn_next.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         btn_next.setStyleSheet(
-            "QPushButton { background: transparent; border: none; color: #444; font-size: 14px; }"
+            "QPushButton { background: transparent; border: none; color: #444; font-size: 14px; padding: 0; }"
             "QPushButton:hover { color: #e8b86d; }"
         )
         btn_next.clicked.connect(self._next_film)
@@ -1454,7 +1725,7 @@ class CineMarker(QMainWindow):
         self._btn_skip_neg.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._btn_skip_neg.setToolTip("Negatieve perioden overslaan (aan/uit)")
         self._btn_skip_neg.setStyleSheet(
-            "QPushButton { background: transparent; border: none; color: #333; font-size: 14px; }"
+            "QPushButton { background: transparent; border: none; color: #333; font-size: 14px; padding: 0; }"
             "QPushButton:checked { color: #cc4444; }"
             "QPushButton:hover { color: #888; }"
             "QPushButton:checked:hover { color: #ff6666; }"
@@ -1497,6 +1768,11 @@ class CineMarker(QMainWindow):
         self._actors_overlay.marker_requested.connect(self._quick_marker)
         self._actors_overlay.thumbnail_requested.connect(self._capture_thumbnail)
         self._actors_overlay.hide()
+
+        # Film edit panel — floats above actors overlay, shows actors + thumbnails to remove
+        self._film_edit_panel = _FilmEditPanel(self, self.video_container)
+        self._actors_overlay.edit_requested.connect(self._film_edit_panel.open_for_film)
+        self._film_edit_panel.data_changed.connect(self._actors_overlay.refresh)
 
         # Click-flash ✓ overlay — centre of video, fades after ~370 ms
         self._click_flash = _ClickFlash(self, self.video_container)
@@ -1566,6 +1842,7 @@ class CineMarker(QMainWindow):
             self._actors_overlay.raise_()
         else:
             self._actors_overlay.hide()
+            self._film_edit_panel.hide()
         if on_player:
             # Give focus to video_container so no text field is active on entry
             QTimer.singleShot(0, lambda: self.video_container.setFocus(
