@@ -1389,15 +1389,25 @@ class CineMarker(QMainWindow):
         self.main_tabs.setCornerWidget(_corner, Qt.Corner.TopRightCorner)
         self._corner_layout = _ch
 
-        # Player search toolbar (hidden until SPELER tab active)
-        self._player_tb = QWidget()
-        self._player_tb.setStyleSheet("background: transparent;")
-        _ph = QHBoxLayout(self._player_tb)
-        _ph.setContentsMargins(0, 2, 0, 2)
+        # Player tab — toolbar + video + timeline
+        player_widget = QWidget()
+        self._player_widget = player_widget
+        pv = QVBoxLayout(player_widget)
+        pv.setContentsMargins(0, 0, 0, 0)
+        pv.setSpacing(0)
+
+        # ── Player toolbar (eigen balk, niet in corner-widget) ────
+        player_bar = QFrame()
+        player_bar.setFixedHeight(36)
+        player_bar.setStyleSheet(
+            "QFrame { background: #0a0a0a; border-bottom: 1px solid #1a1a1a; }"
+        )
+        _ph = QHBoxLayout(player_bar)
+        _ph.setContentsMargins(10, 0, 10, 0)
         _ph.setSpacing(8)
 
         btn_del_film = QPushButton("🗑")
-        btn_del_film.setFixedSize(26, 26)
+        btn_del_film.setFixedSize(28, 28)
         btn_del_film.setToolTip("Verplaats huidige film naar map 'deleted'")
         btn_del_film.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         btn_del_film.setStyleSheet(
@@ -1415,7 +1425,7 @@ class CineMarker(QMainWindow):
         _ph.addWidget(self._lbl_time)
 
         self._btn_speed = QPushButton("1×")
-        self._btn_speed.setFixedSize(56, 26)
+        self._btn_speed.setFixedSize(56, 28)
         self._btn_speed.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._btn_speed.setToolTip("Afspeelsnelheid  [ = langzamer  ] = sneller  klik = reset 1×")
         self._btn_speed.clicked.connect(self._reset_speed)
@@ -1427,7 +1437,7 @@ class CineMarker(QMainWindow):
         _ph.addWidget(self._btn_speed)
 
         btn_next = QPushButton("⏭")
-        btn_next.setFixedSize(26, 26)
+        btn_next.setFixedSize(28, 28)
         btn_next.setToolTip("Volgende film in de lijst")
         btn_next.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         btn_next.setStyleSheet(
@@ -1438,7 +1448,7 @@ class CineMarker(QMainWindow):
         _ph.addWidget(btn_next)
 
         self._btn_skip_neg = QPushButton("⊘")
-        self._btn_skip_neg.setFixedSize(26, 26)
+        self._btn_skip_neg.setFixedSize(28, 28)
         self._btn_skip_neg.setCheckable(True)
         self._btn_skip_neg.setChecked(self._skip_negative)
         self._btn_skip_neg.setFocusPolicy(Qt.FocusPolicy.NoFocus)
@@ -1452,26 +1462,21 @@ class CineMarker(QMainWindow):
         self._btn_skip_neg.clicked.connect(self._toggle_skip_negative)
         _ph.addWidget(self._btn_skip_neg)
 
+        _ph.addStretch()
+
         self._player_search = QLineEdit()
         self._player_search.setPlaceholderText("Acteur zoeken…")
-        self._player_search.setFixedWidth(160)
-        self._player_search.setFixedHeight(26)
+        self._player_search.setFixedWidth(200)
+        self._player_search.setFixedHeight(28)
         # Only receive focus when the user explicitly clicks — never from keyboard
         # tab-order or any other indirect focus transfer (zoom, drag, etc.)
         self._player_search.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
         self._player_search.textChanged.connect(self._on_player_search)
         _ph.addWidget(self._player_search)
 
-        self._player_tb.setVisible(False)
-        self._corner_layout.insertWidget(0, self._player_tb)
+        pv.addWidget(player_bar)
 
-        # Player tab — video fills all, ultra-thin seekbar at bottom
-        player_widget = QWidget()
-        self._player_widget = player_widget
-        pv = QVBoxLayout(player_widget)
-        pv.setContentsMargins(0, 0, 0, 0)
-        pv.setSpacing(0)
-
+        # ── Video area ────────────────────────────
         self._build_video_area(pv)
 
         self.timeline = TimelineSlider()
@@ -1555,7 +1560,6 @@ class CineMarker(QMainWindow):
         on_actors = (idx == actors_idx)
         if idx == markers_idx:
             QTimer.singleShot(0, self.markers_panel.refresh)
-        self._player_tb.setVisible(on_player)
         self._panel.setVisible(on_player)
         if on_player and self._video_path:
             self._actors_overlay.show()

@@ -286,6 +286,7 @@ class FilmsPanel(QWidget):
         # Filter toggles
         self._flt_1thumb:       bool = False
         self._flt_multithumb:   bool = False
+        self._flt_no_thumb:     bool = False
         self._flt_with_markers: bool = False
         self._flt_no_markers:   bool = False
         self._build_ui()
@@ -299,21 +300,29 @@ class FilmsPanel(QWidget):
         v.setContentsMargins(0, 0, 0, 0)
         v.setSpacing(0)
 
-        # ── Top toolbar ──────────────────────────
+        # ── Single toolbar: alles op één lijn ─────
         bar = QFrame()
         bar.setFixedHeight(44)
         bar.setStyleSheet(
             "QFrame { background: #0d0d0d; border-bottom: 1px solid #1e1e1e; }"
         )
         b = QHBoxLayout(bar)
-        b.setContentsMargins(12, 0, 12, 0)
-        b.setSpacing(10)
+        b.setContentsMargins(10, 0, 10, 0)
+        b.setSpacing(4)
+
+        # helper: dunne verticale scheidingslijn
+        def _vsep():
+            s = QFrame()
+            s.setFrameShape(QFrame.Shape.VLine)
+            s.setFixedSize(1, 22)
+            s.setStyleSheet("QFrame { background: #2a2a2a; }")
+            return s
 
         lbl = QLabel("FILMS")
         lbl.setStyleSheet("color: #555; font-size: 10px; letter-spacing: 4px;")
         b.addWidget(lbl)
 
-        self.lbl_folder = QLabel("Geen map geselecteerd")
+        self.lbl_folder = QLabel("Geen map")
         self.lbl_folder.setStyleSheet("color: #383838; font-size: 10px;")
         b.addWidget(self.lbl_folder)
 
@@ -321,11 +330,66 @@ class FilmsPanel(QWidget):
         self.lbl_count.setStyleSheet("color: #333; font-size: 10px;")
         b.addWidget(self.lbl_count)
 
+        b.addSpacing(4)
+        b.addWidget(_vsep())
+        b.addSpacing(4)
+
+        # ── Sorteerknopjes ────────────────────────
+        for key, label in SORT_FIELDS:
+            btn = QPushButton(label)
+            btn.setFixedHeight(26)
+            btn.setStyleSheet(self._SORT_BTN_STYLE)
+            btn.clicked.connect(lambda _, k=key: self._set_sort(k))
+            b.addWidget(btn)
+            self._sort_btns[key] = btn
+
+        b.addSpacing(4)
+        b.addWidget(_vsep())
+        b.addSpacing(4)
+
+        # ── Filterknopjes ─────────────────────────
+        self._btn_flt_1thumb = QPushButton("1 thumb")
+        self._btn_flt_1thumb.setFixedHeight(26)
+        self._btn_flt_1thumb.setStyleSheet(self._FILTER_BTN_STYLE)
+        self._btn_flt_1thumb.setToolTip("Alleen films met precies 1 thumbnail")
+        self._btn_flt_1thumb.clicked.connect(lambda: self._toggle_filter('1thumb'))
+        b.addWidget(self._btn_flt_1thumb)
+
+        self._btn_flt_multithumb = QPushButton("meer thumb")
+        self._btn_flt_multithumb.setFixedHeight(26)
+        self._btn_flt_multithumb.setStyleSheet(self._FILTER_BTN_STYLE)
+        self._btn_flt_multithumb.setToolTip("Alleen films met meerdere thumbnails")
+        self._btn_flt_multithumb.clicked.connect(lambda: self._toggle_filter('multithumb'))
+        b.addWidget(self._btn_flt_multithumb)
+
+        self._btn_flt_no_thumb = QPushButton("geen thumb")
+        self._btn_flt_no_thumb.setFixedHeight(26)
+        self._btn_flt_no_thumb.setStyleSheet(self._FILTER_BTN_STYLE)
+        self._btn_flt_no_thumb.setToolTip("Alleen films zonder thumbnail")
+        self._btn_flt_no_thumb.clicked.connect(lambda: self._toggle_filter('no_thumb'))
+        b.addWidget(self._btn_flt_no_thumb)
+
+        self._btn_flt_with_markers = QPushButton("met markers")
+        self._btn_flt_with_markers.setFixedHeight(26)
+        self._btn_flt_with_markers.setStyleSheet(self._FILTER_BTN_STYLE)
+        self._btn_flt_with_markers.setToolTip("Alleen films met markers")
+        self._btn_flt_with_markers.clicked.connect(lambda: self._toggle_filter('with_markers'))
+        b.addWidget(self._btn_flt_with_markers)
+
+        self._btn_flt_no_markers = QPushButton("geen markers")
+        self._btn_flt_no_markers.setFixedHeight(26)
+        self._btn_flt_no_markers.setStyleSheet(self._FILTER_BTN_STYLE)
+        self._btn_flt_no_markers.setToolTip("Alleen films zonder markers")
+        self._btn_flt_no_markers.clicked.connect(lambda: self._toggle_filter('no_markers'))
+        b.addWidget(self._btn_flt_no_markers)
+
         b.addStretch()
 
+        # ── Zoekbalk + actieknoppen ───────────────
         self.search_input = QLineEdit()
         self.search_input.setPlaceholderText("Zoeken...")
-        self.search_input.setFixedWidth(200)
+        self.search_input.setFixedWidth(160)
+        self.search_input.setFixedHeight(26)
         self.search_input.textChanged.connect(self._filter)
         b.addWidget(self.search_input)
 
@@ -335,8 +399,9 @@ class FilmsPanel(QWidget):
         btn_refresh.clicked.connect(self._refresh)
         b.addWidget(btn_refresh)
 
-        btn_folder = QPushButton("📁  Kies map")
-        btn_folder.setFixedHeight(28)
+        btn_folder = QPushButton("📁")
+        btn_folder.setFixedSize(28, 28)
+        btn_folder.setToolTip("Kies filmmap")
         btn_folder.clicked.connect(self._pick_folder)
         b.addWidget(btn_folder)
 
@@ -357,73 +422,7 @@ class FilmsPanel(QWidget):
         b.addWidget(btn_zoom_in)
 
         v.addWidget(bar)
-
-        # ── Sort bar ─────────────────────────────
-        sort_bar = QFrame()
-        sort_bar.setFixedHeight(30)
-        sort_bar.setStyleSheet(
-            "QFrame { background: #080808; border-bottom: 1px solid #161616; }"
-        )
-        sb = QHBoxLayout(sort_bar)
-        sb.setContentsMargins(8, 3, 8, 3)
-        sb.setSpacing(4)
-
-        sort_lbl = QLabel("Sorteren:")
-        sort_lbl.setStyleSheet("color: #333; font-size: 10px;")
-        sb.addWidget(sort_lbl)
-
-        for key, label in SORT_FIELDS:
-            btn = QPushButton(label)
-            btn.setFixedHeight(22)
-            btn.setStyleSheet(self._SORT_BTN_STYLE)
-            btn.clicked.connect(lambda _, k=key: self._set_sort(k))
-            sb.addWidget(btn)
-            self._sort_btns[key] = btn
-
-        sb.addStretch()
-        v.addWidget(sort_bar)
         self._update_sort_buttons()
-
-        # ── Filter bar ───────────────────────────
-        filter_bar = QFrame()
-        filter_bar.setFixedHeight(30)
-        filter_bar.setStyleSheet(
-            "QFrame { background: #060606; border-bottom: 1px solid #131313; }"
-        )
-        fb = QHBoxLayout(filter_bar)
-        fb.setContentsMargins(8, 3, 8, 3)
-        fb.setSpacing(4)
-
-        filter_lbl = QLabel("Filter:")
-        filter_lbl.setStyleSheet("color: #333; font-size: 10px;")
-        fb.addWidget(filter_lbl)
-
-        self._btn_flt_1thumb = QPushButton("1 thumbnail")
-        self._btn_flt_1thumb.setFixedHeight(22)
-        self._btn_flt_1thumb.setStyleSheet(self._FILTER_BTN_STYLE)
-        self._btn_flt_1thumb.clicked.connect(lambda: self._toggle_filter('1thumb'))
-        fb.addWidget(self._btn_flt_1thumb)
-
-        self._btn_flt_multithumb = QPushButton("meerdere thumbnails")
-        self._btn_flt_multithumb.setFixedHeight(22)
-        self._btn_flt_multithumb.setStyleSheet(self._FILTER_BTN_STYLE)
-        self._btn_flt_multithumb.clicked.connect(lambda: self._toggle_filter('multithumb'))
-        fb.addWidget(self._btn_flt_multithumb)
-
-        self._btn_flt_with_markers = QPushButton("met markers")
-        self._btn_flt_with_markers.setFixedHeight(22)
-        self._btn_flt_with_markers.setStyleSheet(self._FILTER_BTN_STYLE)
-        self._btn_flt_with_markers.clicked.connect(lambda: self._toggle_filter('with_markers'))
-        fb.addWidget(self._btn_flt_with_markers)
-
-        self._btn_flt_no_markers = QPushButton("geen markers")
-        self._btn_flt_no_markers.setFixedHeight(22)
-        self._btn_flt_no_markers.setStyleSheet(self._FILTER_BTN_STYLE)
-        self._btn_flt_no_markers.clicked.connect(lambda: self._toggle_filter('no_markers'))
-        fb.addWidget(self._btn_flt_no_markers)
-
-        fb.addStretch()
-        v.addWidget(filter_bar)
 
         # ── Grid ─────────────────────────────────
         self.film_list = QListWidget()
@@ -642,6 +641,8 @@ class FilmsPanel(QWidget):
             self._flt_1thumb = not self._flt_1thumb
         elif key == 'multithumb':
             self._flt_multithumb = not self._flt_multithumb
+        elif key == 'no_thumb':
+            self._flt_no_thumb = not self._flt_no_thumb
         elif key == 'with_markers':
             self._flt_with_markers = not self._flt_with_markers
         elif key == 'no_markers':
@@ -654,6 +655,8 @@ class FilmsPanel(QWidget):
             self._FILTER_BTN_ACTIVE if self._flt_1thumb else self._FILTER_BTN_STYLE)
         self._btn_flt_multithumb.setStyleSheet(
             self._FILTER_BTN_ACTIVE if self._flt_multithumb else self._FILTER_BTN_STYLE)
+        self._btn_flt_no_thumb.setStyleSheet(
+            self._FILTER_BTN_ACTIVE if self._flt_no_thumb else self._FILTER_BTN_STYLE)
         self._btn_flt_with_markers.setStyleSheet(
             self._FILTER_BTN_ACTIVE if self._flt_with_markers else self._FILTER_BTN_STYLE)
         self._btn_flt_no_markers.setStyleSheet(
@@ -679,6 +682,9 @@ class FilmsPanel(QWidget):
                     item.setHidden(True)
                     continue
                 if self._flt_multithumb and thumb_count <= 1:
+                    item.setHidden(True)
+                    continue
+                if self._flt_no_thumb and thumb_count > 0:
                     item.setHidden(True)
                     continue
                 if self._flt_with_markers and marker_count == 0:
