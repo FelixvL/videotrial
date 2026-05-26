@@ -18,6 +18,7 @@ from PyQt6.QtGui import QPixmap, QColor, QIcon
 
 import database as db
 from actors_panel import FrameExtractWorker, MarkerGridDelegate
+from paths import MARKER_THUMBS_DIR
 
 
 # ─────────────────────────────────────────────
@@ -378,10 +379,8 @@ class MarkersPanel(QWidget):
             entries = [e for e in entries
                        if self._actor_filter & set(e['actor_ids'])]
 
-        cache_dir = (
-            Path(os.path.dirname(os.path.abspath(__file__))) / 'marker_cache'
-        )
-        cache_dir.mkdir(exist_ok=True)
+        cache_dir = MARKER_THUMBS_DIR
+        cache_dir.mkdir(parents=True, exist_ok=True)
 
         pending_tasks: list = []   # (row_idx, film_path, time_sec, cache_path)
 

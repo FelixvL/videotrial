@@ -34,6 +34,13 @@ Desktop.ini
 # Claude Code
 .claude/
 
+# Data die je handmatig kopieert/backupt (staat NIET in git)
+TE_KOPIEREN/
+
+# Wegwerpbare caches (worden automatisch herbouwd, niet kopiëren)
+marker_cache/
+scaled_cache/
+
+# Legacy locaties (niet meer in gebruik na migratie)
 acteurfotos/
 thumbnails/
-marker_cache/

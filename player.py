@@ -9,10 +9,20 @@ import sys
 import os
 import re
 import json
+import logging
 import subprocess
 import threading
 from pathlib import Path
 from datetime import datetime
+
+# Minimale logging-setup: WARNING+ naar stdout, fouten zijn zichtbaar maar ruis blijft weg.
+# Vervang StreamHandler door FileHandler(logfile) als je een log-bestand wilt bijhouden.
+logging.basicConfig(
+    level=logging.WARNING,
+    format='%(asctime)s  %(levelname)-8s  %(name)s — %(message)s',
+    datefmt='%H:%M:%S',
+)
+_log = logging.getLogger('cinemarker')
 
 # Add common mpv install locations to PATH so python-mpv can find the DLL
 for _mpv_path in [r"C:\mpv", r"C:\Program Files\mpv", r"C:\Program Files (x86)\mpv"]:
@@ -27,12 +37,12 @@ from PyQt6.QtWidgets import (
     QListWidgetItem, QLineEdit, QComboBox, QSpinBox,
     QProgressBar, QTabWidget, QStackedWidget, QFrame, QMessageBox,
     QInputDialog, QSizePolicy, QStatusBar, QScrollArea, QStyle, QMenu,
-    QDialog, QDialogButtonBox
+    QDialog, QGridLayout
 )
 from PyQt6.QtCore import (
-    Qt, QTimer, pyqtSignal, QObject, QThread, QSize, QEvent
+    Qt, QTimer, pyqtSignal, QThread, QSize, QEvent
 )
-from PyQt6.QtGui import QFont, QIcon, QKeySequence, QShortcut, QColor, QPalette, QPixmap, QCursor
+from PyQt6.QtGui import QFont, QIcon, QKeySequence, QShortcut, QColor, QPixmap, QCursor
 
 try:
     import mpv
@@ -55,6 +65,7 @@ from database_panel import DatabasePanel
 from sorter_panel import SorterPanel
 from markers_panel import MarkersPanel
 import database as db
+from paths import THUMBNAILS_DIR, ensure_data_dirs, migrate_legacy_data
 
 
 # ─────────────────────────────────────────────
@@ -81,20 +92,6 @@ def _fmt_hms(seconds: float) -> str:
     return f"{h:02d}:{m:02d}:{s:02d}"
 
 
-def parse_time(time_str: str) -> float:
-    """Parse HH:MM:SS.mmm or MM:SS or seconds"""
-    try:
-        parts = time_str.strip().replace(',', '.').split(':')
-        if len(parts) == 1:
-            return float(parts[0])
-        elif len(parts) == 2:
-            return int(parts[0]) * 60 + float(parts[1])
-        elif len(parts) == 3:
-            return int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
-    except Exception:
-        return 0.0
-
-
 def markers_file_for(video_path: str) -> str:
     p = Path(video_path)
     return str(p.parent / f".{p.stem}_markers.json")
@@ -112,13 +109,20 @@ def save_markers(video_path: str, markers: list):
     path = markers_file_for(video_path)
     with open(path, 'w') as f:
         json.dump(markers, f, indent=2)
+    # Houd DB-tellers bij zodat _scan_folder geen JSON hoeft te lezen
+    total = len(markers)
+    neg   = sum(1 for m in markers if m.get('negative'))
+    try:
+        db.update_film_marker_counts(video_path, total, neg)
+    except Exception:
+        pass
 
 
 # ─────────────────────────────────────────────
 #  Help-tekst (HTML)
 # ─────────────────────────────────────────────
 
-_HELP_HTML = """
+_HELP_HTML = r"""
 <style>
   body  { background:#0e0e0e; color:#ccc;
           font-family:'Consolas',monospace; font-size:12px; margin:16px; }
@@ -149,6 +153,7 @@ _HELP_HTML = """
 <tr><td>Home / End</td><td>Naar begin / einde springen</td></tr>
 <tr><td>O</td><td>Vorige marker in de lijst (wraps rond)</td></tr>
 <tr><td>P</td><td>Volgende marker in de lijst (wraps rond)</td></tr>
+<tr><td>M</td><td>Marker plaatsen — toont gefixeerd frame + geselecteerde acteurs + categoriekeuze</td></tr>
 <tr><td>X</td><td>Negatieve marker zetten op huidige positie</td></tr>
 <tr><td>[ &nbsp;/&nbsp; ]</td><td>Afspeelsnelheid omlaag / omhoog — −50× … −1× … −0.25 · 0.25 … 1× … 50×</td></tr>
 <tr><td>\</td><td>Snelheid resetten naar 1× (normaal)</td></tr>
@@ -391,8 +396,14 @@ class ConvertWorker(QThread):
 # ─────────────────────────────────────────────
 
 class TimelineSlider(QSlider):
-    """Slider that supports click-to-seek anywhere, with negative-zone overlay."""
-    seeked = pyqtSignal(float)
+    """Slider that supports click-to-seek anywhere, with negative-zone overlay.
+
+    Signals:
+      seeked   — emitted during press/drag: use for fast keyframe seek (approx)
+      released — emitted on mouse release:  use for exact seek (precise frame)
+    """
+    seeked   = pyqtSignal(float)   # press + drag → keyframe seek
+    released = pyqtSignal(float)   # mouse up     → exact seek
 
     def __init__(self):
         super().__init__(Qt.Orientation.Horizontal)
@@ -419,6 +430,12 @@ class TimelineSlider(QSlider):
             self.setValue(val)
             self.seeked.emit(val / 10000)
         super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            val = self._pos_to_value(event.position().x())
+            self.released.emit(val / 10000)
+        super().mouseReleaseEvent(event)
 
     def _pos_to_value(self, x):
         w = self.width()
@@ -448,12 +465,6 @@ class TimelineSlider(QSlider):
                 p.fillRect(x0, 0, max(3, x1 - x0), h, QColor('#cc2222'))
 
         p.end()
-
-
-class ClickableLabel(QLabel):
-    clicked = pyqtSignal()
-    def mousePressEvent(self, e):
-        self.clicked.emit()
 
 
 class _ClickFlash(QWidget):
@@ -539,6 +550,16 @@ class _ClickFlash(QWidget):
 # ─────────────────────────────────────────────
 #  Actor Link Overlay  (floating over player)
 # ─────────────────────────────────────────────
+
+class _HtmlClickLabel(QLabel):
+    """QLabel met rich-text én een clicked-signaal — vervangt QPushButton waar HTML nodig is."""
+    clicked = pyqtSignal()
+
+    def mousePressEvent(self, e):
+        if e.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit()
+        super().mousePressEvent(e)
+
 
 class _ActorLinkOverlay(QFrame):
     link_requested = pyqtSignal(dict)
@@ -960,9 +981,9 @@ class _FilmEditPanel(QWidget):
 
     def _remove_thumb(self, thumb: dict):
         db.delete_film_thumbnail(thumb['id'])
-        self._rebuild()
         if self._film_id:
             self.data_changed.emit(self._film_id)
+        self.hide()
 
     def _remove_actor_from_marker(self, actor_id: int, marker_idx: int, film_path: str):
         markers = load_markers(film_path)
@@ -972,7 +993,7 @@ class _FilmEditPanel(QWidget):
                 actors.remove(actor_id)
                 markers[marker_idx]['actors'] = actors
                 save_markers(film_path, markers)
-        self._rebuild()
+        self.hide()
 
     # ── Position ─────────────────────────────────
 
@@ -1010,7 +1031,8 @@ class _FilmActorsOverlay(QWidget):
     SPACING  = 6
     PAD      = 6
     ROW_GAP  = 8
-    BTN_W    = 36       # square action buttons (+ category)
+    BTN_W      = 36       # square action buttons (+ category)
+    BTN_EDIT_W = 30       # edit label — grote E
     BTN_TW   = 80       # thumbnail button width  (~2× area vs old 56×36)
     BTN_TH   = 52       # thumbnail button height
     CELL_A   = TH + 16  # actor row height  (78)
@@ -1064,15 +1086,16 @@ class _FilmActorsOverlay(QWidget):
         )
         self._btn_add_cat.clicked.connect(self._add_category)
 
-        self._btn_edit = QPushButton("−", self)
-        self._btn_edit.setFixedSize(self.BTN_W, self.BTN_W)
+        self._btn_edit = _HtmlClickLabel(self)
+        self._btn_edit.setFixedSize(self.BTN_EDIT_W, self.BTN_W)
         self._btn_edit.setToolTip("Acteurs en thumbnails beheren")
-        self._btn_edit.setStyleSheet(
-            "QPushButton { background: #1a0a0a; border: 1px solid #6b1f1f;"
-            "  border-radius: 4px; color: #cc4444; font-size: 18px; font-weight: bold; }"
-            "QPushButton:hover { background: #2a1010; border-color: #cc4444; }"
-            "QPushButton:pressed { background: #cc4444; color: #fff; }"
+        self._btn_edit.setTextFormat(Qt.TextFormat.RichText)
+        self._btn_edit.setText(
+            '<span style="color:#cc4444;font-size:36px;font-weight:bold;line-height:1;">E</span>'
         )
+        self._btn_edit.setStyleSheet("background: transparent;")
+        self._btn_edit.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
+        self._btn_edit.setCursor(Qt.CursorShape.PointingHandCursor)
         self._btn_edit.clicked.connect(
             lambda: self.edit_requested.emit(self._film_id) if self._film_id else None
         )
@@ -1090,13 +1113,10 @@ class _FilmActorsOverlay(QWidget):
         n = len(self._cats)
         return n * (self.CW + self.SPACING) - (self.SPACING if n else 0)
 
-    def _content_width(self):
-        return max(self._actor_row_width(), self._cat_row_width())
-
     def _total_width(self):
-        # Cat row: icons + spacing + (−) edit button + spacing + (+) button + spacing + thumb button
+        # Cat row: icons + (+) button + edit button + spacing + thumb button
         cat_total = (self._cat_row_width() + self.SPACING + self.BTN_W
-                     + self.SPACING + self.BTN_W + self.SPACING + self.BTN_TW)
+                     + self.SPACING + self.BTN_EDIT_W + self.SPACING + self.BTN_TW)
         return self.PAD + max(self._actor_row_width(), cat_total) + self.PAD
 
     def _place_buttons(self):
@@ -1104,12 +1124,12 @@ class _FilmActorsOverlay(QWidget):
         # Thumbnail button — far right of the category row
         thumb_x = self._total_width() - self.PAD - self.BTN_TW
         self._btn_thumb.move(thumb_x, cat_row_y + (self.CELL_C - self.BTN_TH) // 2)
-        # + button — just left of the thumbnail button
-        plus_x = thumb_x - self.SPACING - self.BTN_W
-        self._btn_add_cat.move(plus_x, cat_row_y + (self.CELL_C - self.BTN_W) // 2)
-        # − edit button — just left of the + button
-        edit_x = plus_x - self.SPACING - self.BTN_W
+        # edit button — just left of the thumbnail button
+        edit_x = thumb_x - self.SPACING - self.BTN_EDIT_W
         self._btn_edit.move(edit_x, cat_row_y + (self.CELL_C - self.BTN_W) // 2)
+        # + button — just left of the edit button
+        plus_x = edit_x - self.SPACING - self.BTN_W
+        self._btn_add_cat.move(plus_x, cat_row_y + (self.CELL_C - self.BTN_W) // 2)
 
     # ── Paint ────────────────────────────────────
 
@@ -1324,9 +1344,6 @@ class _FilmActorsOverlay(QWidget):
 
     def selected_actors(self) -> list:
         return [a for a in self._actors if a['id'] in self._selected]
-
-    def selected_categories(self) -> list:
-        return [c for c in self._cats if c['id'] in self._cat_sel]
 
     # ── Category management ──────────────────────
 
@@ -1563,6 +1580,141 @@ class _PanelOverlay(QWidget):
 
 
 # ─────────────────────────────────────────────
+#  Snelle marker-popup  (M-toets)
+# ─────────────────────────────────────────────
+
+class _MarkerQuickDlg(QDialog):
+    """Popup voor de M-toets workflow:
+    - Toont het gefixeerde frame op het moment van drukken
+    - Toont de al-geselecteerde acteurs (elk afzonderlijk te deselecteren)
+    - Toont alle categorieën — één klik maakt de marker en sluit de popup
+    """
+
+    def __init__(self, parent, actors: list, pos: float, frame_pix, categories: list):
+        super().__init__(parent)
+        self.setModal(True)
+        self.setWindowFlags(
+            Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint
+        )
+        self._actors      = list(actors)   # mutable kopie
+        self._pos         = pos
+        self._chosen_cat  = None
+        self._actor_btns  = {}             # id → QPushButton
+        self._build(frame_pix, categories)
+        self._center_on_parent()
+
+    # ── Opbouw ───────────────────────────────────
+
+    def _build(self, frame_pix, categories):
+        self.setStyleSheet("""
+            QDialog   { background:#1a1a1a; border:1px solid #555; border-radius:8px; }
+            QLabel    { color:#ccc; }
+            QPushButton {
+                background:#252525; color:#ccc;
+                border:1px solid #444; border-radius:4px;
+                padding:5px 10px; font-size:12px;
+            }
+            QPushButton:hover   { background:#333; border-color:#888; }
+            QPushButton:checked { background:#2a1414; color:#664444; border-color:#442222;
+                                  text-decoration: line-through; }
+            QPushButton#cancel  { color:#888; border-color:#333; }
+            QPushButton#cancel:hover { color:#ccc; background:#2a2a2a; }
+        """)
+
+        v = QVBoxLayout(self)
+        v.setContentsMargins(16, 16, 16, 16)
+        v.setSpacing(12)
+
+        # ── Tijdstip-header ──
+        lbl_time = QLabel(format_time(self._pos))
+        lbl_time.setStyleSheet("color:#e8b86d; font-size:14px; font-weight:bold;")
+        v.addWidget(lbl_time, alignment=Qt.AlignmentFlag.AlignCenter)
+
+        # ── Gefixeerd frame ──
+        if frame_pix and not frame_pix.isNull():
+            lbl_frame = QLabel()
+            scaled = frame_pix.scaledToWidth(
+                400, Qt.TransformationMode.SmoothTransformation
+            )
+            lbl_frame.setPixmap(scaled)
+            lbl_frame.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            v.addWidget(lbl_frame)
+
+        # ── Acteurs (deselecteerbaar) ──
+        actors_h = QHBoxLayout()
+        actors_h.setSpacing(6)
+        for a in self._actors:
+            btn = QPushButton(f"✕  {a['name']}")
+            btn.setCheckable(True)
+            btn.setChecked(False)     # niet-aangevinkt = actief (logisch omgekeerd voor UX)
+            btn.setToolTip("Klik om deze acteur niet mee te nemen")
+            btn.clicked.connect(lambda _, aid=a['id']: self._toggle_actor(aid))
+            self._actor_btns[a['id']] = btn
+            actors_h.addWidget(btn)
+        actors_h.addStretch()
+        v.addLayout(actors_h)
+
+        # ── Scheidingslijn ──
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setStyleSheet("color:#333;")
+        v.addWidget(sep)
+
+        # ── Categorie-knoppen ──
+        lbl = QLabel("Kies een categorie:")
+        lbl.setStyleSheet("color:#888; font-size:11px;")
+        v.addWidget(lbl)
+
+        grid = QGridLayout()
+        grid.setSpacing(6)
+        cols = 4
+        for i, cat in enumerate(categories):
+            btn = QPushButton(cat['name'])
+            ip = cat.get('icon_path', '')
+            if ip and os.path.exists(ip):
+                btn.setIcon(QIcon(ip))
+                btn.setIconSize(QSize(20, 20))
+            btn.clicked.connect(lambda _, c=cat: self._choose(c))
+            grid.addWidget(btn, i // cols, i % cols)
+        v.addLayout(grid)
+
+        # ── Annuleren ──
+        btn_cancel = QPushButton("Annuleren")
+        btn_cancel.setObjectName("cancel")
+        btn_cancel.clicked.connect(self.reject)
+        v.addWidget(btn_cancel, alignment=Qt.AlignmentFlag.AlignRight)
+
+    # ── Acties ───────────────────────────────────
+
+    def _toggle_actor(self, actor_id: int):
+        """Acteur aan/uit — minimaal 1 acteur verplicht."""
+        btn = self._actor_btns[actor_id]
+        excluded = {aid for aid, b in self._actor_btns.items() if b.isChecked()}
+        active = [a for a in self._actors if a['id'] not in excluded]
+        if not active:
+            # Laatste acteur — niet toestaan
+            btn.setChecked(False)
+
+    def _choose(self, cat: dict):
+        excluded = {aid for aid, b in self._actor_btns.items() if b.isChecked()}
+        self._actors = [a for a in self._actors if a['id'] not in excluded]
+        if not self._actors:
+            return  # mag niet voorkomen door _toggle_actor guard
+        self._chosen_cat = cat
+        self.accept()
+
+    def get_result(self):
+        return self._actors, self._chosen_cat
+
+    def _center_on_parent(self):
+        self.adjustSize()
+        parent = self.parent()
+        if parent:
+            center = parent.frameGeometry().center()
+            self.move(center - self.rect().center())
+
+
+# ─────────────────────────────────────────────
 #  Main Window
 # ─────────────────────────────────────────────
 
@@ -1588,8 +1740,28 @@ class CineMarker(QMainWindow):
         self._drag_last = None
         self._current_speed = 1.0
         self._reverse_speed = 0.0          # |speed| tijdens achteruit-modus
+        self._reverse_use_frameback = False # True = frame_back_step(), False = seek
         self._selection_entries: list = []   # cross-film afspeellijst vanuit markers-tab
         self._current_marker_row: int = -1  # blijft bewaard over list-rebuilds heen
+
+        # Persistente caches voor marker-lijst — worden niet bij elke rebuild gewist
+        self._actor_pix_cache: dict = {}   # actor_id  -> QPixmap | None
+        self._cat_pix_cache:   dict = {}   # cat_id    -> QPixmap | None
+
+        # Debounce timer voor acteur-zoekbalk — voorkomt DB-queries per toetsaanslag
+        self._search_debounce = QTimer()
+        self._search_debounce.setSingleShot(True)
+        self._search_debounce.setInterval(180)
+        self._search_debounce.timeout.connect(self._do_player_search)
+        self._search_pending: str = ''
+
+        # Twee-fase marker-seek: keyframe-seek toont direct iets, exact-seek volgt 80ms later.
+        # Bij snel O/O/P/P herstarten we de timer — exact-seek valt altijd op de eindstop.
+        self._exact_seek_timer = QTimer()
+        self._exact_seek_timer.setSingleShot(True)
+        self._exact_seek_timer.setInterval(80)
+        self._exact_seek_timer.timeout.connect(self._do_exact_seek)
+        self._exact_seek_target: float | None = None
 
         # Multi-tap seek state
         self._seek_count = 0
@@ -1716,12 +1888,16 @@ class CineMarker(QMainWindow):
             log_handler=self._mpv_log,
             loglevel='error',
             input_default_bindings=False,   # mpv's eigen sneltoetsen uitzetten
+            hwdec='auto-safe',              # GPU-decodering (D3D11VA/NVDEC/…) — snellere seeks
         )
         self.player['keep-open'] = True
         self.player['hr-seek'] = True  # frame-accurate seeking
+        self.player['cache'] = 'yes'   # demuxer-cache voor lokale bestanden
 
     def _mpv_log(self, level, component, message):
-        pass  # silence mpv logs
+        # Alleen echte fouten doorgeven — info/debug is te uitgebreid
+        if level in ('error', 'fatal'):
+            _log.error('mpv [%s] %s', component, message.rstrip())
 
     # ── UI Building ───────────────────────────
 
@@ -1866,7 +2042,8 @@ class CineMarker(QMainWindow):
         self._build_video_area(pv)
 
         self.timeline = TimelineSlider()
-        self.timeline.seeked.connect(self._on_timeline_seek)
+        self.timeline.seeked.connect(self._on_timeline_scrub)    # snel, tijdens slepen
+        self.timeline.released.connect(self._on_timeline_seek)   # exact, bij loslaten
         self.timeline.setFixedHeight(8)   # tall enough for neg-zone color to be visible
         self.timeline.setStyleSheet("")    # paintEvent handles all drawing
         pv.addWidget(self.timeline)
@@ -1970,30 +2147,24 @@ class CineMarker(QMainWindow):
             self._player_search.clear()
 
     def _on_player_search(self, text: str):
-        q = text.strip().lower()
-        if not q:
+        self._search_pending = text
+        if not text.strip():
+            self._search_debounce.stop()
             self._panel.show_search(False)
+        else:
+            self._search_debounce.start()   # herstart bij elke toetsaanslag
+
+    def _do_player_search(self):
+        q = self._search_pending.strip().lower()
+        if not q:
             return
         actors = [a for a in db.get_all_actors()
                   if q in a.get('name', '').lower()]
 
-        def _sort_key(a):
-            films = db.get_films_for_actor(a['id'])
-            film_count = len(films)
-            marker_count = 0
-            for f in films:
-                p = Path(f['file_path'])
-                mf = p.parent / f".{p.stem}_markers.json"
-                if mf.exists():
-                    try:
-                        for m in json.loads(mf.read_text('utf-8')):
-                            if a['id'] in (m.get('actors') or []):
-                                marker_count += 1
-                    except Exception:
-                        pass
-            return (-film_count, -marker_count)
+        # Sorteer op filmcount uit DB — één query, geen JSON-reads van SSD
+        actor_film_counts = db.get_actor_film_counts_batch()   # {actor_id: film_count}
+        actors.sort(key=lambda a: -actor_film_counts.get(a['id'], 0))
 
-        actors.sort(key=_sort_key)
         self._panel._search_page.update_results(actors)
         self._panel.show_search(True)
         if not self._panel.isVisible():
@@ -2056,7 +2227,19 @@ class CineMarker(QMainWindow):
 
         self.marker_list = QListWidget()
         self.marker_list.itemDoubleClicked.connect(self._on_marker_jump)
+        self.marker_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.marker_list.customContextMenuRequested.connect(self._marker_context_menu)
         v.addWidget(self.marker_list)
+
+        # Footer: CSV-export
+        footer = QHBoxLayout()
+        footer.addStretch()
+        btn_csv = QPushButton("↓ CSV")
+        btn_csv.setFixedWidth(56)
+        btn_csv.setToolTip("Markers exporteren als CSV-bestand")
+        btn_csv.clicked.connect(self._export_markers_csv)
+        footer.addWidget(btn_csv)
+        v.addLayout(footer)
 
     def _build_converter_tab(self):
         w = QWidget()
@@ -2184,6 +2367,69 @@ class CineMarker(QMainWindow):
         QShortcut(QKeySequence("\\"), self).activated.connect(self._reset_speed)
         QShortcut(QKeySequence("P"),  self).activated.connect(self._shortcut_p)
         QShortcut(QKeySequence("O"),  self).activated.connect(self._shortcut_o)
+
+    # ── Marker-list helpers ───────────────────
+    # Grootte-constanten voor acteur-/categorie-icoontjes in de markerlijst.
+    # Op één plek gedefinieerd zodat _refresh_marker_list én
+    # _refresh_selection_markers altijd in sync zijn.
+    _MARKER_SZ_A  = 26   # acteur-foto (vierkant)
+    _MARKER_SZ_C  = 22   # categorie-icoon (vierkant)
+    _MARKER_ROW_H = 34   # rijhoogte
+
+    def _marker_actor_pix(self, aid: int):
+        """Geeft een gecachede vierkante acteur-thumbnail voor de markerlijst.
+        Retourneert None als de acteur geen foto heeft."""
+        if aid not in self._actor_pix_cache:
+            sz     = self._MARKER_SZ_A
+            photos = db.get_actor_photos(aid)
+            pix    = None
+            if photos:
+                raw = QPixmap(photos[0]['photo_path'])
+                if not raw.isNull():
+                    sc  = raw.scaled(sz, sz,
+                              Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                              Qt.TransformationMode.SmoothTransformation)
+                    ox  = (sc.width()  - sz) // 2
+                    oy  = (sc.height() - sz) // 2
+                    pix = sc.copy(ox, oy, sz, sz)
+            self._actor_pix_cache[aid] = pix
+        return self._actor_pix_cache[aid]
+
+    def _marker_cat_pix(self, cid: int):
+        """Geeft een gecachede categorie-icoon voor de markerlijst.
+        Retourneert None als de categorie geen icoon heeft of niet meer bestaat."""
+        if cid not in self._cat_pix_cache:
+            sz   = self._MARKER_SZ_C
+            cats = db.get_categories_by_ids([cid])
+            pix  = None
+            if cats:
+                ip = cats[0].get('icon_path', '')
+                if ip and os.path.exists(ip):
+                    raw = QPixmap(ip)
+                    if not raw.isNull():
+                        pix = raw.scaled(sz, sz,
+                                  Qt.AspectRatioMode.KeepAspectRatio,
+                                  Qt.TransformationMode.SmoothTransformation)
+            self._cat_pix_cache[cid] = pix
+        return self._cat_pix_cache[cid]
+
+    @staticmethod
+    def _marker_img_label(pix, size: int, fallback_color: str) -> 'QLabel':
+        """Klein QLabel met pixmap of gekleurde placeholder als de pixmap ontbreekt."""
+        lbl = QLabel()
+        lbl.setFixedSize(size, size)
+        if pix:
+            lbl.setPixmap(pix)
+        else:
+            lbl.setStyleSheet(f"background:{fallback_color}; border-radius:3px;")
+        return lbl
+
+    def _current_pos(self) -> float:
+        """Geeft de huidige mpv-afspeelpositie in seconden, of 0 bij fout/geen video."""
+        try:
+            return self.player.time_pos or 0
+        except Exception:
+            return 0
 
     # ── Timer ─────────────────────────────────
 
@@ -2403,54 +2649,6 @@ class CineMarker(QMainWindow):
         """Bouw de marker-list op uit self._selection_entries (meerdere films)."""
         self.marker_list.clear()
         # _current_marker_row wordt na het vullen hersteld (zie einde methode)
-        SZ_A  = 26
-        SZ_C  = 22
-        ROW_H = 34
-
-        actor_pix_cache: dict = {}
-        cat_pix_cache:   dict = {}
-
-        def _actor_pix(aid):
-            if aid not in actor_pix_cache:
-                photos = db.get_actor_photos(aid)
-                pix = None
-                if photos:
-                    raw = QPixmap(photos[0]['photo_path'])
-                    if not raw.isNull():
-                        sc = raw.scaled(SZ_A, SZ_A,
-                            Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-                            Qt.TransformationMode.SmoothTransformation)
-                        ox = (sc.width()  - SZ_A) // 2
-                        oy = (sc.height() - SZ_A) // 2
-                        pix = sc.copy(ox, oy, SZ_A, SZ_A)
-                actor_pix_cache[aid] = pix
-            return actor_pix_cache[aid]
-
-        def _cat_pix(cid):
-            if cid not in cat_pix_cache:
-                cats = db.get_categories_by_ids([cid])
-                pix = None
-                if cats:
-                    ip = cats[0].get('icon_path', '')
-                    if ip and os.path.exists(ip):
-                        raw = QPixmap(ip)
-                        if not raw.isNull():
-                            pix = raw.scaled(SZ_C, SZ_C,
-                                Qt.AspectRatioMode.KeepAspectRatio,
-                                Qt.TransformationMode.SmoothTransformation)
-                cat_pix_cache[cid] = pix
-            return cat_pix_cache[cid]
-
-        def _img_label(pix, size, fallback_color):
-            lbl = QLabel()
-            lbl.setFixedSize(size, size)
-            if pix:
-                lbl.setPixmap(pix)
-            else:
-                lbl.setStyleSheet(
-                    f"background:{fallback_color}; border-radius:3px;")
-            return lbl
-
         prev_film = None
         for entry in self._selection_entries:
             m         = entry['marker']
@@ -2474,10 +2672,12 @@ class CineMarker(QMainWindow):
 
             # Acteur-foto('s)
             for aid in (m.get('actors') or []):
-                rh.addWidget(_img_label(_actor_pix(aid), SZ_A, '#222'))
+                rh.addWidget(self._marker_img_label(
+                    self._marker_actor_pix(aid), self._MARKER_SZ_A, '#222'))
             # Categorie-icoon(tjes)
             for cid in (m.get('categories') or []):
-                rh.addWidget(_img_label(_cat_pix(cid), SZ_C, '#1a1a2a'))
+                rh.addWidget(self._marker_img_label(
+                    self._marker_cat_pix(cid), self._MARKER_SZ_C, '#1a1a2a'))
 
             # Tijdcode
             s = int(m.get('time', 0))
@@ -2499,7 +2699,7 @@ class CineMarker(QMainWindow):
             rh.addStretch()
             rh.addWidget(lbl_f)
 
-            item.setSizeHint(QSize(0, ROW_H))
+            item.setSizeHint(QSize(0, self._MARKER_ROW_H))
             self.marker_list.setItemWidget(item, row_w)
 
         # Herstel de selectie na de rebuild
@@ -2523,11 +2723,11 @@ class CineMarker(QMainWindow):
         if not self._video_path:
             return
         if self._current_speed < 0:
-            # Achteruit-modus: reverse timer aan/uit
+            # Achteruit-modus: reverse timer aan/uit (gebruik huidig interval, niet 50ms hardcoded)
             if self._reverse_timer.isActive():
                 self._reverse_timer.stop()
             else:
-                self._reverse_timer.start(50)
+                self._reverse_timer.start()
             return
         self.player.pause = not self.player.pause
 
@@ -2536,10 +2736,21 @@ class CineMarker(QMainWindow):
             return
         self.player.seek(seconds, 'relative+exact')
 
+    def _step_back_sequentially(self, remaining: int):
+        """Stap frame voor frame achteruit met een kleine pauze ertussen.
+        Geeft hetzelfde tick-tick-tick gevoel als frame_step() vooruit."""
+        if remaining <= 0 or not self._video_path:
+            return
+        try:
+            self.player.frame_back_step()
+        except Exception:
+            return
+        if remaining > 1:
+            QTimer.singleShot(75, lambda: self._step_back_sequentially(remaining - 1))
+
     def seek_frames(self, n):
         """Step n frames forward (n>0) or backward (n<0).
-        Single-frame back uses frame_back_step(); multi-frame back uses a
-        time-based seek because looping frame_back_step() is unreliable in mpv."""
+        Backward uses frame_back_step() — exact, frame-accurate."""
         if not self._video_path or n == 0:
             return
         if n > 0:
@@ -2548,13 +2759,9 @@ class CineMarker(QMainWindow):
         elif n == -1:
             self.player.frame_back_step()
         else:
-            # Multiple frames backward — compute the offset from FPS
-            try:
-                fps = float(self.player.container_fps or 25.0)
-                fps = max(1.0, fps)
-            except Exception:
-                fps = 25.0
-            self.player.seek(n / fps, 'relative+exact')
+            # Meerdere frames achteruit: één voor één met kleine vertraging
+            # zodat de gebruiker elk frame ziet (zelfde feel als vooruit)
+            self._step_back_sequentially(abs(n))
 
     def go_to_start(self):
         if self._video_path:
@@ -2591,18 +2798,36 @@ class CineMarker(QMainWindow):
     def _apply_speed(self, speed: float):
         self._current_speed = speed
         if speed < 0:
-            # Achteruit: mpv pauzeren, zelf via timer seeking doen
-            self._reverse_speed = abs(speed)
+            abs_s = abs(speed)
+            self._reverse_speed = abs_s
             try:
                 self.player.speed = 1.0
                 self.player.pause = True
             except Exception:
                 pass
-            self._reverse_timer.start(50)
+
+            # Voor trage reverse (≤ 2×): frame_back_step() op fps-gebaseerd interval
+            # → frame-accuraat en vloeiender dan seek-based
+            # Voor snelle reverse (> 2×): seek-based (frame_back_step zou te langzaam zijn)
+            if abs_s <= 2.0:
+                self._reverse_use_frameback = True
+                try:
+                    fps = max(10.0, float(self.player.container_fps or 25.0))
+                except Exception:
+                    fps = 25.0
+                # Interval in ms: 1 frame per (1000 / fps / abs_s) ms
+                interval = max(16, int(1000 / (fps * abs_s)))
+                self._reverse_timer.setInterval(interval)
+            else:
+                self._reverse_use_frameback = False
+                self._reverse_timer.setInterval(50)
+
+            self._reverse_timer.start()
         else:
             # Vooruit of stop: reverse timer uit, mpv speed instellen
             self._reverse_timer.stop()
             self._reverse_speed = 0.0
+            self._reverse_use_frameback = False
             try:
                 self.player.speed = speed
                 if speed > 0:
@@ -2618,23 +2843,38 @@ class CineMarker(QMainWindow):
             pos = self.player.time_pos
             if pos is None:
                 return
-            seek_amount = self._reverse_speed * 0.05  # 50ms × snelheid = stap in seconden
-            new_pos = pos - seek_amount
-            if new_pos <= 0:
-                self.player.seek(0, 'absolute+exact')
-                self._reverse_timer.stop()
-                self._current_speed = 1.0
-                self._reverse_speed = 0.0
-                try:
-                    self.player.speed = 1.0
-                    self.player.pause = True
-                except Exception:
-                    pass
-                self._update_speed_label(1.0)
-                return
-            self.player.seek(-seek_amount, 'relative+exact')
+
+            if self._reverse_use_frameback:
+                # Frame-accurate reverse: één frame terug per tick
+                # Controleer eerst of we al aan het begin zijn
+                if pos <= 0:
+                    self._stop_reverse()
+                    return
+                self.player.frame_back_step()
+            else:
+                # Seek-based reverse voor hogere snelheden (> 2×)
+                seek_amount = self._reverse_speed * 0.05  # 50ms × snelheid = stap in seconden
+                new_pos = pos - seek_amount
+                if new_pos <= 0:
+                    self.player.seek(0, 'absolute+exact')
+                    self._stop_reverse()
+                    return
+                self.player.seek(-seek_amount, 'relative+exact')
         except Exception:
             pass
+
+    def _stop_reverse(self):
+        """Reset na bereiken begin of bij stoppen van reverse-modus."""
+        self._reverse_timer.stop()
+        self._current_speed = 1.0
+        self._reverse_speed = 0.0
+        self._reverse_use_frameback = False
+        try:
+            self.player.speed = 1.0
+            self.player.pause = True
+        except Exception:
+            pass
+        self._update_speed_label(1.0)
 
     def _update_speed_label(self, speed: float):
         abs_s = abs(speed)
@@ -2664,9 +2904,21 @@ class CineMarker(QMainWindow):
                 "QPushButton:hover { color: #888; }"
             )
 
-    def _on_timeline_seek(self, fraction):
+    def _on_timeline_scrub(self, fraction):
+        """Tijdens slepen op de tijdlijn: keyframe-seek voor directe visuele feedback."""
         if self._video_path and self._duration and not self._updating_slider:
-            self.player.seek(fraction * self._duration, 'absolute+exact')
+            try:
+                self.player.seek(fraction * self._duration, 'absolute')
+            except Exception:
+                pass
+
+    def _on_timeline_seek(self, fraction):
+        """Bij loslaten van de tijdlijn: exact-seek op het precieze frame."""
+        if self._video_path and self._duration and not self._updating_slider:
+            try:
+                self.player.seek(fraction * self._duration, 'absolute+exact')
+            except Exception:
+                pass
 
     # ── Multi-tap seek ────────────────────────
 
@@ -2714,7 +2966,7 @@ class CineMarker(QMainWindow):
         if not self._video_path:
             return
         film = db.get_or_create_film(self._video_path)
-        thumb_dir = Path(os.path.dirname(os.path.abspath(__file__))) / 'thumbnails'
+        thumb_dir = THUMBNAILS_DIR
         thumb_dir.mkdir(exist_ok=True)
         import time as _time
         ts   = int(_time.time() * 1000)
@@ -2768,10 +3020,7 @@ class CineMarker(QMainWindow):
                 return          # user cancelled
             categories = [chosen]
 
-        try:
-            pos = self.player.time_pos or 0
-        except Exception:
-            pos = 0
+        pos = self._current_pos()
 
         cat_names   = [c['name'] for c in categories]
         actor_names = [a['name'] for a in actors]
@@ -2881,6 +3130,39 @@ class CineMarker(QMainWindow):
     def _shortcut_m(self):
         if self.main_tabs.currentWidget() is self.sorter_panel:
             self.sorter_panel._move_m()
+        elif self._video_path:
+            self._open_marker_quick_popup()
+
+    def _open_marker_quick_popup(self):
+        """M-toets: gefixeerd frame + acteurs + categoriekeuze → marker."""
+        actors = self._actors_overlay.selected_actors()
+        if not actors:
+            self.status.showMessage("  Selecteer eerst een acteur (linksonder)")
+            return
+
+        cats = db.get_all_categories()
+        if not cats:
+            self.status.showMessage("  Maak eerst een categorie aan in het database-tabblad")
+            return
+
+        pos = self._current_pos()
+
+        # Frame opvangen via mpv screenshot naar tijdelijk bestand
+        frame_pix = None
+        try:
+            import tempfile
+            tmp = tempfile.mktemp(suffix='.jpg')
+            self.player.command('screenshot-to-file', tmp, 'video')
+            if os.path.exists(tmp):
+                frame_pix = QPixmap(tmp)
+                os.unlink(tmp)
+        except Exception:
+            pass  # popup werkt ook zonder frame
+
+        dlg = _MarkerQuickDlg(self, actors, pos, frame_pix, cats)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            chosen_actors, chosen_cat = dlg.get_result()
+            self._quick_marker(chosen_actors, [chosen_cat])
 
     def _shortcut_n(self):
         if self.main_tabs.currentWidget() is not self.sorter_panel:
@@ -2993,30 +3275,6 @@ class CineMarker(QMainWindow):
                     return True
         return super().eventFilter(obj, event)
 
-    def add_marker(self):
-        if not self._video_path:
-            return
-        try:
-            pos = self.player.time_pos or 0
-        except Exception:
-            pos = 0
-
-        name, ok = QInputDialog.getText(
-            self, "Marker", "Naam voor marker:",
-            text=f"Marker {len(self._markers) + 1}"
-        )
-        if ok:
-            marker = {
-                'time': pos,
-                'name': name,
-                'created': datetime.now().isoformat()
-            }
-            self._markers.append(marker)
-            self._markers.sort(key=lambda m: m['time'])
-            save_markers(self._video_path, self._markers)
-            self._refresh_marker_list()
-            self.status.showMessage(f"  Marker '{name}' geplaatst op {format_time(pos)}")
-
     # ── Negative-zone helpers ─────────────────────
 
     def _get_neg_zones(self) -> list:
@@ -3051,10 +3309,7 @@ class CineMarker(QMainWindow):
     def _add_negative_marker(self):
         if not self._video_path:
             return
-        try:
-            pos = self.player.time_pos or 0
-        except Exception:
-            pos = 0
+        pos = self._current_pos()
         marker = {
             'time':       pos,
             'name':       'SKIP',
@@ -3086,53 +3341,6 @@ class CineMarker(QMainWindow):
         # Normale modus: nieuwe film → teller resetten
         self._current_marker_row = -1
         self.marker_list.clear()
-        SZ_A = 26   # actor photo size
-        SZ_C = 22   # category icon size
-        ROW_H = 34
-
-        actor_pix_cache: dict = {}
-        cat_pix_cache:   dict = {}
-
-        def _actor_pix(aid):
-            if aid not in actor_pix_cache:
-                photos = db.get_actor_photos(aid)
-                pix = None
-                if photos:
-                    raw = QPixmap(photos[0]['photo_path'])
-                    if not raw.isNull():
-                        sc = raw.scaled(SZ_A, SZ_A,
-                            Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-                            Qt.TransformationMode.SmoothTransformation)
-                        ox = (sc.width()  - SZ_A) // 2
-                        oy = (sc.height() - SZ_A) // 2
-                        pix = sc.copy(ox, oy, SZ_A, SZ_A)
-                actor_pix_cache[aid] = pix
-            return actor_pix_cache[aid]
-
-        def _cat_pix(cid):
-            if cid not in cat_pix_cache:
-                cats = db.get_categories_by_ids([cid])
-                pix = None
-                if cats:
-                    ip = cats[0].get('icon_path', '')
-                    if ip and os.path.exists(ip):
-                        raw = QPixmap(ip)
-                        if not raw.isNull():
-                            pix = raw.scaled(SZ_C, SZ_C,
-                                Qt.AspectRatioMode.KeepAspectRatio,
-                                Qt.TransformationMode.SmoothTransformation)
-                cat_pix_cache[cid] = pix
-            return cat_pix_cache[cid]
-
-        def _img_label(pix, size, fallback_color):
-            lbl = QLabel()
-            lbl.setFixedSize(size, size)
-            if pix:
-                lbl.setPixmap(pix)
-            else:
-                lbl.setStyleSheet(
-                    f"background:{fallback_color}; border-radius:3px;")
-            return lbl
 
         for idx, m in enumerate(self._markers):
             is_neg = m.get('negative', False)
@@ -3153,15 +3361,17 @@ class CineMarker(QMainWindow):
                 lbl_neg = QLabel("⊘")
                 lbl_neg.setStyleSheet(
                     "color:#cc3333; font-size:16px; font-weight:bold; background:transparent;")
-                lbl_neg.setFixedWidth(SZ_A)
+                lbl_neg.setFixedWidth(self._MARKER_SZ_A)
                 rh.addWidget(lbl_neg)
             else:
                 # Actor photo(s)
                 for aid in (m.get('actors') or []):
-                    rh.addWidget(_img_label(_actor_pix(aid), SZ_A, '#222'))
+                    rh.addWidget(self._marker_img_label(
+                        self._marker_actor_pix(aid), self._MARKER_SZ_A, '#222'))
                 # Category icon(s)
                 for cid in (m.get('categories') or []):
-                    rh.addWidget(_img_label(_cat_pix(cid), SZ_C, '#1a1a2a'))
+                    rh.addWidget(self._marker_img_label(
+                        self._marker_cat_pix(cid), self._MARKER_SZ_C, '#1a1a2a'))
 
             # MM:SS time
             s = int(m.get('time', 0))
@@ -3192,7 +3402,7 @@ class CineMarker(QMainWindow):
             btn_del.clicked.connect(lambda _, i=idx: self._delete_marker_by_index(i))
             rh.addWidget(btn_del)
 
-            item.setSizeHint(QSize(0, ROW_H))
+            item.setSizeHint(QSize(0, self._MARKER_ROW_H))
             self.marker_list.setItemWidget(item, row_w)
 
         # Keep zones in sync whenever markers change
@@ -3214,13 +3424,42 @@ class CineMarker(QMainWindow):
         else:
             if 0 <= row < len(self._markers):
                 t = self._markers[row]['time']
-                self.player.seek(t, 'absolute+exact')
+                # Fase 1: keyframe-seek — toont de dichtstbijzijnde keyframe vrijwel direct
+                try:
+                    self.player.seek(t, 'absolute')
+                except Exception:
+                    pass
+                # Fase 2: exact-seek 80ms later — landing op het precieze frame.
+                # Timer wordt herstart bij snel doorklikken (O/O/P/P), zodat de
+                # exacte seek alleen op de eindstop valt.
+                self._exact_seek_target = t
+                self._exact_seek_timer.start()
         # Panel is a separate top-level window; return keyboard focus to main window
         self.activateWindow()
         self.video_container.setFocus(Qt.FocusReason.OtherFocusReason)
 
-    def _on_marker_jump_btn(self):
-        self._on_marker_jump()
+    def _do_exact_seek(self):
+        """Fase 2 van de marker-jump: land op het precieze frame."""
+        if self._exact_seek_target is not None and self._video_path:
+            try:
+                self.player.seek(self._exact_seek_target, 'absolute+exact')
+            except Exception:
+                pass
+        self._exact_seek_target = None
+
+    def _marker_context_menu(self, pos):
+        """Rechtermuisklik-menu op de marker-lijst."""
+        if self._selection_entries:
+            return  # selectie-modus toont meerdere films — niet bewerken
+        row = self.marker_list.currentRow()
+        if row < 0 or row >= len(self._markers):
+            return
+        menu = QMenu(self)
+        menu.addAction("▶  Spring naar",   self._on_marker_jump)
+        menu.addSeparator()
+        menu.addAction("✎  Hernoem...",    self._on_marker_rename)
+        menu.addAction("✕  Verwijder",     self._on_marker_delete)
+        menu.exec(self.marker_list.mapToGlobal(pos))
 
     def _on_marker_rename(self):
         row = self.marker_list.currentRow()
@@ -3250,7 +3489,7 @@ class CineMarker(QMainWindow):
             return
         path, _ = QFileDialog.getSaveFileName(self, "Exporteer CSV", "", "CSV (*.csv)")
         if path:
-            with open(path, 'w') as f:
+            with open(path, 'w', encoding='utf-8-sig') as f:
                 f.write("Tijdcode,Seconden,Naam,Aangemaakt\n")
                 for m in self._markers:
                     f.write(f"{format_time(m['time'])},{m['time']:.3f},{m['name']},{m.get('created','')}\n")
@@ -3261,10 +3500,7 @@ class CineMarker(QMainWindow):
     def export_thumbnail(self):
         if not self._video_path:
             return
-        try:
-            pos = self.player.time_pos or 0
-        except Exception:
-            pos = 0
+        pos = self._current_pos()
 
         default = str(Path(self._video_path).parent / f"thumb_{format_time(pos).replace(':', '-')}.jpg")
         path, _ = QFileDialog.getSaveFileName(self, "Sla thumbnail op", default, "JPEG (*.jpg);;PNG (*.png)")
@@ -3428,6 +3664,10 @@ class CineMarker(QMainWindow):
 # ─────────────────────────────────────────────
 
 def main():
+    # Migratie van oude locaties naar TE_KOPIEREN/ (eenmalig, stil op de achtergrond)
+    migrate_legacy_data()
+    ensure_data_dirs()
+
     app = QApplication(sys.argv)
     app.setApplicationName("CineMarker")
 

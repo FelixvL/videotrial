@@ -5,18 +5,51 @@ CineMarker Database — SQLite layer voor acteurs, films en scènes
 
 import sqlite3
 import json
+import logging
 import os
+from contextlib import contextmanager
 from pathlib import Path
 
+from paths import DB_PATH, ACTEURFOTOS_DIR
 
-DB_PATH = os.path.join(Path.home(), ".cinemarker.db")
+_log = logging.getLogger('cinemarker.db')
 
 
 def get_connection():
-    conn = sqlite3.connect(DB_PATH)
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(DB_PATH))
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON")
+    # Performance-instellingen — eenmalig per verbinding
+    conn.execute("PRAGMA foreign_keys  = ON")
+    conn.execute("PRAGMA journal_mode  = WAL")       # concurrent reads zonder lock
+    conn.execute("PRAGMA synchronous   = NORMAL")    # veilig maar sneller dan FULL
+    conn.execute("PRAGMA cache_size    = -32000")    # 32 MB page cache in geheugen
+    conn.execute("PRAGMA mmap_size     = 268435456") # 256 MB memory-mapped I/O
+    conn.execute("PRAGMA temp_store    = MEMORY")    # tijdelijke tabellen in RAM
     return conn
+
+
+@contextmanager
+def _db():
+    """Context manager die een verbinding opent en altijd sluit.
+
+    Gebruik dit voor nieuwe/gewijzigde functies zodat verbindingen nooit
+    lekken — ook niet bij een onverwachte uitzondering.
+
+        with _db() as conn:
+            return [dict(r) for r in conn.execute('SELECT ...').fetchall()]
+
+    Voor schrijf-operaties doet de aanroeper zelf conn.commit() zodat het
+    commit-moment expliciet zichtbaar blijft in de code.
+    """
+    conn = get_connection()
+    try:
+        yield conn
+    except Exception:
+        _log.exception('DB-fout')
+        raise
+    finally:
+        conn.close()
 
 
 def init_db():
@@ -89,6 +122,26 @@ def init_db():
     except Exception:
         pass
 
+    # Migration: cached marker counts (avoids reading JSON files on every scan)
+    try:
+        c.execute("ALTER TABLE films ADD COLUMN marker_count     INTEGER DEFAULT 0")
+    except Exception:
+        pass
+    try:
+        c.execute("ALTER TABLE films ADD COLUMN neg_marker_count INTEGER DEFAULT 0")
+    except Exception:
+        pass
+
+    # Migration: cached file stats (avoids fp.stat() on external SSD on every scan)
+    try:
+        c.execute("ALTER TABLE films ADD COLUMN file_size  INTEGER DEFAULT 0")
+    except Exception:
+        pass
+    try:
+        c.execute("ALTER TABLE films ADD COLUMN file_mtime REAL    DEFAULT 0")
+    except Exception:
+        pass
+
     # Migration: film_thumbnails table (multiple thumbnails per film)
     c.executescript("""
         CREATE TABLE IF NOT EXISTS film_thumbnails (
@@ -144,20 +197,6 @@ def get_actor_by_name(name):
     return dict(row) if row else None
 
 
-def get_or_create_actor_by_name(name):
-    conn = get_connection()
-    row = conn.execute("SELECT * FROM actors WHERE name=?", (name,)).fetchone()
-    if row:
-        conn.close()
-        return dict(row)
-    c = conn.cursor()
-    c.execute("INSERT INTO actors (name) VALUES (?)", (name,))
-    actor_id = c.lastrowid
-    conn.commit()
-    conn.close()
-    return {'id': actor_id, 'name': name, 'notes': ''}
-
-
 def import_actors_from_records(records):
     conn = get_connection()
     inserted = 0
@@ -211,11 +250,38 @@ def update_actor_meta(actor_id, meta: dict):
     conn.close()
 
 
-def update_actor(actor_id, name, notes=''):
-    conn = get_connection()
-    conn.execute("UPDATE actors SET name=?, notes=? WHERE id=?", (name, notes, actor_id))
-    conn.commit()
-    conn.close()
+
+def _cleanup_id_from_marker_jsons(field: str, remove_id: int):
+    """Verwijder een actor- of categorie-ID uit alle marker-JSON-bestanden.
+
+    field    = 'actors' of 'categories'
+    remove_id = het ID dat niet meer in de markers mag staan
+
+    Scant de ingestelde filmmap recursief op *_markers.json-bestanden en
+    schrijft alleen terug als er daadwerkelijk iets veranderd is.
+    """
+    film_folder = get_setting('film_folder', '')
+    if not film_folder or not os.path.isdir(film_folder):
+        return
+    try:
+        for p in Path(film_folder).rglob('*_markers.json'):
+            try:
+                data = json.loads(p.read_text(encoding='utf-8'))
+                changed = False
+                for m in data:
+                    lst = m.get(field) or []
+                    if remove_id in lst:
+                        m[field] = [x for x in lst if x != remove_id]
+                        changed = True
+                if changed:
+                    p.write_text(
+                        json.dumps(data, indent=2, ensure_ascii=False),
+                        encoding='utf-8'
+                    )
+            except Exception:
+                pass  # beschadigde of niet-gerelateerde JSON: stil negeren
+    except Exception:
+        pass
 
 
 def delete_actor(actor_id):
@@ -223,40 +289,17 @@ def delete_actor(actor_id):
     conn.execute("DELETE FROM actors WHERE id=?", (actor_id,))
     conn.commit()
     conn.close()
+    # Verwijder actor-ID uit alle marker-JSON-bestanden in de filmmap
+    _cleanup_id_from_marker_jsons('actors', actor_id)
 
 
 # ── Actor Photos ──────────────────────────────
-
-def add_actor_photo(actor_id, photo_path):
-    conn = get_connection()
-    conn.execute("INSERT INTO actor_photos (actor_id, photo_path) VALUES (?, ?)", (actor_id, photo_path))
-    conn.commit()
-    conn.close()
-
 
 def get_actor_photos(actor_id):
     conn = get_connection()
     rows = conn.execute("SELECT * FROM actor_photos WHERE actor_id=?", (actor_id,)).fetchall()
     conn.close()
     return [dict(r) for r in rows]
-
-
-def delete_actor_photo(photo_id):
-    conn = get_connection()
-    conn.execute("DELETE FROM actor_photos WHERE id=?", (photo_id,))
-    conn.commit()
-    conn.close()
-
-
-def import_photos_from_folder(actor_id, folder_path):
-    """Import all image files from a folder for an actor"""
-    exts = {'.jpg', '.jpeg', '.png', '.webp', '.bmp', '.tiff', '.gif'}
-    imported = 0
-    for f in Path(folder_path).iterdir():
-        if f.suffix.lower() in exts:
-            add_actor_photo(actor_id, str(f))
-            imported += 1
-    return imported
 
 
 # ── Films ─────────────────────────────────────
@@ -283,6 +326,107 @@ def get_all_films():
     return [dict(r) for r in rows]
 
 
+def get_all_film_thumbnails_batch() -> dict:
+    """Return {film_id: [path, ...]} voor alle films in één query."""
+    conn = get_connection()
+    rows = conn.execute(
+        "SELECT film_id, path FROM film_thumbnails ORDER BY film_id, id"
+    ).fetchall()
+    conn.close()
+    result: dict = {}
+    for r in rows:
+        result.setdefault(r['film_id'], []).append(r['path'])
+    return result
+
+
+def get_actor_counts_batch() -> dict:
+    """Return {film_id: actor_count} voor alle films in één query."""
+    conn = get_connection()
+    rows = conn.execute(
+        "SELECT film_id, COUNT(*) as cnt FROM actor_films GROUP BY film_id"
+    ).fetchall()
+    conn.close()
+    return {r['film_id']: r['cnt'] for r in rows}
+
+
+def get_actor_film_counts_batch() -> dict:
+    """Return {actor_id: film_count} voor alle acteurs in één query.
+    Gebruikt door de speler-zoekbalk om te sorteren zonder per-acteur DB-queries."""
+    conn = get_connection()
+    rows = conn.execute(
+        "SELECT actor_id, COUNT(*) as cnt FROM actor_films GROUP BY actor_id"
+    ).fetchall()
+    conn.close()
+    return {r['actor_id']: r['cnt'] for r in rows}
+
+
+def get_actor_photos_for_films_batch() -> dict:
+    """Return {film_id: [photo_path, ...]} (max 6 per film) in één query.
+    Gebruikt door de film-delegate zodat paint() geen DB-queries nodig heeft."""
+    conn = get_connection()
+    rows = conn.execute("""
+        SELECT af.film_id, ap.photo_path
+        FROM actor_films af
+        JOIN actor_photos ap ON ap.actor_id = af.actor_id
+        ORDER BY af.film_id, ap.id
+    """).fetchall()
+    conn.close()
+    result: dict = {}
+    for r in rows:
+        lst = result.setdefault(r['film_id'], [])
+        if len(lst) < 6:   # max 6 per film
+            lst.append(r['photo_path'])
+    return result
+
+
+def update_film_file_stats(film_id: int, size: int, mtime: float):
+    """Sla bestandsgrootte en wijzigingsdatum op zodat fp.stat() niet bij elke scan nodig is."""
+    conn = get_connection()
+    conn.execute(
+        "UPDATE films SET file_size=?, file_mtime=? WHERE id=?",
+        (size, mtime, film_id)
+    )
+    conn.commit()
+    conn.close()
+
+
+def update_film_marker_counts(file_path: str, total: int, neg: int):
+    """Sla marker-tellingen op in de DB zodat JSON-reads bij scan niet nodig zijn."""
+    conn = get_connection()
+    conn.execute(
+        "UPDATE films SET marker_count=?, neg_marker_count=? WHERE file_path=?",
+        (total, neg, file_path)
+    )
+    conn.commit()
+    conn.close()
+
+
+def populate_marker_counts_from_json(film_folder: str):
+    """
+    Eenmalige initialisatie: lees JSON-bestanden en vul marker_count /
+    neg_marker_count in de DB voor alle films in film_folder.
+    Wordt alleen gedraaid als er nog films zijn met count=0 én een JSON-bestand.
+    """
+    conn = get_connection()
+    films = conn.execute(
+        "SELECT id, file_path FROM films WHERE marker_count=0"
+    ).fetchall()
+    conn.close()
+
+    for film in films:
+        fp = Path(film['file_path'])
+        mf = fp.parent / f".{fp.stem}_markers.json"
+        if mf.exists():
+            try:
+                markers = json.loads(mf.read_text('utf-8'))
+                total = len(markers)
+                neg   = sum(1 for m in markers if m.get('negative'))
+                if total > 0:
+                    update_film_marker_counts(film['file_path'], total, neg)
+            except Exception:
+                pass
+
+
 def get_film(film_id):
     conn = get_connection()
     row = conn.execute("SELECT * FROM films WHERE id=?", (film_id,)).fetchone()
@@ -291,18 +435,32 @@ def get_film(film_id):
 
 
 def delete_film_by_path(file_path: str):
-    """Remove a film record (and all cascades) by its file path."""
+    """Remove a film record (and all cascades) by its file path.
+    Also deletes the associated thumbnail files from disk."""
     conn = get_connection()
-    conn.execute("DELETE FROM films WHERE file_path=?", (file_path,))
-    conn.commit()
-    conn.close()
-
-
-def update_film_notes(film_id, notes):
-    conn = get_connection()
-    conn.execute("UPDATE films SET notes=? WHERE id=?", (notes, film_id))
-    conn.commit()
-    conn.close()
+    film = conn.execute(
+        "SELECT id FROM films WHERE file_path=?", (file_path,)
+    ).fetchone()
+    if film:
+        # Haal thumbnail-paden op vóór de cascade-delete ze verwijdert
+        thumb_paths = [
+            r['path'] for r in conn.execute(
+                "SELECT path FROM film_thumbnails WHERE film_id=?", (film['id'],)
+            ).fetchall()
+        ]
+        conn.execute("DELETE FROM films WHERE id=?", (film['id'],))
+        conn.commit()
+        conn.close()
+        # Verwijder de fysieke thumbnailbestanden na de DB-commit
+        for path in thumb_paths:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+    else:
+        conn.execute("DELETE FROM films WHERE file_path=?", (file_path,))
+        conn.commit()
+        conn.close()
 
 
 def set_film_thumbnail(film_id, path):
@@ -330,9 +488,18 @@ def get_film_thumbnails(film_id):
 
 def delete_film_thumbnail(thumb_id):
     conn = get_connection()
+    row = conn.execute(
+        "SELECT path FROM film_thumbnails WHERE id=?", (thumb_id,)
+    ).fetchone()
     conn.execute("DELETE FROM film_thumbnails WHERE id=?", (thumb_id,))
     conn.commit()
     conn.close()
+    # Verwijder ook het fysieke bestand
+    if row:
+        try:
+            os.unlink(row['path'])
+        except OSError:
+            pass
 
 
 def set_film_duration(film_id, duration: float):
@@ -382,95 +549,6 @@ def get_actors_for_film(film_id):
     return [dict(r) for r in rows]
 
 
-# ── Scenes ────────────────────────────────────
-
-def create_scene(film_id, title, start_time, end_time, notes=''):
-    conn = get_connection()
-    c = conn.cursor()
-    c.execute("""
-        INSERT INTO scenes (film_id, title, start_time, end_time, notes)
-        VALUES (?, ?, ?, ?, ?)
-    """, (film_id, title, start_time, end_time, notes))
-    scene_id = c.lastrowid
-    conn.commit()
-    conn.close()
-    return scene_id
-
-
-def get_scenes_for_film(film_id):
-    conn = get_connection()
-    rows = conn.execute("""
-        SELECT * FROM scenes WHERE film_id=? ORDER BY start_time
-    """, (film_id,)).fetchall()
-    conn.close()
-    return [dict(r) for r in rows]
-
-
-def get_scenes_for_actor(actor_id):
-    conn = get_connection()
-    rows = conn.execute("""
-        SELECT s.*, f.title as film_title, f.file_path as film_path
-        FROM scenes s
-        JOIN scene_actors sa ON sa.scene_id = s.id
-        JOIN films f ON f.id = s.film_id
-        WHERE sa.actor_id = ?
-        ORDER BY f.title, s.start_time
-    """, (actor_id,)).fetchall()
-    conn.close()
-    return [dict(r) for r in rows]
-
-
-def get_scene(scene_id):
-    conn = get_connection()
-    row = conn.execute("""
-        SELECT s.*, f.title as film_title, f.file_path as film_path
-        FROM scenes s JOIN films f ON f.id = s.film_id
-        WHERE s.id=?
-    """, (scene_id,)).fetchone()
-    conn.close()
-    return dict(row) if row else None
-
-
-def update_scene(scene_id, title, start_time, end_time, notes=''):
-    conn = get_connection()
-    conn.execute("""
-        UPDATE scenes SET title=?, start_time=?, end_time=?, notes=?
-        WHERE id=?
-    """, (title, start_time, end_time, notes, scene_id))
-    conn.commit()
-    conn.close()
-
-
-def update_scene_export_path(scene_id, path):
-    conn = get_connection()
-    conn.execute("UPDATE scenes SET export_path=? WHERE id=?", (path, scene_id))
-    conn.commit()
-    conn.close()
-
-
-def delete_scene(scene_id):
-    conn = get_connection()
-    conn.execute("DELETE FROM scenes WHERE id=?", (scene_id,))
-    conn.commit()
-    conn.close()
-
-
-# ── Scene ↔ Actor links ───────────────────────
-
-def link_scene_actor(scene_id, actor_id):
-    conn = get_connection()
-    conn.execute("INSERT OR IGNORE INTO scene_actors (scene_id, actor_id) VALUES (?, ?)", (scene_id, actor_id))
-    conn.commit()
-    conn.close()
-
-
-def unlink_scene_actor(scene_id, actor_id):
-    conn = get_connection()
-    conn.execute("DELETE FROM scene_actors WHERE scene_id=? AND actor_id=?", (scene_id, actor_id))
-    conn.commit()
-    conn.close()
-
-
 def get_all_categories():
     conn = get_connection()
     rows = conn.execute("SELECT * FROM categories ORDER BY name COLLATE NOCASE").fetchall()
@@ -512,18 +590,8 @@ def delete_category(cat_id):
     conn.execute("DELETE FROM categories WHERE id=?", (cat_id,))
     conn.commit()
     conn.close()
-
-
-def get_actors_for_scene(scene_id):
-    conn = get_connection()
-    rows = conn.execute("""
-        SELECT a.* FROM actors a
-        JOIN scene_actors sa ON sa.actor_id = a.id
-        WHERE sa.scene_id = ?
-        ORDER BY a.name COLLATE NOCASE
-    """, (scene_id,)).fetchall()
-    conn.close()
-    return [dict(r) for r in rows]
+    # Verwijder categorie-ID uit alle marker-JSON-bestanden in de filmmap
+    _cleanup_id_from_marker_jsons('categories', cat_id)
 
 
 # Initialize on import
@@ -537,8 +605,7 @@ def auto_link_actor_photos():
     - Bestaat er al een acteur met die naam?  → foto koppelen als dat nog niet gedaan is.
     - Bestaat de acteur nog niet?             → acteur aanmaken én foto koppelen.
     De bestandsnaam (zonder extensie) is de naam van de acteur."""
-    import os
-    folder = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'acteurfotos')
+    folder = str(ACTEURFOTOS_DIR)
     if not os.path.isdir(folder):
         return
     exts = {'.jpg', '.jpeg', '.png', '.webp', '.bmp', '.gif', '.tiff', '.tif'}

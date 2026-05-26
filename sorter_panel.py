@@ -12,7 +12,7 @@ from PyQt6.QtWidgets import (
     QFileDialog, QFrame, QSizePolicy
 )
 from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QPixmap, QPainter, QKeyEvent
+from PyQt6.QtGui import QPixmap, QPainter
 
 import database as db
 

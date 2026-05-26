@@ -20,6 +20,8 @@ from PyQt6.QtCore import Qt, QSize, QRect, QTimer, pyqtSignal, QThread
 from PyQt6.QtGui import QColor, QFont, QPainter, QPen, QPixmap
 
 import database as db
+from paths import (ensure_volume_id,
+                   SCALED_FILM_THUMBS_DIR, SCALED_ACTOR_GRID_DIR)
 
 
 VIDEO_EXTS = {
@@ -106,27 +108,46 @@ def _parse_size_input(s: str) -> float:
         return 0.0
 
 
-def _count_film_markers(file_path: str) -> int:
-    p = Path(file_path)
-    mf = p.parent / f".{p.stem}_markers.json"
-    if not mf.exists():
-        return 0
+# ─────────────────────────────────────────────
+#  Disk-cache helpers for scaled thumbnails
+# ─────────────────────────────────────────────
+
+def scaled_cache_path(source_path: str, w: int, h: int, cache_dir: Path) -> Path:
+    """Build the disk-cache filename for a scaled thumbnail.
+
+    Format: <stem>_<mtime>_<w>x<h>.jpg
+    Using the source mtime means the cache is automatically bypassed when the
+    source file changes (e.g. a replaced actor photo or updated thumbnail).
+    """
     try:
-        return len(json.loads(mf.read_text('utf-8')))
-    except Exception:
-        return 0
+        mtime = int(os.path.getmtime(source_path))
+    except OSError:
+        mtime = 0
+    stem = Path(source_path).stem[:80]   # cap length for Windows path limit
+    return cache_dir / f"{stem}_{mtime}_{w}x{h}.jpg"
 
 
-def _count_neg_film_markers(file_path: str) -> int:
-    """Count markers with negative=True in the film's markers JSON."""
-    p = Path(file_path)
-    mf = p.parent / f".{p.stem}_markers.json"
-    if not mf.exists():
-        return 0
+def load_scaled_cache(source_path: str, w: int, h: int,
+                      cache_dir: Path) -> 'QPixmap | None':
+    """Return a previously saved scaled QPixmap, or None on cache miss."""
+    cp = scaled_cache_path(source_path, w, h, cache_dir)
+    if cp.exists():
+        pix = QPixmap(str(cp))
+        if not pix.isNull():
+            return pix
+    return None
+
+
+def save_scaled_cache(source_path: str, w: int, h: int,
+                      pixmap: QPixmap, cache_dir: Path) -> None:
+    """Persist a scaled QPixmap to disk so future sessions skip the scaling step."""
+    if pixmap.isNull():
+        return
+    cp = scaled_cache_path(source_path, w, h, cache_dir)
     try:
-        return sum(1 for m in json.loads(mf.read_text('utf-8')) if m.get('negative'))
+        pixmap.save(str(cp), 'JPEG', quality=85)
     except Exception:
-        return 0
+        pass
 
 
 # ─────────────────────────────────────────────
@@ -183,34 +204,44 @@ class FilmGridDelegate(QStyledItemDelegate):
         if key not in self._thumb_cache:
             pix = None
             if path and os.path.exists(path):
-                raw = QPixmap(path)
-                if not raw.isNull():
-                    sc = raw.scaled(w, h,
-                        Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-                        Qt.TransformationMode.SmoothTransformation)
-                    ox = (sc.width()  - w) // 2
-                    oy = (sc.height() - h) // 2
-                    pix = sc.copy(ox, oy, w, h)
+                # Try disk cache first — avoids re-scaling on every session start
+                pix = load_scaled_cache(path, w, h, SCALED_FILM_THUMBS_DIR)
+                if pix is None:
+                    raw = QPixmap(path)
+                    if not raw.isNull():
+                        sc = raw.scaled(w, h,
+                            Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                            Qt.TransformationMode.SmoothTransformation)
+                        ox = (sc.width()  - w) // 2
+                        oy = (sc.height() - h) // 2
+                        pix = sc.copy(ox, oy, w, h)
+                        save_scaled_cache(path, w, h, pix, SCALED_FILM_THUMBS_DIR)
             self._thumb_cache[key] = pix
         return self._thumb_cache[key]
 
-    def _actor_pixmaps(self, film_id: int) -> list:
-        if film_id not in self._actor_cache:
+    def _actor_pixmaps(self, photo_paths: list) -> list:
+        """Laad en schaal acteursfoto's. Input zijn al pre-geladen paden uit item-data."""
+        key = tuple(photo_paths)
+        if key not in self._actor_cache:
             result = []
-            for actor in db.get_actors_for_film(film_id)[:6]:
-                photos = db.get_actor_photos(actor['id'])
-                if photos:
-                    raw = QPixmap(photos[0]['photo_path'])
-                    if not raw.isNull():
-                        sz = ACT_SZ
-                        sc = raw.scaled(sz, sz,
-                            Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-                            Qt.TransformationMode.SmoothTransformation)
-                        ox = (sc.width()  - sz) // 2
-                        oy = (sc.height() - sz) // 2
-                        result.append(sc.copy(ox, oy, sz, sz))
-            self._actor_cache[film_id] = result
-        return self._actor_cache[film_id]
+            sz = ACT_SZ
+            for path in photo_paths[:6]:
+                if path and os.path.exists(path):
+                    pix = load_scaled_cache(path, sz, sz, SCALED_ACTOR_GRID_DIR)
+                    if pix is None:
+                        raw = QPixmap(path)
+                        if not raw.isNull():
+                            sc = raw.scaled(sz, sz,
+                                Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                                Qt.TransformationMode.SmoothTransformation)
+                            ox = (sc.width()  - sz) // 2
+                            oy = (sc.height() - sz) // 2
+                            pix = sc.copy(ox, oy, sz, sz)
+                            save_scaled_cache(path, sz, sz, pix, SCALED_ACTOR_GRID_DIR)
+                    if pix:
+                        result.append(pix)
+            self._actor_cache[key] = result
+        return self._actor_cache[key]
 
     def paint(self, painter, option, index):
         data = index.data(Qt.ItemDataRole.UserRole)
@@ -328,12 +359,12 @@ class FilmGridDelegate(QStyledItemDelegate):
                 Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
                 f'⊘{neg_markers}')
 
-        # Actor photos (bottom-left, above the info bar)
-        film_id = data.get('film_id')
-        if film_id:
+        # Actor photos (bottom-left, above the info bar) — paden uit item-data, geen DB
+        actor_photos = data.get('actor_photos', [])
+        if actor_photos:
             ax = r.x() + 3
             ay = r.bottom() - ACT_SZ - bar_h - 2
-            for ap in self._actor_pixmaps(film_id):
+            for ap in self._actor_pixmaps(actor_photos):
                 painter.drawPixmap(ax, ay, ap)
                 ax += ACT_SZ + 2
 
@@ -424,6 +455,7 @@ class FilmsPanel(QWidget):
         self._build_ui()
         folder = db.get_setting('film_folder', '')
         if folder:
+            ensure_volume_id(folder)   # schrijft .cinedata/volume.id als die er nog niet is
             self._update_folder_label(folder)
             self._scan_folder(folder)
 
@@ -771,6 +803,7 @@ class FilmsPanel(QWidget):
         folder = QFileDialog.getExistingDirectory(self, "Selecteer filmmap")
         if folder:
             db.set_setting('film_folder', folder)
+            ensure_volume_id(folder)   # schrijft .cinedata/volume.id op de SSD
             self._update_folder_label(folder)
             self._scan_folder(folder)
 
@@ -803,6 +836,11 @@ class FilmsPanel(QWidget):
 
         db_films = {f['file_path']: f for f in db.get_all_films()}
 
+        # Batch-queries — één DB-call voor alles, geen per-film queries
+        all_thumbs        = db.get_all_film_thumbnails_batch()       # {film_id: [path]}
+        all_actor_counts  = db.get_actor_counts_batch()              # {film_id: count}
+        all_actor_photos  = db.get_actor_photos_for_films_batch()    # {film_id: [photo_path]}
+
         films = sorted(
             (f for f in folder_path.iterdir() if f.suffix.lower() in VIDEO_EXTS),
             key=lambda f: f.name.lower()
@@ -818,45 +856,53 @@ class FilmsPanel(QWidget):
             if duration == 0:
                 dur_tasks.append((film_id, str(fp)))   # defer to background worker
 
-            # All thumbnails for cycling animation
-            if film_id:
-                _rows = db.get_film_thumbnails(film_id)
-                thumbnails = [r['path'] for r in _rows if os.path.exists(r['path'])]
+            # Thumbnails uit batch — geen extra DB-query
+            if film_id and film_id in all_thumbs:
+                thumbnails = [p for p in all_thumbs[film_id] if os.path.exists(p)]
             else:
                 thumbnails = []
             if not thumbnails and thumbnail and os.path.exists(thumbnail):
                 thumbnails = [thumbnail]
 
-            try:
-                st = fp.stat()
-                size = st.st_size
-                date = st.st_mtime
-            except OSError:
-                size = 0
-                date = 0
+            # Bestandsgrootte + datum uit DB-cache; alleen stat() als nog niet gecached
+            size = db_film.get('file_size',  0) or 0
+            date = db_film.get('file_mtime', 0) or 0
+            if (size == 0 or date == 0):
+                try:
+                    st   = fp.stat()
+                    size = st.st_size
+                    date = st.st_mtime
+                    if film_id:
+                        db.update_film_file_stats(film_id, size, date)
+                except OSError:
+                    pass
 
-            markers     = _count_film_markers(str(fp))
-            neg_markers = _count_neg_film_markers(str(fp))
-            actor_count = len(db.get_actors_for_film(film_id)) if film_id else 0
+            # Marker-tellingen uit DB (geen JSON-read van SSD)
+            markers     = db_film.get('marker_count',     0) or 0
+            neg_markers = db_film.get('neg_marker_count', 0) or 0
+            # Actor-count + foto-paden uit batch (geen DB-queries in paint())
+            actor_count  = all_actor_counts.get(film_id, 0) if film_id else 0
+            actor_photos = all_actor_photos.get(film_id, []) if film_id else []
 
             cw, ch = self._zoom_size()
             item = QListWidgetItem()
             item.setSizeHint(QSize(cw, ch))
             item.setToolTip(fp.stem)
             item.setData(Qt.ItemDataRole.UserRole, {
-                'path':         str(fp),
-                'name':         fp.stem,
-                'thumbnail':    thumbnail,
-                'thumbnails':   thumbnails,
-                'film_id':      film_id,
-                'size':         size,
-                'date':         date,
-                'markers':      markers,
-                'neg_markers':  neg_markers,
-                'duration':     duration,
-                'actor_count':  actor_count,
-                'cell_size':    QSize(cw, ch),
-                'thumb_phase':  random.uniform(0.0, 2.0),
+                'path':          str(fp),
+                'name':          fp.stem,
+                'thumbnail':     thumbnail,
+                'thumbnails':    thumbnails,
+                'film_id':       film_id,
+                'size':          size,
+                'date':          date,
+                'markers':       markers,
+                'neg_markers':   neg_markers,
+                'duration':      duration,
+                'actor_count':   actor_count,
+                'actor_photos':  actor_photos,   # pre-geladen, geen DB-query in paint()
+                'cell_size':     QSize(cw, ch),
+                'thumb_phase':   random.uniform(0.0, 2.0),
             })
             self.film_list.addItem(item)
             self._all_items.append(item)
