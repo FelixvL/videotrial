@@ -16,7 +16,7 @@ from PyQt6.QtWidgets import (
     QFileDialog, QStyledItemDelegate, QStyle, QListView,
     QMenu, QMessageBox
 )
-from PyQt6.QtCore import Qt, QSize, QRect, QTimer, pyqtSignal
+from PyQt6.QtCore import Qt, QSize, QRect, QTimer, pyqtSignal, QThread
 from PyQt6.QtGui import QColor, QFont, QPainter, QPen, QPixmap
 
 import database as db
@@ -127,6 +127,36 @@ def _count_neg_film_markers(file_path: str) -> int:
         return sum(1 for m in json.loads(mf.read_text('utf-8')) if m.get('negative'))
     except Exception:
         return 0
+
+
+# ─────────────────────────────────────────────
+#  Background duration worker
+# ─────────────────────────────────────────────
+
+class _DurationWorker(QThread):
+    """Runs ffprobe for a list of films without a cached duration.
+
+    Emits duration_ready(film_id, file_path, duration_seconds) for each
+    result so the panel can update the item in-place without a full rescan.
+    """
+    duration_ready = pyqtSignal(int, str, float)   # film_id, file_path, seconds
+
+    def __init__(self, tasks: list):
+        """tasks: list of (film_id, file_path) — film_id may be None."""
+        super().__init__()
+        self._tasks = tasks
+        self._stop  = False
+
+    def stop(self):
+        self._stop = True
+
+    def run(self):
+        for film_id, file_path in self._tasks:
+            if self._stop:
+                break
+            dur = _ffprobe_duration(file_path)
+            if dur > 0:
+                self.duration_ready.emit(film_id or -1, file_path, dur)
 
 
 # ─────────────────────────────────────────────
@@ -379,11 +409,12 @@ class FilmsPanel(QWidget):
 
     def __init__(self):
         super().__init__()
-        self._all_items:  list = []
-        self._sort_key:   str  = 'name'
-        self._sort_asc:   bool = True
-        self._sort_btns:  dict = {}
-        self._zoom_level: int  = int(db.get_setting('zoom_films_panel', '0') or '0')
+        self._all_items:      list = []
+        self._sort_key:       str  = 'name'
+        self._sort_asc:       bool = True
+        self._sort_btns:      dict = {}
+        self._zoom_level:     int  = int(db.get_setting('zoom_films_panel', '0') or '0')
+        self._dur_worker:     _DurationWorker | None = None   # background ffprobe worker
         # Filter toggles
         self._flt_1thumb:       bool = False
         self._flt_multithumb:   bool = False
@@ -756,6 +787,12 @@ class FilmsPanel(QWidget):
     # ── Scan ─────────────────────────────────────
 
     def _scan_folder(self, folder):
+        # Stop any running duration worker before rebuilding the list
+        if self._dur_worker and self._dur_worker.isRunning():
+            self._dur_worker.stop()
+            self._dur_worker.wait(500)
+            self._dur_worker = None
+
         self.film_list.clear()
         self._all_items.clear()
         self.film_list.itemDelegate().invalidate_cache()
@@ -771,15 +808,15 @@ class FilmsPanel(QWidget):
             key=lambda f: f.name.lower()
         )
 
+        dur_tasks = []   # (film_id, file_path) pairs that still need ffprobe
+
         for fp in films:
             db_film   = db_films.get(str(fp), {})
             film_id   = db_film.get('id')
             thumbnail = db_film.get('thumbnail', '')
             duration  = db_film.get('duration', 0) or 0
             if duration == 0:
-                duration = _ffprobe_duration(str(fp))
-                if duration > 0 and film_id:
-                    db.set_film_duration(film_id, duration)
+                dur_tasks.append((film_id, str(fp)))   # defer to background worker
 
             # All thumbnails for cycling animation
             if film_id:
@@ -826,6 +863,26 @@ class FilmsPanel(QWidget):
 
         self._sort_and_repopulate()
         self._update_count()
+
+        # Start background ffprobe for films without a cached duration
+        if dur_tasks:
+            self._dur_worker = _DurationWorker(dur_tasks)
+            self._dur_worker.duration_ready.connect(self._on_duration_ready)
+            self._dur_worker.start()
+
+    def _on_duration_ready(self, film_id: int, file_path: str, duration: float):
+        """Called from the background worker when ffprobe returns a duration."""
+        # Persist to DB (film_id == -1 means film not in DB yet — skip DB write)
+        if film_id > 0:
+            db.set_film_duration(film_id, duration)
+        # Update the matching item in the list in-place
+        for item in self._all_items:
+            d = item.data(Qt.ItemDataRole.UserRole)
+            if d and d.get('path') == file_path:
+                d['duration'] = duration
+                item.setData(Qt.ItemDataRole.UserRole, d)
+                break
+        self.film_list.viewport().update()
 
     # ── Filter ───────────────────────────────────
 

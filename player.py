@@ -150,7 +150,8 @@ _HELP_HTML = """
 <tr><td>O</td><td>Vorige marker in de lijst (wraps rond)</td></tr>
 <tr><td>P</td><td>Volgende marker in de lijst (wraps rond)</td></tr>
 <tr><td>X</td><td>Negatieve marker zetten op huidige positie</td></tr>
-<tr><td>[ &nbsp;/&nbsp; ]</td><td>Afspeelsnelheid omlaag / omhoog — −50× … −1× … −0.25 · 0.25 … 1× … 50× · klik knop = reset 1×</td></tr>
+<tr><td>[ &nbsp;/&nbsp; ]</td><td>Afspeelsnelheid omlaag / omhoog — −50× … −1× … −0.25 · 0.25 … 1× … 50×</td></tr>
+<tr><td>\</td><td>Snelheid resetten naar 1× (normaal)</td></tr>
 <tr><td>+ / = &nbsp;/&nbsp; −</td><td>Inzoomen / uitzoomen op video</td></tr>
 <tr><td>0</td><td>Zoom en pan resetten</td></tr>
 <tr><td>T</td><td>Thumbnail exporteren (bestandskeuze)</td></tr>
@@ -1812,7 +1813,7 @@ class CineMarker(QMainWindow):
         self._btn_speed = QPushButton("1×")
         self._btn_speed.setFixedSize(56, 28)
         self._btn_speed.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self._btn_speed.setToolTip("Afspeelsnelheid  [ = langzamer  ] = sneller  klik = reset 1×")
+        self._btn_speed.setToolTip("Afspeelsnelheid  [ = langzamer  ] = sneller  \\ of klik = reset 1×")
         self._btn_speed.clicked.connect(self._reset_speed)
         self._btn_speed.setStyleSheet(
             "QPushButton { background: transparent; border: none; padding: 0;"
@@ -2178,8 +2179,9 @@ class CineMarker(QMainWindow):
         QShortcut(QKeySequence("Ctrl+L"), self).activated.connect(self._show_actor_overlay)
         QShortcut(QKeySequence("Home"), self).activated.connect(self.go_to_start)
         QShortcut(QKeySequence("End"), self).activated.connect(self.go_to_end)
-        QShortcut(QKeySequence("]"), self).activated.connect(self._speed_up)
-        QShortcut(QKeySequence("["), self).activated.connect(self._speed_down)
+        QShortcut(QKeySequence("]"),  self).activated.connect(self._speed_up)
+        QShortcut(QKeySequence("["),  self).activated.connect(self._speed_down)
+        QShortcut(QKeySequence("\\"), self).activated.connect(self._reset_speed)
         QShortcut(QKeySequence("P"),  self).activated.connect(self._shortcut_p)
         QShortcut(QKeySequence("O"),  self).activated.connect(self._shortcut_o)
 
