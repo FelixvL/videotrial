@@ -16,8 +16,9 @@ from PyQt6.QtWidgets import (
     QListWidget, QListWidgetItem, QLineEdit, QFrame,
     QFileDialog, QStyledItemDelegate, QStyle, QListView,
     QMenu, QMessageBox, QDialog, QGroupBox, QCheckBox, QScrollArea,
+    QCompleter,
 )
-from PyQt6.QtCore import Qt, QSize, QRect, QTimer, pyqtSignal, QThread
+from PyQt6.QtCore import Qt, QSize, QRect, QTimer, pyqtSignal, QThread, QStringListModel
 from PyQt6.QtGui import QColor, QFont, QPainter, QPen, QPixmap
 
 import database as db
@@ -507,6 +508,9 @@ class FilmsPanel(QWidget):
         self._flt_actor_groo_max: int | None = None
         self._flt_actor_dec:  set  = set()   # actieve decennia-toetsen  ('7','8','9','0','1')
         self._flt_film_size:  set  = set()   # actieve grootte-buckets  ('S','M','L','XL')
+        self._flt_actors:     set  = set()   # actieve acteur-IDs
+        self._actor_name_map: dict = {}      # display_name -> actor_id
+        self._actor_chip_btns: dict = {}     # actor_id -> QPushButton chip
         # Cache voor cross-entity DB-queries (None = niet actief)
         self._cross_film_ids: set | None = None
         # Weergavemodus
@@ -867,6 +871,37 @@ class FilmsPanel(QWidget):
             b2.addWidget(_btn)
             self._film_size_btns[_bucket] = _btn
 
+        b2.addSpacing(8)
+
+        # Acteurfilter — zoekbalk met autocomplete + chips voor gekozen acteurs
+        lbl_act = QLabel("Acteur:")
+        lbl_act.setStyleSheet("color: #333; font-size: 9px; letter-spacing: 2px;")
+        b2.addWidget(lbl_act)
+
+        self._actor_filter_input = QLineEdit()
+        self._actor_filter_input.setPlaceholderText("naam…")
+        self._actor_filter_input.setFixedSize(110, 22)
+        self._actor_filter_input.setStyleSheet(
+            "QLineEdit{background:#111;border:1px solid #252525;border-radius:3px;"
+            "color:#ccc;font-size:9px;padding:1px 4px;}"
+            "QLineEdit:focus{border-color:#6db8e8;}"
+        )
+        self._actor_completer = QCompleter([], self._actor_filter_input)
+        self._actor_completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+        self._actor_completer.setFilterMode(Qt.MatchFlag.MatchContains)
+        self._actor_filter_input.setCompleter(self._actor_completer)
+        self._actor_filter_input.returnPressed.connect(self._confirm_actor_filter)
+        self._actor_completer.activated.connect(self._on_actor_completer_activated)
+        b2.addWidget(self._actor_filter_input)
+
+        # Container voor acteur-chips (dynamisch)
+        self._actor_chips_container = QWidget()
+        self._actor_chips_container.setStyleSheet("background: transparent;")
+        self._actor_chips_layout = QHBoxLayout(self._actor_chips_container)
+        self._actor_chips_layout.setContentsMargins(0, 0, 0, 0)
+        self._actor_chips_layout.setSpacing(3)
+        b2.addWidget(self._actor_chips_container)
+
         b2.addStretch()
 
         v.addWidget(self._bar2)
@@ -905,9 +940,10 @@ class FilmsPanel(QWidget):
     # ── Tweede balk: dynamische knoppen laden ────
 
     def reload_filter_bar2(self):
-        """Herlaad filmcategorieën en acteurkleuren uit de DB en bouw de knoppen opnieuw."""
+        """Herlaad filmcategorieën, acteurkleuren en acteur-autocomplete uit de DB."""
         self._reload_film_cat_buttons()
         self._reload_actor_kleur_buttons()
+        self._load_actor_autocomplete()
 
     def _reload_film_cat_buttons(self):
         layout = self._film_cat_container.layout()
@@ -958,6 +994,71 @@ class FilmsPanel(QWidget):
             btn.toggled.connect(lambda checked, k=kid: self._toggle_actor_kleur(k, checked))
             layout.addWidget(btn)
             self._actor_kleur_btns[kid] = btn
+
+    def _load_actor_autocomplete(self):
+        """Herlaad acteursnamen voor de autocomplete in de filterbar."""
+        actors = db.get_all_actors()
+        self._actor_name_map.clear()
+        for a in actors:
+            try:
+                meta = json.loads(a.get('notes', '') or '{}')
+            except Exception:
+                meta = {}
+            voornaam   = meta.get('voornaam', '')
+            achternaam = meta.get('achternaam', '')
+            display    = f"{voornaam} {achternaam}".strip() or a.get('name', '')
+            if display:
+                self._actor_name_map[display] = a['id']
+        model = QStringListModel(sorted(self._actor_name_map.keys()))
+        self._actor_completer.setModel(model)
+
+    def _on_actor_completer_activated(self, name: str):
+        """Acteur gekozen via autocomplete-klik."""
+        self._add_actor_filter_by_name(name)
+
+    def _confirm_actor_filter(self):
+        """Enter ingedrukt in acteur-zoekveld: voeg eerste match toe."""
+        text = self._actor_filter_input.text().strip()
+        if not text:
+            return
+        # Exacte match
+        if text in self._actor_name_map:
+            self._add_actor_filter_by_name(text)
+            return
+        # Eerste gedeeltelijke match (case-insensitive)
+        tl = text.lower()
+        for name in self._actor_name_map:
+            if tl in name.lower():
+                self._add_actor_filter_by_name(name)
+                return
+
+    def _add_actor_filter_by_name(self, name: str):
+        actor_id = self._actor_name_map.get(name)
+        if actor_id is None or actor_id in self._flt_actors:
+            self._actor_filter_input.clear()
+            return
+        self._flt_actors.add(actor_id)
+        # Chip-knop aanmaken
+        chip = QPushButton(f"{name}  ×")
+        chip.setFixedHeight(20)
+        chip.setStyleSheet(
+            "QPushButton{background:#001828;border:1px solid #005070;"
+            "border-radius:3px;color:#4db8e8;font-size:9px;padding:0 6px;}"
+            "QPushButton:hover{background:#cc2222;border-color:#cc2222;color:#fff;}"
+        )
+        chip.clicked.connect(lambda _, aid=actor_id: self._remove_actor_filter(aid))
+        self._actor_chips_layout.addWidget(chip)
+        self._actor_chip_btns[actor_id] = chip
+        self._actor_filter_input.clear()
+        self._update_cross_filter()
+
+    def _remove_actor_filter(self, actor_id: int):
+        self._flt_actors.discard(actor_id)
+        chip = self._actor_chip_btns.pop(actor_id, None)
+        if chip:
+            self._actor_chips_layout.removeWidget(chip)
+            chip.deleteLater()
+        self._update_cross_filter()
 
     def _toggle_film_cat(self, cat_id: int, checked: bool):
         if checked:
@@ -1019,6 +1120,10 @@ class FilmsPanel(QWidget):
         if self._flt_actor_dec:
             ad_ids = db.get_film_ids_by_actor_decennia(list(self._flt_actor_dec))
             ids = ad_ids if ids is None else ids & ad_ids
+
+        if self._flt_actors:
+            fa_ids = db.get_film_ids_by_actors(list(self._flt_actors))
+            ids = fa_ids if ids is None else ids & fa_ids
 
         self._cross_film_ids = ids
         self._apply_search_visibility()
@@ -1344,6 +1449,13 @@ class FilmsPanel(QWidget):
             btn.blockSignals(True); btn.setChecked(False); btn.blockSignals(False)
         for btn in self._film_size_btns.values():
             btn.blockSignals(True); btn.setChecked(False); btn.blockSignals(False)
+        # Acteur-chips verwijderen
+        for chip in list(self._actor_chip_btns.values()):
+            self._actor_chips_layout.removeWidget(chip)
+            chip.deleteLater()
+        self._actor_chip_btns.clear()
+        self._flt_actors.clear()
+        self._actor_filter_input.clear()
         self.search_input.clear()          # triggers _filter → _apply_search_visibility
         self._update_filter_buttons()
         self._apply_search_visibility()

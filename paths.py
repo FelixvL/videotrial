@@ -46,11 +46,17 @@ def ensure_volume_id(film_folder: str) -> str:
     """
     import uuid
     cinedata = Path(film_folder) / '.cinedata'
-    cinedata.mkdir(exist_ok=True)
+    try:
+        cinedata.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return ''   # schijf niet beschikbaar — geen volume-ID, geen crash
     vol_file = cinedata / 'volume.id'
-    if not vol_file.exists():
-        vol_file.write_text(str(uuid.uuid4()), encoding='utf-8')
-    return vol_file.read_text(encoding='utf-8').strip()
+    try:
+        if not vol_file.exists():
+            vol_file.write_text(str(uuid.uuid4()), encoding='utf-8')
+        return vol_file.read_text(encoding='utf-8').strip()
+    except OSError:
+        return ''
 
 
 def migrate_legacy_data():

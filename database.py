@@ -948,6 +948,19 @@ def get_film_ids_by_actor_decennia(decennia_keys: list) -> set:
         return {r['film_id'] for r in rows}
 
 
+def get_film_ids_by_actors(actor_ids: list) -> set:
+    """Film-IDs die minstens één van de gegeven acteurs bevatten."""
+    if not actor_ids:
+        return set()
+    with _db() as conn:
+        ph   = ','.join('?' for _ in actor_ids)
+        rows = conn.execute(
+            f"SELECT DISTINCT film_id FROM actor_films WHERE actor_id IN ({ph})",
+            actor_ids
+        ).fetchall()
+        return {r['film_id'] for r in rows}
+
+
 def get_film_ids_by_film_categories(cat_ids: list) -> set:
     """Film-IDs die minstens één van de gegeven filmcategorieën hebben."""
     if not cat_ids:
