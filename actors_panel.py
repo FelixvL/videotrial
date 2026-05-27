@@ -1685,7 +1685,7 @@ class ActorsPanel(QWidget):
             self.grid.addItem(item)
             self._all_items.append(item)
 
-        self._apply_filters()
+        self._apply_sort()   # past ook _apply_filters() toe achteraf
 
     def _toggle_mode(self, checked: bool):
         self._mode = 'buiten_db' if checked else 'in_db'
