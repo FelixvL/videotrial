@@ -808,6 +808,59 @@ class _FilmEditPanel(QWidget):
         sep2.setStyleSheet("QFrame{background:#1e1e1e;max-height:1px;}")
         self._cv.addWidget(sep2)
 
+        # ── Film categorieën ──────────────────────
+        self._cv.addWidget(self._section_lbl("CATEGORIEËN"))
+        all_cats    = db.get_film_categorie_types()
+        active_ids  = db.get_film_category_ids(self._film_id)
+
+        if all_cats:
+            _CAT_OFF = (
+                "QPushButton{background:#111;border:1px solid #1e1e1e;"
+                "border-radius:3px;color:#444;font-size:10px;padding:2px 7px;}"
+                "QPushButton:hover{border-color:#555;color:#aaa;}"
+            )
+            _CAT_ON = (
+                "QPushButton{background:#001818;border:1px solid #004040;"
+                "border-radius:3px;color:#4db8b8;font-size:10px;padding:2px 7px;"
+                "font-weight:bold;}"
+                "QPushButton:hover{border-color:#4db8b8;}"
+            )
+
+            cat_wrap = QWidget(); cat_wrap.setStyleSheet("background:transparent;")
+            cat_flow = QHBoxLayout(cat_wrap)
+            cat_flow.setContentsMargins(0, 0, 0, 0)
+            cat_flow.setSpacing(4)
+
+            def _make_cat_toggle(cat):
+                is_on = cat['id'] in active_ids
+                btn = QPushButton(cat['naam'])
+                btn.setCheckable(True)
+                btn.setChecked(is_on)
+                btn.setStyleSheet(_CAT_ON if is_on else _CAT_OFF)
+
+                def _toggled(checked, cid=cat['id'], b=btn):
+                    b.setStyleSheet(_CAT_ON if checked else _CAT_OFF)
+                    cur = db.get_film_category_ids(self._film_id)
+                    if checked:
+                        cur.add(cid)
+                    else:
+                        cur.discard(cid)
+                    db.set_film_categories(self._film_id, list(cur))
+
+                btn.toggled.connect(_toggled)
+                return btn
+
+            for cat in all_cats:
+                cat_flow.addWidget(_make_cat_toggle(cat))
+            cat_flow.addStretch()
+            self._cv.addWidget(cat_wrap)
+        else:
+            self._cv.addWidget(self._dim_lbl("Geen filmcategorieën aangemaakt"))
+
+        sep3 = QFrame(); sep3.setFrameShape(QFrame.Shape.HLine)
+        sep3.setStyleSheet("QFrame{background:#1e1e1e;max-height:1px;}")
+        self._cv.addWidget(sep3)
+
         # ── Markers ───────────────────────────────
         self._cv.addWidget(self._section_lbl("MARKERS"))
         film = db.get_film(self._film_id)
@@ -2246,7 +2299,6 @@ class CineMarker(QMainWindow):
 
         # Database tab
         self.db_panel = DatabasePanel()
-        self.db_panel.shortcuts_saved.connect(self._reload_shortcuts)
         self.main_tabs.addTab(self.db_panel, "⊞  DATABASE")
 
         # Sorter tab
@@ -3357,12 +3409,26 @@ class CineMarker(QMainWindow):
         pos = self._current_pos()
 
         # Frame opvangen via mpv screenshot naar tijdelijk bestand
+        # 'window' mode respecteert zoom/pan — zelfde als _capture_thumbnail.
         frame_pix = None
         tmp_path: str | None = None
         try:
             import tempfile
             tmp_path = tempfile.mktemp(suffix='.jpg')
-            self.player.command('screenshot-to-file', tmp_path, 'video')
+            # OSD tijdelijk uitzetten zodat het tijdstip niet in het frame gebakken zit
+            try:
+                _old_osd = self.player.osd_level
+                self.player.osd_level = 0
+            except Exception:
+                _old_osd = None
+            try:
+                self.player.command('screenshot-to-file', tmp_path, 'window')
+            finally:
+                if _old_osd is not None:
+                    try:
+                        self.player.osd_level = _old_osd
+                    except Exception:
+                        pass
             if os.path.exists(tmp_path):
                 frame_pix = QPixmap(tmp_path)
             else:
@@ -3999,12 +4065,136 @@ class CineMarker(QMainWindow):
         v.addWidget(tabs, 1)
 
         # ═══════════════════════════════════════
-        #  TAB 1 — Sneltoetsen
+        #  TAB 1 — Sneltoetsen (bewerkbaar)
         # ═══════════════════════════════════════
-        te = QTextEdit()
-        te.setReadOnly(True)
-        te.setHtml(_HELP_HTML)
-        tabs.addTab(te, "Sneltoetsen")
+        sc_page = QWidget()
+        sc_page.setStyleSheet("QWidget { background: #0e0e0e; }")
+        sc_v = QVBoxLayout(sc_page)
+        sc_v.setContentsMargins(0, 0, 0, 0)
+        sc_v.setSpacing(0)
+
+        # Hint + reset-knop boven de lijst
+        sc_top = QWidget()
+        sc_top.setStyleSheet("background:#0d0d0d; border-bottom:1px solid #1e1e1e;")
+        sc_top_h = QHBoxLayout(sc_top)
+        sc_top_h.setContentsMargins(12, 6, 12, 6)
+        sc_top_h.setSpacing(10)
+        sc_hint = QLabel("Meerdere toetsen per actie: komma-gescheiden  (bijv.  <b>M,K</b>)  ·  "
+                         "leeg = deactiveren  ·  Enter of klik buiten veld om op te slaan")
+        sc_hint.setStyleSheet("color:#333; font-size:10px;")
+        sc_top_h.addWidget(sc_hint)
+        sc_top_h.addStretch()
+        sc_btn_reset = QPushButton("↺  Alles resetten")
+        sc_btn_reset.setFixedHeight(26)
+        sc_btn_reset.setStyleSheet(
+            "QPushButton{background:#111;border:1px solid #252525;border-radius:3px;"
+            "color:#444;font-size:10px;padding:0 8px;}"
+            "QPushButton:hover{border-color:#888;color:#aaa;}"
+        )
+        sc_top_h.addWidget(sc_btn_reset)
+        sc_v.addWidget(sc_top)
+
+        # Scrollbaar rij-raster
+        sc_scroll = QScrollArea()
+        sc_scroll.setWidgetResizable(True)
+        sc_scroll.setStyleSheet(
+            "QScrollArea{border:none;background:#0e0e0e;}"
+            "QScrollBar:vertical{background:#0a0a0a;width:8px;}"
+            "QScrollBar::handle:vertical{background:#2a2a2a;border-radius:4px;}"
+        )
+        sc_inner = QWidget()
+        sc_inner.setStyleSheet("background:#0e0e0e;")
+        sc_grid = QGridLayout(sc_inner)
+        sc_grid.setContentsMargins(14, 8, 14, 8)
+        sc_grid.setHorizontalSpacing(12)
+        sc_grid.setVerticalSpacing(2)
+        sc_grid.setColumnStretch(1, 1)
+
+        # Bouw sneltoets-lookup  action_key -> (label, default)
+        _sc_map = {a: (lbl, dflt) for a, lbl, dflt in SHORTCUT_DEFS}
+
+        # Groepen met volgorde
+        _SC_GROUPS = [
+            ("GLOBAAL", [
+                'ontsnappen', 'open_bestand', 'fullscreen', 'acteurs_tonen',
+            ]),
+            ("AFSPELEN  &  NAVIGATIE", [
+                'play_pause', 'links', 'rechts',
+                'skip_voor', 'skip_achter', 'begin', 'einde',
+            ]),
+            ("MARKERS", [
+                'marker', 'neg_marker',
+                'marker_voor', 'marker_achter',
+                'volgende_film', 'thumbnail',
+            ]),
+            ("ZOOM  &  SNELHEID", [
+                'zoom_in', 'zoom_uit', 'zoom_reset',
+                'sneller', 'langzamer', 'reset_speed',
+            ]),
+        ]
+
+        _HDR_SS  = ("color:#444;font-size:9px;letter-spacing:3px;"
+                    "padding:10px 0 3px 0;")
+        _LBL_SS  = "color:#555;font-size:11px;padding:1px 0;"
+        _EDIT_SS = (
+            "QLineEdit{background:#111;border:1px solid #1e1e1e;"
+            "border-radius:3px;color:#e8b86d;font-size:11px;"
+            "padding:2px 5px;}"
+            "QLineEdit:focus{border-color:#e8b86d;}"
+            "QLineEdit:hover{border-color:#333;}"
+        )
+
+        _sc_edits_dlg = []   # (action, QLineEdit, default)
+        grid_row = 0
+
+        for grp_name, actions in _SC_GROUPS:
+            hdr = QLabel(grp_name)
+            hdr.setStyleSheet(_HDR_SS)
+            sc_grid.addWidget(hdr, grid_row, 0, 1, 2)
+            grid_row += 1
+
+            for action in actions:
+                if action not in _sc_map:
+                    continue
+                lbl_txt, default = _sc_map[action]
+                current = db.get_setting(f'shortcut_{action}', default)
+
+                edit = QLineEdit(current)
+                edit.setStyleSheet(_EDIT_SS)
+                edit.setFixedWidth(120)
+                edit.setFixedHeight(22)
+                edit.setPlaceholderText(default)
+                edit.setToolTip(f"Standaard: {default}  ·  meerdere toetsen: komma-gescheiden")
+
+                lbl = QLabel(lbl_txt)
+                lbl.setStyleSheet(_LBL_SS)
+
+                sc_grid.addWidget(edit, grid_row, 0)
+                sc_grid.addWidget(lbl,  grid_row, 1)
+                grid_row += 1
+
+                edit.editingFinished.connect(
+                    lambda a=action, e=edit: (
+                        db.set_setting(f'shortcut_{a}', e.text().strip()),
+                        self._reload_shortcuts(),
+                    )
+                )
+                _sc_edits_dlg.append((action, edit, default))
+
+        sc_scroll.setWidget(sc_inner)
+        sc_v.addWidget(sc_scroll, stretch=1)
+
+        def _reset_all_sc():
+            for action, edit, default in _sc_edits_dlg:
+                edit.blockSignals(True)
+                edit.setText(default)
+                edit.blockSignals(False)
+                db.set_setting(f'shortcut_{action}', default)
+            self._reload_shortcuts()
+
+        sc_btn_reset.clicked.connect(_reset_all_sc)
+
+        tabs.addTab(sc_page, "Sneltoetsen")
 
         # ═══════════════════════════════════════
         #  TAB 2 — Categorieën

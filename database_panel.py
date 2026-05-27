@@ -11,9 +11,8 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel,
     QLineEdit, QTableWidget, QTableWidgetItem, QFrame,
     QMessageBox, QHeaderView, QAbstractItemView, QSplitter,
-    QScrollArea, QGridLayout,
 )
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QColor, QPixmap
 
 import database as db
@@ -101,8 +100,6 @@ SHORTCUT_DEFS = [
 
 class DatabasePanel(QWidget):
 
-    shortcuts_saved = pyqtSignal()   # emitted after shortcut keys are changed
-
     def __init__(self):
         super().__init__()
         self._loading_actors = False
@@ -124,8 +121,7 @@ class DatabasePanel(QWidget):
         splitter.addWidget(self._build_traits_widget())
         splitter.addWidget(self._build_film_cats_widget())
         splitter.addWidget(self._build_kleuren_widget())
-        splitter.addWidget(self._build_shortcuts_widget())
-        splitter.setSizes([400, 200, 160, 160, 120, 260])
+        splitter.setSizes([400, 200, 160, 160, 120])
         v.addWidget(splitter)
 
     # ── Actors widget ────────────────────────────
@@ -935,115 +931,3 @@ class DatabasePanel(QWidget):
             if kid:
                 db.delete_actor_kleur(kid)
         self._load_kleuren()
-
-    # ── Sneltoetsen ───────────────────────────────
-
-    def _build_shortcuts_widget(self):
-        w = QWidget()
-        v = QVBoxLayout(w)
-        v.setContentsMargins(0, 0, 0, 0)
-        v.setSpacing(0)
-
-        # Header bar
-        bar = QFrame()
-        bar.setFixedHeight(44)
-        bar.setStyleSheet(
-            "QFrame { background: #0d0d0d; border-bottom: 1px solid #1e1e1e;"
-            "  border-top: 1px solid #1e1e1e; }"
-        )
-        b = QHBoxLayout(bar)
-        b.setContentsMargins(12, 0, 12, 0)
-        b.setSpacing(10)
-
-        lbl_hdr = QLabel("SNELTOETSEN")
-        lbl_hdr.setStyleSheet("color: #555; font-size: 10px; letter-spacing: 4px;")
-        b.addWidget(lbl_hdr)
-
-        hint = QLabel("Meerdere toetsen per actie: komma-gescheiden  (bijv. M,K)")
-        hint.setStyleSheet("color: #2a2a2a; font-size: 10px;")
-        b.addWidget(hint)
-
-        b.addStretch()
-
-        btn_reset = QPushButton("↺  Standaard")
-        btn_reset.setFixedHeight(28)
-        btn_reset.setStyleSheet(
-            "QPushButton { background: #111; border: 1px solid #252525; border-radius: 3px;"
-            "  color: #444; font-size: 10px; padding: 0 8px; }"
-            "QPushButton:hover { border-color: #888; color: #aaa; }"
-        )
-        btn_reset.clicked.connect(self._reset_shortcuts)
-        b.addWidget(btn_reset)
-
-        v.addWidget(bar)
-
-        # Scrollable grid of label + line-edit
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setStyleSheet(
-            "QScrollArea { border: none; background: #0e0e0e; }"
-            "QScrollBar:vertical { background: #0a0a0a; width: 8px; }"
-            "QScrollBar::handle:vertical { background: #2a2a2a; border-radius: 4px; }"
-        )
-
-        inner = QWidget()
-        inner.setStyleSheet("background: #0e0e0e;")
-        grid = QGridLayout(inner)
-        grid.setContentsMargins(12, 6, 12, 6)
-        grid.setHorizontalSpacing(10)
-        grid.setVerticalSpacing(3)
-        grid.setColumnStretch(0, 2)
-        grid.setColumnStretch(1, 1)
-
-        # Column headers
-        _HDR = "color: #333; font-size: 9px; letter-spacing: 3px; padding-bottom: 4px;"
-        for col_i, txt in enumerate(('ACTIE', 'TOETS(EN)')):
-            h = QLabel(txt)
-            h.setStyleSheet(_HDR)
-            grid.addWidget(h, 0, col_i)
-
-        _EDIT_SS = (
-            "QLineEdit { background: #111; border: 1px solid #1e1e1e; border-radius: 3px;"
-            "  color: #aaa; font-size: 11px; padding: 2px 5px; }"
-            "QLineEdit:focus { border-color: #e8b86d; color: #e8b86d; }"
-        )
-        _LBL_SS = "color: #555; font-size: 11px; padding: 1px 0;"
-
-        self._sc_edits: list = []   # (action, QLineEdit)
-
-        for row_i, (action, label, default) in enumerate(SHORTCUT_DEFS, start=1):
-            lbl = QLabel(label)
-            lbl.setStyleSheet(_LBL_SS)
-
-            current = db.get_setting(f'shortcut_{action}', default)
-            edit = QLineEdit(current)
-            edit.setStyleSheet(_EDIT_SS)
-            edit.setPlaceholderText(default)
-            edit.setToolTip(f"Standaard: {default}  •  meerdere toetsen: komma-gescheiden")
-            edit.setFixedHeight(24)
-            edit.editingFinished.connect(
-                lambda a=action, e=edit: self._save_shortcut(a, e)
-            )
-
-            grid.addWidget(lbl,  row_i, 0)
-            grid.addWidget(edit, row_i, 1)
-            self._sc_edits.append((action, edit))
-
-        scroll.setWidget(inner)
-        v.addWidget(scroll, stretch=1)
-        return w
-
-    def _save_shortcut(self, action: str, edit: QLineEdit):
-        """Sla één sneltoets op en signaleer herladen."""
-        db.set_setting(f'shortcut_{action}', edit.text().strip())
-        self.shortcuts_saved.emit()
-
-    def _reset_shortcuts(self):
-        """Herstel alle sneltoetsen naar standaard."""
-        for action, edit in self._sc_edits:
-            default = next(d for a, _, d in SHORTCUT_DEFS if a == action)
-            edit.blockSignals(True)
-            edit.setText(default)
-            edit.blockSignals(False)
-            db.set_setting(f'shortcut_{action}', default)
-        self.shortcuts_saved.emit()
