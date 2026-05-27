@@ -6,6 +6,7 @@ CineMarker — Films browser panel  (grid view, sortable)
 import os
 import json
 import random
+import re
 import subprocess
 import time
 from pathlib import Path
@@ -21,7 +22,8 @@ from PyQt6.QtGui import QColor, QFont, QPainter, QPen, QPixmap
 
 import database as db
 from paths import (ensure_volume_id,
-                   SCALED_FILM_THUMBS_DIR, SCALED_ACTOR_GRID_DIR)
+                   SCALED_FILM_THUMBS_DIR, SCALED_ACTOR_GRID_DIR,
+                   MARKER_THUMBS_DIR)
 
 
 VIDEO_EXTS = {
@@ -200,9 +202,13 @@ class FilmGridDelegate(QStyledItemDelegate):
         self._thumb_cache: dict = {}
         self._actor_cache: dict = {}   # film_id -> [QPixmap, ...]
         self._tick: int = 0
+        self._marker_mode: bool = False
 
     def set_tick(self, tick: int):
         self._tick = tick
+
+    def set_marker_mode(self, enabled: bool):
+        self._marker_mode = enabled
 
     def invalidate_cache(self):
         self._thumb_cache.clear()
@@ -266,10 +272,6 @@ class FilmGridDelegate(QStyledItemDelegate):
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
 
-        # Thumbnail met 0.2s crossfade tussen switches
-        FADE_DUR = 0.2
-        thumbs   = data.get('thumbnails', [])
-
         def _placeholder():
             painter.fillRect(r, QColor('#0d0d0d'))
             _f = QFont(painter.font())
@@ -278,18 +280,20 @@ class FilmGridDelegate(QStyledItemDelegate):
             painter.setPen(QColor('#252525'))
             painter.drawText(r, Qt.AlignmentFlag.AlignCenter, '▶')
 
-        if len(thumbs) > 1:
-            phase   = data.get('thumb_phase', 0.0)
-            t       = time.time() + phase
-            period  = t % 2.0                          # positie in 2s cyclus
-            idx_cur = int(t / 2.0) % len(thumbs)
-            pix_cur = self._thumb(thumbs[idx_cur], w, h)
-
-            if period > (2.0 - FADE_DUR):
-                # Overgangsfase: fade in de volgende thumbnail
-                fade     = (period - (2.0 - FADE_DUR)) / FADE_DUR   # 0.0 → 1.0
-                idx_next = (idx_cur + 1) % len(thumbs)
-                pix_next = self._thumb(thumbs[idx_next], w, h)
+        def _draw_cycling(imgs, phase, period, fade_dur):
+            """Teken een crossfade-cyclus door een lijst van afbeeldingen."""
+            if not imgs:
+                _placeholder()
+                return
+            t_raw   = time.time() + phase
+            t_mod   = t_raw % period
+            idx_cur = int(t_raw / period) % len(imgs)
+            pix_cur = self._thumb(imgs[idx_cur], w, h)
+            if t_mod > (period - fade_dur):
+                # Overgangsfase: fade in de volgende afbeelding
+                fade     = (t_mod - (period - fade_dur)) / fade_dur   # 0.0 → 1.0
+                idx_next = (idx_cur + 1) % len(imgs)
+                pix_next = self._thumb(imgs[idx_next], w, h)
                 if pix_cur:
                     painter.drawPixmap(r.x(), r.y(), pix_cur)
                 else:
@@ -304,18 +308,37 @@ class FilmGridDelegate(QStyledItemDelegate):
                     painter.drawPixmap(r.x(), r.y(), pix_cur)
                 else:
                     _placeholder()
-        elif thumbs:
-            pix = self._thumb(thumbs[0], w, h)
-            if pix:
-                painter.drawPixmap(r.x(), r.y(), pix)
+
+        if self._marker_mode:
+            # Marker-modus: loop door marker mini-afbeeldingen (2–4s per afbeelding, 0.4s fade)
+            mt = data.get('marker_thumbs', [])
+            if mt:
+                _draw_cycling(mt,
+                              phase    = data.get('marker_phase',  0.0),
+                              period   = data.get('marker_period', 3.0),
+                              fade_dur = 0.4)
             else:
                 _placeholder()
         else:
-            pix = self._thumb(data.get('thumbnail', ''), w, h)
-            if pix:
-                painter.drawPixmap(r.x(), r.y(), pix)
+            # Normale modus: film-thumbnails (2s cyclus, 0.2s fade)
+            thumbs = data.get('thumbnails', [])
+            if len(thumbs) > 1:
+                _draw_cycling(thumbs,
+                              phase    = data.get('thumb_phase', 0.0),
+                              period   = 2.0,
+                              fade_dur = 0.2)
+            elif thumbs:
+                pix = self._thumb(thumbs[0], w, h)
+                if pix:
+                    painter.drawPixmap(r.x(), r.y(), pix)
+                else:
+                    _placeholder()
             else:
-                _placeholder()
+                pix = self._thumb(data.get('thumbnail', ''), w, h)
+                if pix:
+                    painter.drawPixmap(r.x(), r.y(), pix)
+                else:
+                    _placeholder()
 
         # Bottom info bar — always visible
         bar_h = 20
@@ -486,6 +509,8 @@ class FilmsPanel(QWidget):
         self._flt_film_size:  set  = set()   # actieve grootte-buckets  ('S','M','L','XL')
         # Cache voor cross-entity DB-queries (None = niet actief)
         self._cross_film_ids: set | None = None
+        # Weergavemodus
+        self._marker_mode:    bool = False
         self._build_ui()
         self.reload_filter_bar2()   # vul filmcategorieën + kleuren knoppen
         folder = db.get_setting('film_folder', '')
@@ -707,6 +732,21 @@ class FilmsPanel(QWidget):
         btn_zoom_in.clicked.connect(self._zoom_in)
         b.addWidget(btn_zoom_in)
 
+        # ── Marker-modus toggle ───────────────────
+        self._btn_marker_mode = QPushButton("◉")
+        self._btn_marker_mode.setFixedSize(28, 28)
+        self._btn_marker_mode.setCheckable(True)
+        self._btn_marker_mode.setToolTip(
+            "Toon marker mini-afbeeldingen in plaats van film-thumbnails")
+        self._btn_marker_mode.setStyleSheet(
+            "QPushButton{background:#1a1a1a;border:1px solid #2a2a2a;border-radius:4px;"
+            "color:#555;font-size:14px;padding:0;}"
+            "QPushButton:hover{border-color:#6db8e8;color:#6db8e8;}"
+            "QPushButton:checked{background:#001828;border:1px solid #005070;color:#4db8e8;}"
+        )
+        self._btn_marker_mode.toggled.connect(self._toggle_marker_mode)
+        b.addWidget(self._btn_marker_mode)
+
         v.addWidget(bar)
         self._update_sort_buttons()
 
@@ -849,7 +889,7 @@ class FilmsPanel(QWidget):
             "QListWidget::item:selected { background: transparent; }"
         )
         self.film_list.setItemDelegate(FilmGridDelegate())
-        self.film_list.itemDoubleClicked.connect(self._on_double_click)
+        self.film_list.itemActivated.connect(self._on_double_click)
         self.film_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.film_list.customContextMenuRequested.connect(self._show_context_menu)
         v.addWidget(self.film_list, stretch=1)
@@ -1037,6 +1077,15 @@ class FilmsPanel(QWidget):
         self._all_items = items
         self._apply_search_visibility()
 
+    # ── Marker-modus ─────────────────────────────
+
+    def _toggle_marker_mode(self, checked: bool):
+        """Schakel tussen film-thumbnails en marker mini-afbeeldingen."""
+        self._marker_mode = checked
+        delegate = self.film_list.itemDelegate()
+        if hasattr(delegate, 'set_marker_mode'):
+            delegate.set_marker_mode(checked)
+
     # ── Animation ────────────────────────────────
 
     def _anim_tick(self):
@@ -1118,6 +1167,16 @@ class FilmsPanel(QWidget):
         all_actor_counts  = db.get_actor_counts_batch()              # {film_id: count}
         all_actor_photos  = db.get_actor_photos_for_films_batch()    # {film_id: [photo_path]}
 
+        # Pre-scan marker-thumbnails map — groepeer per filmstam
+        # Bestandsnaam-patroon: {film_stem}_{time_ms}_w{THUMB_W}.jpg
+        _mthumbs: dict = {}   # film_stem -> [path, ...]
+        if MARKER_THUMBS_DIR.exists():
+            for _mf in sorted(MARKER_THUMBS_DIR.iterdir()):
+                if _mf.suffix.lower() in ('.jpg', '.jpeg', '.png'):
+                    _m = re.match(r'^(.+)_(\d+)_w\d+$', _mf.stem)
+                    if _m:
+                        _mthumbs.setdefault(_m.group(1), []).append(str(_mf))
+
         films = sorted(
             (f for f in folder_path.iterdir() if f.suffix.lower() in VIDEO_EXTS),
             key=lambda f: f.name.lower()
@@ -1183,6 +1242,9 @@ class FilmsPanel(QWidget):
                 'afgeleide_rating': rating,
                 'cell_size':        QSize(cw, ch),
                 'thumb_phase':      random.uniform(0.0, 2.0),
+                'marker_thumbs':    _mthumbs.get(fp.stem, []),
+                'marker_phase':     random.uniform(0.0, 10.0),
+                'marker_period':    random.uniform(2.0, 4.0),
             })
             self.film_list.addItem(item)
             self._all_items.append(item)
