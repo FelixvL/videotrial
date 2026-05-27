@@ -1467,15 +1467,17 @@ class FilmsPanel(QWidget):
             return
 
         # ── Huidige waarden ophalen ──────────────────
-        film_row    = db.get_film(film_id) or {}
-        pub_datum   = film_row.get('publicatiedatum', '') or ''
-        active_cats = db.get_film_category_ids(film_id)   # set of int
-        all_cats    = db.get_film_categorie_types()        # [{id, naam, icon_path}, ...]
+        film_row         = db.get_film(film_id) or {}
+        pub_datum        = film_row.get('publicatiedatum', '') or ''
+        active_cats      = db.get_film_category_ids(film_id)   # set of int
+        all_cats         = db.get_film_categorie_types()        # [{id, naam, icon_path}, ...]
+        active_actor_ids = {a['id'] for a in db.get_actors_for_film(film_id)}
+        all_actors       = db.get_all_actors()                  # [{id, name, notes, ...}]
 
         # ── Dialog opbouwen ──────────────────────────
         dlg = QDialog(self)
         dlg.setWindowTitle(f"Film bewerken — {film_name}")
-        dlg.setMinimumWidth(380)
+        dlg.setMinimumWidth(420)
         dlg.setStyleSheet("""
             QDialog   { background:#141414; }
             QLabel    { color:#ccc; font-size:12px; }
@@ -1532,6 +1534,52 @@ class FilmsPanel(QWidget):
         else:
             cat_checks = {}
 
+        # Acteurs
+        grp_actors = QGroupBox("ACTEURS")
+        ga = QVBoxLayout(grp_actors)
+        ga.setSpacing(4)
+
+        actor_search = QLineEdit()
+        actor_search.setPlaceholderText("Zoeken op naam…")
+        actor_search.setFixedHeight(26)
+        ga.addWidget(actor_search)
+
+        actor_list = QListWidget()
+        actor_list.setFixedHeight(190)
+        actor_list.setStyleSheet(
+            "QListWidget{background:#1a1a1a;border:1px solid #2a2a2a;border-radius:4px;}"
+            "QListWidget::item{color:#ccc;padding:3px 6px;font-size:11px;}"
+            "QListWidget::item:hover{background:#252525;}"
+            "QListWidget::item:selected{background:transparent;}"
+        )
+
+        for actor in all_actors:
+            try:
+                meta = json.loads(actor.get('notes', '') or '{}')
+            except Exception:
+                meta = {}
+            voornaam   = meta.get('voornaam', '')
+            achternaam = meta.get('achternaam', '')
+            display    = f"{voornaam} {achternaam}".strip() or actor.get('name', '')
+            it = QListWidgetItem(display)
+            it.setFlags(it.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            it.setCheckState(
+                Qt.CheckState.Checked if actor['id'] in active_actor_ids
+                else Qt.CheckState.Unchecked
+            )
+            it.setData(Qt.ItemDataRole.UserRole, actor['id'])
+            actor_list.addItem(it)
+
+        def _filter_actors(q):
+            q = q.strip().lower()
+            for i in range(actor_list.count()):
+                it = actor_list.item(i)
+                it.setHidden(bool(q) and q not in it.text().lower())
+
+        actor_search.textChanged.connect(_filter_actors)
+        ga.addWidget(actor_list)
+        v.addWidget(grp_actors)
+
         # Knoppen
         btn_h = QHBoxLayout()
         btn_cancel = QPushButton("Annuleren")
@@ -1549,9 +1597,21 @@ class FilmsPanel(QWidget):
             db.update_film_publicatiedatum(film_id, datum)
             chosen_ids = [fid for fid, cb in cat_checks.items() if cb.isChecked()]
             db.set_film_categories(film_id, chosen_ids)
+
+            # Acteurs koppelen / ontkoppelen
+            chosen_actors = set()
+            for i in range(actor_list.count()):
+                it = actor_list.item(i)
+                if it.checkState() == Qt.CheckState.Checked:
+                    chosen_actors.add(it.data(Qt.ItemDataRole.UserRole))
+            for aid in chosen_actors - active_actor_ids:
+                db.link_actor_film(aid, film_id)
+            for aid in active_actor_ids - chosen_actors:
+                db.unlink_actor_film(aid, film_id)
+
             dlg.accept()
-            # Filter bar opnieuw laden zodat nieuwe categorietoewijzingen zichtbaar zijn
             self.reload_filter_bar2()
+            self._refresh()   # herlaad grid zodat acteursfoto's en -tellingen kloppen
 
         btn_save.clicked.connect(_save)
         inp_datum.returnPressed.connect(_save)
