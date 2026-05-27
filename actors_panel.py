@@ -189,6 +189,7 @@ class MarkerGridDelegate(QStyledItemDelegate):
 
         # Time bar — bottom
         time_str = data.get('time_str', '')
+        stars    = data.get('stars', 0) or 0
         if time_str:
             bar_h = 16
             bar_r = QRect(r.x(), r.bottom() - bar_h + 1, w, bar_h)
@@ -197,7 +198,22 @@ class MarkerGridDelegate(QStyledItemDelegate):
             bf.setPointSize(7)
             painter.setFont(bf)
             painter.setPen(QColor('#aaaaaa'))
-            painter.drawText(bar_r.adjusted(4, 0, -4, 0),
+            # Stars badge on the right side of the bar
+            if stars > 0:
+                star_str = '★' * stars
+                sf = QFont(painter.font())
+                sf.setPointSize(7)
+                painter.setFont(sf)
+                fm_s = painter.fontMetrics()
+                sw = fm_s.horizontalAdvance(star_str) + 4
+                star_r = QRect(bar_r.right() - sw, bar_r.top(), sw, bar_h)
+                painter.setPen(QColor('#e8b86d'))
+                painter.drawText(star_r, Qt.AlignmentFlag.AlignCenter, star_str)
+                text_r = bar_r.adjusted(4, 0, -sw - 2, 0)
+            else:
+                text_r = bar_r.adjusted(4, 0, -4, 0)
+            painter.setPen(QColor('#aaaaaa'))
+            painter.drawText(text_r,
                 Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
                 time_str)
 
@@ -469,6 +485,42 @@ def format_time(seconds):
 
 
 # ─────────────────────────────────────────────
+#  Wrap-layout helper voor trait-knoppen
+# ─────────────────────────────────────────────
+
+class _WrapLayout(QHBoxLayout):
+    """Eenvoudige horizontale lay-out voor checkbare trait-knoppen.
+    Overschrijdt geen complexe wrap-logica — bij veel traits scrolt de sectie."""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setContentsMargins(0, 0, 0, 0)
+        self.setSpacing(4)
+
+    def clear_buttons(self):
+        while self.count():
+            item = self.takeAt(0)
+            w = item.widget()
+            if w:
+                w.deleteLater()
+
+    def add_trait_btn(self, trait_id: int, naam: str, checked: bool,
+                       on_toggle) -> QPushButton:
+        btn = QPushButton(naam)
+        btn.setCheckable(True)
+        btn.setChecked(checked)
+        btn.setFixedHeight(22)
+        btn.setStyleSheet(
+            "QPushButton{background:#111;border:1px solid #252525;border-radius:3px;"
+            "  color:#555;font-size:9px;padding:0 6px;}"
+            "QPushButton:hover{border-color:#666;color:#999;}"
+            "QPushButton:checked{background:#0a1a0a;border-color:#3a6644;color:#5a9a6a;}"
+        )
+        btn.toggled.connect(lambda checked, tid=trait_id: on_toggle(tid, checked))
+        self.addWidget(btn)
+        return btn
+
+
+# ─────────────────────────────────────────────
 #  Actor Detail View  (full-screen embedded page)
 # ─────────────────────────────────────────────
 
@@ -480,8 +532,7 @@ class ActorDetailView(QWidget):
     marker_jump_requested = pyqtSignal(str, float)
     navigate_requested    = pyqtSignal(int)   # -1 vorige · +1 volgende
 
-    KLEUR_OPTS   = [('', '—'), ('1', 'Wit'), ('2', 'Zwart'), ('3', 'Bruin')]
-    GROOTTE_OPTS = [('', '—')] + [(str(i), '★' * i) for i in range(1, 11)]
+    GROOTTE_OPTS = [('', '—')] + [(str(i), '★' * i) for i in range(1, 6)]
     RATING_OPTS  = [('', '—')] + [(str(i), str(i)) for i in range(1, 10)]
     DEC_OPTS     = ([('', '—')] +
                     [(str(d), f"{d*10}s") for d in range(3, 10)] +
@@ -629,8 +680,6 @@ class ActorDetailView(QWidget):
 
         fg.addWidget(lbl("KLEUR"),    1, 0)
         self.cmb_kleur = QComboBox()
-        for val, text in self.KLEUR_OPTS:
-            self.cmb_kleur.addItem(text, val)
         fg.addWidget(self.cmb_kleur, 1, 1)
 
         fg.addWidget(lbl("GROOTTE"),  1, 2)
@@ -651,7 +700,55 @@ class ActorDetailView(QWidget):
             self.cmb_dec.addItem(text, val)
         fg.addWidget(self.cmb_dec, 2, 3)
 
+        fg.addWidget(lbl("PIEK START"), 3, 0)
+        self.inp_piek_start = QLineEdit()
+        self.inp_piek_start.setPlaceholderText("JJJJ-MM")
+        fg.addWidget(self.inp_piek_start, 3, 1)
+
+        fg.addWidget(lbl("PIEK EIND"),  3, 2)
+        self.inp_piek_eind = QLineEdit()
+        self.inp_piek_eind.setPlaceholderText("JJJJ-MM")
+        fg.addWidget(self.inp_piek_eind, 3, 3)
+
         right.addWidget(fields_frame)
+
+        # ── Traits sectie (sterke / zwakke kanten) ────
+        traits_frame = QFrame()
+        traits_frame.setStyleSheet(
+            "QFrame { background: #111; border: 1px solid #1e1e1e; border-radius: 6px; }"
+        )
+        tv = QVBoxLayout(traits_frame)
+        tv.setContentsMargins(12, 8, 12, 8)
+        tv.setSpacing(6)
+
+        traits_header = QHBoxLayout()
+        lbl_traits = QLabel("KANTEN")
+        lbl_traits.setStyleSheet("color: #444; font-size: 10px; letter-spacing: 3px;")
+        traits_header.addWidget(lbl_traits)
+        traits_header.addStretch()
+        tv.addLayout(traits_header)
+
+        # Sterke kanten
+        lbl_sterk = QLabel("Sterk:")
+        lbl_sterk.setStyleSheet("color: #3a6644; font-size: 9px; letter-spacing: 1px;")
+        tv.addWidget(lbl_sterk)
+
+        self._traits_sterk_widget = QWidget()
+        self._traits_sterk_widget.setStyleSheet("background: transparent;")
+        self._traits_sterk_layout = _WrapLayout(self._traits_sterk_widget)
+        tv.addWidget(self._traits_sterk_widget)
+
+        # Zwakke kanten
+        lbl_zwak = QLabel("Zwak:")
+        lbl_zwak.setStyleSheet("color: #663a3a; font-size: 9px; letter-spacing: 1px;")
+        tv.addWidget(lbl_zwak)
+
+        self._traits_zwak_widget = QWidget()
+        self._traits_zwak_widget.setStyleSheet("background: transparent;")
+        self._traits_zwak_layout = _WrapLayout(self._traits_zwak_widget)
+        tv.addWidget(self._traits_zwak_widget)
+
+        right.addWidget(traits_frame)
 
         # Films linked to this actor — thumbnail grid
         films_frame = QFrame()
@@ -821,15 +918,57 @@ class ActorDetailView(QWidget):
 
         self.inp_voornaam.setText(meta.get('voornaam', ''))
         self.inp_achternaam.setText(meta.get('achternaam', ''))
-        self._set_combo(self.cmb_kleur,   meta.get('kleur', ''))
+        self.inp_piek_start.setText(meta.get('piek_start', ''))
+        self.inp_piek_eind.setText(meta.get('piek_eind', ''))
+        self._reload_kleur_combo(meta.get('kleur', ''))
         self._set_combo(self.cmb_grootte, meta.get('grootte', ''))
         self._set_combo(self.cmb_rating,  meta.get('rating', ''))
         self._set_combo(self.cmb_dec,     meta.get('decennia', ''))
+
+        # Laad traits
+        actor_id = self._actor['id'] if self._actor else None
+        active_traits = db.get_actor_trait_ids(actor_id) if actor_id else set()
+        self._reload_traits(active_traits)
 
         self._refresh_films()
         self._markers_cat_filter  = set()   # reset filter for new actor
         self._markers_film_filter = ''
         self._refresh_markers()
+
+    def _reload_kleur_combo(self, current_val: str):
+        """Herbouw de kleur-combobox dynamisch vanuit de DB."""
+        self.cmb_kleur.blockSignals(True)
+        self.cmb_kleur.clear()
+        self.cmb_kleur.addItem('—', '')
+        for k in db.get_actor_kleuren():
+            self.cmb_kleur.addItem(k['naam'], str(k['id']))
+        self.cmb_kleur.blockSignals(False)
+        self._set_combo(self.cmb_kleur, str(current_val) if current_val else '')
+
+    def _reload_traits(self, active_ids: set):
+        """Herbouw de trait-knoppen vanuit de DB.
+        weergave 'positief' → alleen sterke kanten
+        weergave 'negatief' → alleen zwakke kanten
+        weergave 'beide'    → in beide secties (standaard)
+        """
+        self._traits_sterk_layout.clear_buttons()
+        self._traits_zwak_layout.clear_buttons()
+        self._trait_checks: dict = {}
+
+        for tt in db.get_actor_trait_types():
+            tid      = tt['id']
+            checked  = tid in active_ids
+            weergave = tt.get('type', 'beide')
+            self._trait_checks[tid] = checked
+            if weergave in ('positief', 'beide'):
+                self._traits_sterk_layout.add_trait_btn(
+                    tid, tt['naam'], checked, self._on_trait_toggled)
+            if weergave in ('negatief', 'beide'):
+                self._traits_zwak_layout.add_trait_btn(
+                    tid, tt['naam'], checked, self._on_trait_toggled)
+
+    def _on_trait_toggled(self, trait_id: int, checked: bool):
+        self._trait_checks[trait_id] = checked
 
     def _open_film(self, item):
         f = item.data(Qt.ItemDataRole.UserRole)
@@ -1201,7 +1340,8 @@ class ActorDetailView(QWidget):
 
     def _get_meta(self) -> dict:
         meta = {}
-        for field, w in [('voornaam', self.inp_voornaam), ('achternaam', self.inp_achternaam)]:
+        for field, w in [('voornaam', self.inp_voornaam), ('achternaam', self.inp_achternaam),
+                         ('piek_start', self.inp_piek_start), ('piek_eind', self.inp_piek_eind)]:
             val = w.text().strip()
             if val:
                 meta[field] = val
@@ -1220,6 +1360,9 @@ class ActorDetailView(QWidget):
         else:
             actor_id = db.create_actor(stem)
         db.update_actor_meta(actor_id, meta)
+        # Traits opslaan
+        active_trait_ids = [tid for tid, on in getattr(self, '_trait_checks', {}).items() if on]
+        db.set_actor_traits(actor_id, active_trait_ids)
         self.saved.emit()
         self.back_requested.emit()
 
@@ -1740,10 +1883,20 @@ class ActorsPanel(QWidget):
         if self._sort_key:
             items.sort(key=self._item_sort_key, reverse=self._sort_reverse)
         else:
-            # Zonder sortering: alfabetisch op bestandsnaam
-            items.sort(key=lambda it: (
-                it.data(Qt.ItemDataRole.UserRole) or {}
-            ).get('stem', '').lower())
+            # Standaard: rating ↓, dan aantal films ↓, dan aantal markers ↓, dan naam ↑
+            def _default_key(it):
+                d = it.data(Qt.ItemDataRole.UserRole) or {}
+                meta = d.get('meta', {})
+                rat_s = str(meta.get('rating', '') or '')
+                try:
+                    rat = -int(rat_s)       # negatief → hoog eerst
+                except (ValueError, TypeError):
+                    rat = 1                 # geen rating → achteraan
+                return (rat,
+                        -d.get('film_count',   0),
+                        -d.get('marker_count', 0),
+                        d.get('stem', '').lower())
+            items.sort(key=_default_key)
 
         self._all_items = items
         for item in items:

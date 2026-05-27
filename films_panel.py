@@ -14,7 +14,7 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel,
     QListWidget, QListWidgetItem, QLineEdit, QFrame,
     QFileDialog, QStyledItemDelegate, QStyle, QListView,
-    QMenu, QMessageBox
+    QMenu, QMessageBox, QDialog, QGroupBox, QCheckBox, QScrollArea,
 )
 from PyQt6.QtCore import Qt, QSize, QRect, QTimer, pyqtSignal, QThread
 from PyQt6.QtGui import QColor, QFont, QPainter, QPen, QPixmap
@@ -106,6 +106,15 @@ def _parse_size_input(s: str) -> float:
             return float(sl) * 1_048_576   # default: MB
     except (ValueError, IndexError):
         return 0.0
+
+
+def _film_size_bucket(size_bytes: int) -> str:
+    """Categoriseer bestandsgrootte in S/M/L/XL."""
+    gb = size_bytes / 1_073_741_824
+    if gb < 0.5:  return 'S'
+    if gb < 2.0:  return 'M'
+    if gb < 5.0:  return 'L'
+    return 'XL'
 
 
 # ─────────────────────────────────────────────
@@ -368,6 +377,22 @@ class FilmGridDelegate(QStyledItemDelegate):
                 painter.drawPixmap(ax, ay, ap)
                 ax += ACT_SZ + 2
 
+        # Afgeleide rating badge — top-right corner
+        rating = data.get('afgeleide_rating', 0) or 0
+        if rating > 0:
+            rating_str = f'★{int(rating)}'
+            rf = QFont(painter.font())
+            rf.setPointSize(8)
+            rf.setBold(True)
+            painter.setFont(rf)
+            fm_r  = painter.fontMetrics()
+            rw    = fm_r.horizontalAdvance(rating_str) + 10
+            rh_px = fm_r.height() + 4
+            badge = QRect(r.right() - rw - 2, r.y() + 2, rw, rh_px)
+            painter.fillRect(badge, QColor(0, 0, 0, 180))
+            painter.setPen(QColor('#e8b86d'))
+            painter.drawText(badge, Qt.AlignmentFlag.AlignCenter, rating_str)
+
         # Hover: dim + name (above info bar)
         if hovered and not selected:
             painter.fillRect(r, QColor(0, 0, 0, 80))
@@ -452,7 +477,17 @@ class FilmsPanel(QWidget):
         self._flt_no_thumb:     bool = False
         self._flt_with_markers: bool = False
         self._flt_no_markers:   bool = False
+        # Cross-entity filter state
+        self._flt_film_cats:    set  = set()   # actieve filmcategorie-IDs
+        self._flt_actor_kleur:  set  = set()   # actieve acteurkleur-IDs
+        self._flt_actor_groo_min: int | None = None
+        self._flt_actor_groo_max: int | None = None
+        self._flt_actor_dec:  set  = set()   # actieve decennia-toetsen  ('7','8','9','0','1')
+        self._flt_film_size:  set  = set()   # actieve grootte-buckets  ('S','M','L','XL')
+        # Cache voor cross-entity DB-queries (None = niet actief)
+        self._cross_film_ids: set | None = None
         self._build_ui()
+        self.reload_filter_bar2()   # vul filmcategorieën + kleuren knoppen
         folder = db.get_setting('film_folder', '')
         if folder:
             ensure_volume_id(folder)   # schrijft .cinedata/volume.id als die er nog niet is
@@ -675,6 +710,127 @@ class FilmsPanel(QWidget):
         v.addWidget(bar)
         self._update_sort_buttons()
 
+        # ── Tweede filterbalk: filmcategorieën + acteurkleuren + grootte ──
+        self._bar2 = QFrame()
+        self._bar2.setStyleSheet(
+            "QFrame { background: #0a0a0a; border-bottom: 1px solid #161616; }"
+        )
+        b2 = QHBoxLayout(self._bar2)
+        b2.setContentsMargins(10, 3, 10, 3)
+        b2.setSpacing(6)
+
+        # Label filmcategorieën
+        lbl_fc = QLabel("Cat:")
+        lbl_fc.setStyleSheet("color: #333; font-size: 9px; letter-spacing: 2px;")
+        b2.addWidget(lbl_fc)
+
+        # Container voor filmcategorie-toggles (dynamisch gevuld)
+        self._film_cat_btns: dict = {}   # cat_id -> QPushButton
+        self._film_cat_container = QWidget()
+        self._film_cat_container.setStyleSheet("background: transparent;")
+        _fcc = QHBoxLayout(self._film_cat_container)
+        _fcc.setContentsMargins(0, 0, 0, 0)
+        _fcc.setSpacing(3)
+        b2.addWidget(self._film_cat_container)
+
+        b2.addSpacing(8)
+
+        # Label acteurkleuren
+        lbl_ak = QLabel("Kleur:")
+        lbl_ak.setStyleSheet("color: #333; font-size: 9px; letter-spacing: 2px;")
+        b2.addWidget(lbl_ak)
+
+        # Container voor kleurtoggle-knoppen (dynamisch gevuld)
+        self._actor_kleur_btns: dict = {}   # kleur_id -> QPushButton
+        self._actor_kleur_container = QWidget()
+        self._actor_kleur_container.setStyleSheet("background: transparent;")
+        _akc = QHBoxLayout(self._actor_kleur_container)
+        _akc.setContentsMargins(0, 0, 0, 0)
+        _akc.setSpacing(3)
+        b2.addWidget(self._actor_kleur_container)
+
+        b2.addSpacing(8)
+
+        # Acteur grootte filter (1–5)
+        lbl_ag = QLabel("Grootte:")
+        lbl_ag.setStyleSheet("color: #333; font-size: 9px; letter-spacing: 2px;")
+        b2.addWidget(lbl_ag)
+
+        _ag_style = (
+            "QLineEdit{background:#111;border:1px solid #252525;border-radius:3px;"
+            "color:#b89060;font-size:10px;padding:1px 4px;}"
+            "QLineEdit:focus{border-color:#b89060;}"
+        )
+        self._actor_groo_min = QLineEdit()
+        self._actor_groo_min.setPlaceholderText("min")
+        self._actor_groo_min.setFixedSize(36, 22)
+        self._actor_groo_min.setToolTip("Minimale acteurgrootte (1-5)")
+        self._actor_groo_min.setStyleSheet(_ag_style)
+        self._actor_groo_min.textChanged.connect(self._on_actor_groo_changed)
+        b2.addWidget(self._actor_groo_min)
+
+        _ag_dash = QLabel("–")
+        _ag_dash.setStyleSheet("color:#333;")
+        b2.addWidget(_ag_dash)
+
+        self._actor_groo_max = QLineEdit()
+        self._actor_groo_max.setPlaceholderText("max")
+        self._actor_groo_max.setFixedSize(36, 22)
+        self._actor_groo_max.setToolTip("Maximale acteurgrootte (1-5)")
+        self._actor_groo_max.setStyleSheet(_ag_style)
+        self._actor_groo_max.textChanged.connect(self._on_actor_groo_changed)
+        b2.addWidget(self._actor_groo_max)
+
+        b2.addSpacing(8)
+
+        # Acteur decennia filter
+        lbl_dec = QLabel("Dec:")
+        lbl_dec.setStyleSheet("color: #333; font-size: 9px; letter-spacing: 2px;")
+        b2.addWidget(lbl_dec)
+
+        _dec_ss = (
+            "QPushButton{background:#111;border:1px solid #252525;border-radius:3px;"
+            "color:#444;font-size:9px;padding:0 5px;}"
+            "QPushButton:hover{color:#888;border-color:#444;}"
+            "QPushButton:checked{background:#001828;border-color:#005070;color:#4db8e8;}"
+        )
+        self._actor_dec_btns: dict = {}   # key -> QPushButton
+        for _key, _label in [('7','70s'),('8','80s'),('9','90s'),('0','00s'),('1','10s')]:
+            _btn = QPushButton(_label)
+            _btn.setCheckable(True)
+            _btn.setFixedHeight(22)
+            _btn.setStyleSheet(_dec_ss)
+            _btn.toggled.connect(lambda checked, k=_key: self._toggle_actor_dec(k, checked))
+            b2.addWidget(_btn)
+            self._actor_dec_btns[_key] = _btn
+
+        b2.addSpacing(8)
+
+        # Film-grootte bucket filter (S/M/L/XL)
+        lbl_fgb = QLabel("Gr:")
+        lbl_fgb.setStyleSheet("color: #333; font-size: 9px; letter-spacing: 2px;")
+        b2.addWidget(lbl_fgb)
+
+        _fgb_ss = (
+            "QPushButton{background:#111;border:1px solid #252525;border-radius:3px;"
+            "color:#444;font-size:9px;padding:0 5px;}"
+            "QPushButton:hover{color:#888;border-color:#444;}"
+            "QPushButton:checked{background:#181000;border-color:#504020;color:#b89060;}"
+        )
+        self._film_size_btns: dict = {}   # bucket -> QPushButton
+        for _bucket in ['S', 'M', 'L', 'XL']:
+            _btn = QPushButton(_bucket)
+            _btn.setCheckable(True)
+            _btn.setFixedHeight(22)
+            _btn.setStyleSheet(_fgb_ss)
+            _btn.toggled.connect(lambda checked, bk=_bucket: self._toggle_film_size(bk, checked))
+            b2.addWidget(_btn)
+            self._film_size_btns[_bucket] = _btn
+
+        b2.addStretch()
+
+        v.addWidget(self._bar2)
+
         # ── Grid ─────────────────────────────────
         self.film_list = QListWidget()
         self.film_list.setMouseTracking(True)
@@ -705,6 +861,127 @@ class FilmsPanel(QWidget):
         self._anim_timer.setInterval(33)   # ~30 fps voor vloeiende crossfade
         self._anim_timer.timeout.connect(self._anim_tick)
         self._anim_timer.start()
+
+    # ── Tweede balk: dynamische knoppen laden ────
+
+    def reload_filter_bar2(self):
+        """Herlaad filmcategorieën en acteurkleuren uit de DB en bouw de knoppen opnieuw."""
+        self._reload_film_cat_buttons()
+        self._reload_actor_kleur_buttons()
+
+    def _reload_film_cat_buttons(self):
+        layout = self._film_cat_container.layout()
+        while layout.count():
+            w = layout.takeAt(0).widget()
+            if w:
+                w.deleteLater()
+        self._film_cat_btns.clear()
+
+        for cat in db.get_film_categorie_types():
+            cid = cat['id']
+            btn = QPushButton(cat['naam'])
+            btn.setCheckable(True)
+            btn.setChecked(cid in self._flt_film_cats)
+            btn.setFixedHeight(22)
+            btn.setStyleSheet(
+                "QPushButton{background:#111;border:1px solid #252525;border-radius:3px;"
+                "color:#444;font-size:9px;padding:0 5px;}"
+                "QPushButton:hover{color:#888;border-color:#444;}"
+                "QPushButton:checked{background:#001818;border-color:#004040;color:#4db8b8;}"
+            )
+            btn.toggled.connect(lambda checked, c=cid: self._toggle_film_cat(c, checked))
+            layout.addWidget(btn)
+            self._film_cat_btns[cid] = btn
+
+    def _reload_actor_kleur_buttons(self):
+        layout = self._actor_kleur_container.layout()
+        while layout.count():
+            w = layout.takeAt(0).widget()
+            if w:
+                w.deleteLater()
+        self._actor_kleur_btns.clear()
+
+        for k in db.get_actor_kleuren():
+            kid = k['id']
+            btn = QPushButton(k['naam'])
+            btn.setCheckable(True)
+            btn.setChecked(kid in self._flt_actor_kleur)
+            btn.setFixedHeight(22)
+            hex_col = k.get('hex', '')
+            btn.setStyleSheet(
+                f"QPushButton{{background:#111;border:1px solid #252525;border-radius:3px;"
+                f"color:#444;font-size:9px;padding:0 5px;}}"
+                f"QPushButton:hover{{color:#888;border-color:#444;}}"
+                f"QPushButton:checked{{background:#111;border-color:{hex_col or '#555'};"
+                f"color:{hex_col or '#aaa'};}}"
+            )
+            btn.toggled.connect(lambda checked, k=kid: self._toggle_actor_kleur(k, checked))
+            layout.addWidget(btn)
+            self._actor_kleur_btns[kid] = btn
+
+    def _toggle_film_cat(self, cat_id: int, checked: bool):
+        if checked:
+            self._flt_film_cats.add(cat_id)
+        else:
+            self._flt_film_cats.discard(cat_id)
+        self._update_cross_filter()
+
+    def _toggle_actor_kleur(self, kleur_id: int, checked: bool):
+        if checked:
+            self._flt_actor_kleur.add(kleur_id)
+        else:
+            self._flt_actor_kleur.discard(kleur_id)
+        self._update_cross_filter()
+
+    def _on_actor_groo_changed(self):
+        def _parse(s):
+            try:
+                v = int(s.strip())
+                return v if 1 <= v <= 5 else None
+            except (ValueError, TypeError):
+                return None
+        self._flt_actor_groo_min = _parse(self._actor_groo_min.text())
+        self._flt_actor_groo_max = _parse(self._actor_groo_max.text())
+        self._update_cross_filter()
+
+    def _toggle_actor_dec(self, key: str, checked: bool):
+        if checked:
+            self._flt_actor_dec.add(key)
+        else:
+            self._flt_actor_dec.discard(key)
+        self._update_cross_filter()
+
+    def _toggle_film_size(self, bucket: str, checked: bool):
+        if checked:
+            self._flt_film_size.add(bucket)
+        else:
+            self._flt_film_size.discard(bucket)
+        self._apply_search_visibility()
+
+    def _update_cross_filter(self):
+        """Herbereken de cross-entity film-ID-set en herfilter de lijst."""
+        ids: set | None = None
+
+        if self._flt_film_cats:
+            fc_ids = db.get_film_ids_by_film_categories(list(self._flt_film_cats))
+            ids = fc_ids if ids is None else ids & fc_ids
+
+        if self._flt_actor_kleur:
+            ak_ids = db.get_film_ids_by_actor_kleuren(list(self._flt_actor_kleur))
+            ids = ak_ids if ids is None else ids & ak_ids
+
+        if self._flt_actor_groo_min is not None or self._flt_actor_groo_max is not None:
+            ag_ids = db.get_film_ids_by_actor_grootte(
+                self._flt_actor_groo_min, self._flt_actor_groo_max
+            )
+            ids = ag_ids if ids is None else ids & ag_ids
+
+        if self._flt_actor_dec:
+            ad_ids = db.get_film_ids_by_actor_decennia(list(self._flt_actor_dec))
+            ids = ad_ids if ids is None else ids & ad_ids
+
+        self._cross_film_ids = ids
+        self._apply_search_visibility()
 
     # ── Sort ─────────────────────────────────────
 
@@ -884,25 +1161,28 @@ class FilmsPanel(QWidget):
             actor_count  = all_actor_counts.get(film_id, 0) if film_id else 0
             actor_photos = all_actor_photos.get(film_id, []) if film_id else []
 
+            rating = db_film.get('afgeleide_rating', 0) or 0
+
             cw, ch = self._zoom_size()
             item = QListWidgetItem()
             item.setSizeHint(QSize(cw, ch))
             item.setToolTip(fp.stem)
             item.setData(Qt.ItemDataRole.UserRole, {
-                'path':          str(fp),
-                'name':          fp.stem,
-                'thumbnail':     thumbnail,
-                'thumbnails':    thumbnails,
-                'film_id':       film_id,
-                'size':          size,
-                'date':          date,
-                'markers':       markers,
-                'neg_markers':   neg_markers,
-                'duration':      duration,
-                'actor_count':   actor_count,
-                'actor_photos':  actor_photos,   # pre-geladen, geen DB-query in paint()
-                'cell_size':     QSize(cw, ch),
-                'thumb_phase':   random.uniform(0.0, 2.0),
+                'path':             str(fp),
+                'name':             fp.stem,
+                'thumbnail':        thumbnail,
+                'thumbnails':       thumbnails,
+                'film_id':          film_id,
+                'size':             size,
+                'date':             date,
+                'markers':          markers,
+                'neg_markers':      neg_markers,
+                'duration':         duration,
+                'actor_count':      actor_count,
+                'actor_photos':     actor_photos,
+                'afgeleide_rating': rating,
+                'cell_size':        QSize(cw, ch),
+                'thumb_phase':      random.uniform(0.0, 2.0),
             })
             self.film_list.addItem(item)
             self._all_items.append(item)
@@ -915,6 +1195,16 @@ class FilmsPanel(QWidget):
             self._dur_worker = _DurationWorker(dur_tasks)
             self._dur_worker.duration_ready.connect(self._on_duration_ready)
             self._dur_worker.start()
+
+    def update_film_rating(self, file_path: str, rating: float):
+        """Live-update de afgeleide_rating van één film in de lijst (geen full rescan)."""
+        for item in self._all_items:
+            d = item.data(Qt.ItemDataRole.UserRole)
+            if d and d.get('path') == file_path:
+                d['afgeleide_rating'] = rating
+                item.setData(Qt.ItemDataRole.UserRole, d)
+                break
+        self.film_list.viewport().update()
 
     def _on_duration_ready(self, film_id: int, file_path: str, duration: float):
         """Called from the background worker when ffprobe returns a duration."""
@@ -929,6 +1219,8 @@ class FilmsPanel(QWidget):
                 item.setData(Qt.ItemDataRole.UserRole, d)
                 break
         self.film_list.viewport().update()
+        # Herfilter: nieuw geladen duratie kan zichtbaarheid veranderen
+        self._apply_search_visibility()
 
     # ── Filter ───────────────────────────────────
 
@@ -968,17 +1260,39 @@ class FilmsPanel(QWidget):
         self._flt_no_thumb     = False
         self._flt_with_markers = False
         self._flt_no_markers   = False
+        self._flt_film_cats.clear()
+        self._flt_actor_kleur.clear()
+        self._flt_actor_dec.clear()
+        self._flt_film_size.clear()
+        self._flt_actor_groo_min = None
+        self._flt_actor_groo_max = None
+        self._cross_film_ids     = None
         for w in (self._dur_min_input, self._dur_max_input,
-                  self._sz_min_input,  self._sz_max_input):
+                  self._sz_min_input,  self._sz_max_input,
+                  self._actor_groo_min, self._actor_groo_max):
             w.blockSignals(True)
             w.clear()
             w.blockSignals(False)
+        # Deselect tweede-balk knoppen
+        for btn in self._film_cat_btns.values():
+            btn.blockSignals(True); btn.setChecked(False); btn.blockSignals(False)
+        for btn in self._actor_kleur_btns.values():
+            btn.blockSignals(True); btn.setChecked(False); btn.blockSignals(False)
+        for btn in self._actor_dec_btns.values():
+            btn.blockSignals(True); btn.setChecked(False); btn.blockSignals(False)
+        for btn in self._film_size_btns.values():
+            btn.blockSignals(True); btn.setChecked(False); btn.blockSignals(False)
         self.search_input.clear()          # triggers _filter → _apply_search_visibility
         self._update_filter_buttons()
         self._apply_search_visibility()
 
     def _apply_search_visibility(self):
-        q = self.search_input.text().lower()
+        q     = self.search_input.text().lower()
+        min_s = _parse_duration_input(self._dur_min_input.text())
+        max_s = _parse_duration_input(self._dur_max_input.text())
+        min_b = _parse_size_input(self._sz_min_input.text())
+        max_b = _parse_size_input(self._sz_max_input.text())
+
         for item in self._all_items:
             d    = item.data(Qt.ItemDataRole.UserRole)
             name = d.get('name', '').lower() if d else ''
@@ -988,48 +1302,48 @@ class FilmsPanel(QWidget):
                 item.setHidden(True)
                 continue
 
-            # Thumbnail & marker filters
             if d:
                 thumb_count  = len(d.get('thumbnails', []))
                 marker_count = (d.get('markers', 0) or 0) + (d.get('neg_markers', 0) or 0)
 
                 if self._flt_1thumb and thumb_count != 1:
-                    item.setHidden(True)
-                    continue
+                    item.setHidden(True); continue
                 if self._flt_multithumb and thumb_count <= 1:
-                    item.setHidden(True)
-                    continue
+                    item.setHidden(True); continue
                 if self._flt_no_thumb and thumb_count > 0:
-                    item.setHidden(True)
-                    continue
+                    item.setHidden(True); continue
                 if self._flt_with_markers and marker_count == 0:
-                    item.setHidden(True)
-                    continue
+                    item.setHidden(True); continue
                 if self._flt_no_markers and marker_count > 0:
-                    item.setHidden(True)
-                    continue
+                    item.setHidden(True); continue
 
-                # Duration filter
-                dur   = d.get('duration', 0) or 0
-                min_s = _parse_duration_input(self._dur_min_input.text())
-                max_s = _parse_duration_input(self._dur_max_input.text())
-                if min_s > 0 and dur < min_s:
-                    item.setHidden(True)
-                    continue
-                if max_s > 0 and dur > max_s:
-                    item.setHidden(True)
-                    continue
+                # Duratie-filter — verberg films met onbekende duratie (0) als
+                # er een max-filter actief is, zodat je nooit te-lange films ziet.
+                dur = d.get('duration', 0) or 0
+                if min_s > 0 and dur > 0 and dur < min_s:
+                    item.setHidden(True); continue
+                if max_s > 0:
+                    if dur == 0 or dur > max_s:   # onbekend = verbergen bij max-filter
+                        item.setHidden(True); continue
 
-                # Size filter
-                size_b    = d.get('size', 0) or 0
-                min_bytes = _parse_size_input(self._sz_min_input.text())
-                max_bytes = _parse_size_input(self._sz_max_input.text())
-                if min_bytes > 0 and size_b < min_bytes:
-                    item.setHidden(True)
-                    continue
-                if max_bytes > 0 and size_b > max_bytes:
-                    item.setHidden(True)
-                    continue
+                # Grootte-filter
+                size_b = d.get('size', 0) or 0
+                if min_b > 0 and size_b < min_b:
+                    item.setHidden(True); continue
+                if max_b > 0 and size_b > max_b:
+                    item.setHidden(True); continue
+
+                # Film-grootte bucket filter
+                if self._flt_film_size:
+                    size_b2 = d.get('size', 0) or 0
+                    if _film_size_bucket(size_b2) not in self._flt_film_size:
+                        item.setHidden(True); continue
+
+                # Cross-entity filter (film_id moet in de berekende set zitten)
+                if self._cross_film_ids is not None:
+                    film_id = d.get('film_id')
+                    if film_id not in self._cross_film_ids:
+                        item.setHidden(True); continue
 
             item.setHidden(False)
         self._update_count()
@@ -1050,13 +1364,21 @@ class FilmsPanel(QWidget):
             return
 
         menu = QMenu(self)
+        menu.setStyleSheet(
+            "QMenu { background:#1a1a1a; border:1px solid #333; color:#ccc; font-size:12px; }"
+            "QMenu::item { padding:6px 20px; }"
+            "QMenu::item:selected { background:#2a2200; color:#e8b86d; }"
+        )
         act_play   = menu.addAction("▶  Afspelen")
+        act_edit   = menu.addAction("✎  Bewerk film")
         menu.addSeparator()
         act_delete = menu.addAction("🗑  Verplaats naar map 'deleted'")
 
         chosen = menu.exec(self.film_list.viewport().mapToGlobal(pos))
         if chosen == act_play:
             self.play_requested.emit(d['path'])
+        elif chosen == act_edit:
+            self._show_film_edit_dialog(d)
         elif chosen == act_delete:
             self._confirm_and_delete(item, d)
 
@@ -1075,6 +1397,104 @@ class FilmsPanel(QWidget):
         ok, msg = self.delete_film(d.get('path', ''))
         if not ok:
             QMessageBox.warning(self, "Fout bij verplaatsen", msg)
+
+    def _show_film_edit_dialog(self, d: dict):
+        film_id   = d.get('film_id')
+        film_name = d.get('name', Path(d.get('path', '')).stem)
+        if not film_id:
+            return
+
+        # ── Huidige waarden ophalen ──────────────────
+        film_row    = db.get_film(film_id) or {}
+        pub_datum   = film_row.get('publicatiedatum', '') or ''
+        active_cats = db.get_film_category_ids(film_id)   # set of int
+        all_cats    = db.get_film_categorie_types()        # [{id, naam, icon_path}, ...]
+
+        # ── Dialog opbouwen ──────────────────────────
+        dlg = QDialog(self)
+        dlg.setWindowTitle(f"Film bewerken — {film_name}")
+        dlg.setMinimumWidth(380)
+        dlg.setStyleSheet("""
+            QDialog   { background:#141414; }
+            QLabel    { color:#ccc; font-size:12px; }
+            QLineEdit { background:#1e1e1e; border:1px solid #333; border-radius:4px;
+                        padding:5px 8px; color:#e0e0e0; font-size:12px; }
+            QLineEdit:focus { border-color:#e8b86d; }
+            QGroupBox { color:#555; font-size:10px; letter-spacing:3px;
+                        border:1px solid #1e1e1e; border-radius:4px;
+                        margin-top:6px; padding:8px 10px 6px; }
+            QGroupBox::title { subcontrol-origin:margin; left:8px; padding:0 4px; }
+            QCheckBox { color:#ccc; font-size:12px; spacing:8px; }
+            QCheckBox::indicator { width:14px; height:14px;
+                background:#1e1e1e; border:1px solid #444; border-radius:3px; }
+            QCheckBox::indicator:checked { background:#e8b86d; border-color:#e8b86d; }
+            QPushButton { background:#1e1e1e; border:1px solid #333; border-radius:4px;
+                          padding:6px 20px; color:#ccc; font-size:12px; }
+            QPushButton:hover  { border-color:#e8b86d; color:#e8b86d; }
+            QPushButton#save   { background:#1a1200; border-color:#e8b86d; color:#e8b86d; }
+            QPushButton#save:hover { background:#2a2000; }
+        """)
+
+        v = QVBoxLayout(dlg)
+        v.setContentsMargins(14, 14, 14, 14)
+        v.setSpacing(10)
+
+        # Bestandsnaam (read-only info)
+        lbl_name = QLabel(f"<span style='color:#555;font-size:10px;letter-spacing:2px;'>FILM</span>"
+                          f"<br><span style='color:#ccc;font-size:13px;'>{film_name}</span>")
+        lbl_name.setTextFormat(Qt.TextFormat.RichText)
+        v.addWidget(lbl_name)
+
+        # Publicatiedatum
+        grp_datum = QGroupBox("PUBLICATIEDATUM")
+        gd = QVBoxLayout(grp_datum)
+        hint = QLabel("Formaat: JJJJ  of  JJJJ-MM  of  JJJJ-MM-DD")
+        hint.setStyleSheet("color:#444; font-size:10px;")
+        gd.addWidget(hint)
+        inp_datum = QLineEdit(pub_datum)
+        inp_datum.setPlaceholderText("bijv. 2019  of  2019-03")
+        gd.addWidget(inp_datum)
+        v.addWidget(grp_datum)
+
+        # Film categorieën
+        if all_cats:
+            grp_cats = QGroupBox("FILM CATEGORIEËN")
+            gc = QVBoxLayout(grp_cats)
+            cat_checks: dict = {}
+            for fc in all_cats:
+                cb = QCheckBox(fc['naam'])
+                cb.setChecked(fc['id'] in active_cats)
+                gc.addWidget(cb)
+                cat_checks[fc['id']] = cb
+            v.addWidget(grp_cats)
+        else:
+            cat_checks = {}
+
+        # Knoppen
+        btn_h = QHBoxLayout()
+        btn_cancel = QPushButton("Annuleren")
+        btn_save   = QPushButton("Opslaan")
+        btn_save.setObjectName("save")
+        btn_h.addStretch()
+        btn_h.addWidget(btn_cancel)
+        btn_h.addWidget(btn_save)
+        v.addLayout(btn_h)
+
+        btn_cancel.clicked.connect(dlg.reject)
+
+        def _save():
+            datum = inp_datum.text().strip()
+            db.update_film_publicatiedatum(film_id, datum)
+            chosen_ids = [fid for fid, cb in cat_checks.items() if cb.isChecked()]
+            db.set_film_categories(film_id, chosen_ids)
+            dlg.accept()
+            # Filter bar opnieuw laden zodat nieuwe categorietoewijzingen zichtbaar zijn
+            self.reload_filter_bar2()
+
+        btn_save.clicked.connect(_save)
+        inp_datum.returnPressed.connect(_save)
+
+        dlg.exec()
 
     def delete_film(self, file_path: str) -> tuple:
         """Move film + markers to a 'deleted/' subfolder; remove from DB and list.

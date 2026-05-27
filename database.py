@@ -168,6 +168,76 @@ def init_db():
     except Exception:
         pass
 
+    # Migration: film publicatiedatum + afgeleide_rating
+    try:
+        c.execute("ALTER TABLE films ADD COLUMN publicatiedatum   TEXT DEFAULT ''")
+    except Exception:
+        pass
+    try:
+        c.execute("ALTER TABLE films ADD COLUMN afgeleide_rating  REAL DEFAULT 0")
+    except Exception:
+        pass
+
+    # Migration: categories parent_id (voor subcategorieën)
+    try:
+        c.execute("ALTER TABLE categories ADD COLUMN parent_id INTEGER REFERENCES categories(id)")
+    except Exception:
+        pass
+
+    # Migration: actor_kleuren lookup (seeded met de legacy waarden 1/2/3)
+    c.executescript("""
+        CREATE TABLE IF NOT EXISTS actor_kleuren (
+            id   INTEGER PRIMARY KEY AUTOINCREMENT,
+            naam TEXT NOT NULL,
+            hex  TEXT DEFAULT ''
+        );
+    """)
+    if not c.execute("SELECT COUNT(*) FROM actor_kleuren").fetchone()[0]:
+        c.executemany("INSERT INTO actor_kleuren (id, naam, hex) VALUES (?, ?, ?)", [
+            (1, 'Wit',   '#ffffff'),
+            (2, 'Zwart', '#000000'),
+            (3, 'Bruin', '#8b4513'),
+        ])
+
+    # Migration: actor trait types + actor↔trait koppeltabel
+    c.executescript("""
+        CREATE TABLE IF NOT EXISTS actor_trait_types (
+            id   INTEGER PRIMARY KEY AUTOINCREMENT,
+            naam TEXT NOT NULL,
+            type TEXT NOT NULL DEFAULT 'beide'
+        );
+        CREATE TABLE IF NOT EXISTS actor_traits (
+            actor_id INTEGER NOT NULL REFERENCES actors(id)            ON DELETE CASCADE,
+            trait_id INTEGER NOT NULL REFERENCES actor_trait_types(id) ON DELETE CASCADE,
+            PRIMARY KEY (actor_id, trait_id)
+        );
+    """)
+    # Migration: waarden 'sterk'→'positief', 'zwak'→'negatief' (eenmalig)
+    try:
+        c.execute("UPDATE actor_trait_types SET type='positief' WHERE type='sterk'")
+        c.execute("UPDATE actor_trait_types SET type='negatief' WHERE type='zwak'")
+    except Exception:
+        pass
+
+    # Migration: film categorie types + film↔categorie koppeltabel
+    c.executescript("""
+        CREATE TABLE IF NOT EXISTS film_categorie_types (
+            id        INTEGER PRIMARY KEY AUTOINCREMENT,
+            naam      TEXT NOT NULL,
+            icon_path TEXT DEFAULT ''
+        );
+        CREATE TABLE IF NOT EXISTS film_categorie_links (
+            film_id      INTEGER NOT NULL REFERENCES films(id)               ON DELETE CASCADE,
+            categorie_id INTEGER NOT NULL REFERENCES film_categorie_types(id) ON DELETE CASCADE,
+            PRIMARY KEY (film_id, categorie_id)
+        );
+    """)
+    # Migration: icon_path on film_categorie_types (voor bestaande databases)
+    try:
+        c.execute("ALTER TABLE film_categorie_types ADD COLUMN icon_path TEXT DEFAULT ''")
+    except Exception:
+        pass
+
     conn.commit()
     conn.close()
 
@@ -557,10 +627,13 @@ def get_all_categories():
     return [dict(r) for r in rows]
 
 
-def create_category(name, icon_path=''):
+def create_category(name, icon_path='', parent_id=None):
     conn = get_connection()
     c = conn.cursor()
-    c.execute("INSERT INTO categories (name, icon_path) VALUES (?, ?)", (name, icon_path))
+    c.execute(
+        "INSERT INTO categories (name, icon_path, parent_id) VALUES (?, ?, ?)",
+        (name, icon_path, parent_id)
+    )
     cat_id = c.lastrowid
     conn.commit()
     conn.close()
@@ -597,6 +670,315 @@ def delete_category(cat_id):
 
 # Initialize on import
 init_db()
+
+
+# ── Actor Kleuren ─────────────────────────────
+
+def get_actor_kleuren() -> list:
+    with _db() as conn:
+        return [dict(r) for r in conn.execute(
+            "SELECT * FROM actor_kleuren ORDER BY id"
+        ).fetchall()]
+
+
+def create_actor_kleur(naam: str, hex_color: str = '') -> int:
+    with _db() as conn:
+        cur = conn.execute(
+            "INSERT INTO actor_kleuren (naam, hex) VALUES (?, ?)", (naam, hex_color)
+        )
+        conn.commit()
+        return cur.lastrowid
+
+
+def delete_actor_kleur(kleur_id: int):
+    with _db() as conn:
+        conn.execute("DELETE FROM actor_kleuren WHERE id=?", (kleur_id,))
+        conn.commit()
+
+
+# ── Actor Trait Types ─────────────────────────
+
+def get_actor_trait_types(type_filter: str = None) -> list:
+    """Geeft trait-typen terug.
+    type_filter: None = alle  |  'positief' | 'negatief' | 'beide'
+    Voor de sterke-kanten-weergave: filter op ('positief', 'beide').
+    Voor de zwakke-kanten-weergave: filter op ('negatief', 'beide').
+    """
+    with _db() as conn:
+        if type_filter:
+            rows = conn.execute(
+                "SELECT * FROM actor_trait_types WHERE type=? ORDER BY naam COLLATE NOCASE",
+                (type_filter,)
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM actor_trait_types ORDER BY naam COLLATE NOCASE"
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def create_actor_trait_type(naam: str, type: str = 'beide') -> int:
+    with _db() as conn:
+        cur = conn.execute(
+            "INSERT INTO actor_trait_types (naam, type) VALUES (?, ?)", (naam, type)
+        )
+        conn.commit()
+        return cur.lastrowid
+
+
+def delete_actor_trait_type(trait_id: int):
+    with _db() as conn:
+        conn.execute("DELETE FROM actor_trait_types WHERE id=?", (trait_id,))
+        conn.commit()
+
+
+# ── Actor Traits (actor ↔ trait_type links) ───
+
+def get_actor_trait_ids(actor_id: int) -> set:
+    with _db() as conn:
+        rows = conn.execute(
+            "SELECT trait_id FROM actor_traits WHERE actor_id=?", (actor_id,)
+        ).fetchall()
+        return {r['trait_id'] for r in rows}
+
+
+def set_actor_traits(actor_id: int, trait_ids: list):
+    """Vervang alle traits van een acteur door de gegeven lijst."""
+    with _db() as conn:
+        conn.execute("DELETE FROM actor_traits WHERE actor_id=?", (actor_id,))
+        for tid in trait_ids:
+            conn.execute(
+                "INSERT OR IGNORE INTO actor_traits (actor_id, trait_id) VALUES (?, ?)",
+                (actor_id, tid)
+            )
+        conn.commit()
+
+
+# ── Film Categorie Types ──────────────────────
+
+def get_film_categorie_types() -> list:
+    with _db() as conn:
+        return [dict(r) for r in conn.execute(
+            "SELECT * FROM film_categorie_types ORDER BY naam COLLATE NOCASE"
+        ).fetchall()]
+
+
+def create_film_categorie_type(naam: str, icon_path: str = '') -> int:
+    with _db() as conn:
+        cur = conn.execute(
+            "INSERT INTO film_categorie_types (naam, icon_path) VALUES (?, ?)",
+            (naam, icon_path)
+        )
+        conn.commit()
+        return cur.lastrowid
+
+
+def update_film_categorie_type(cat_id: int, naam: str, icon_path: str = ''):
+    with _db() as conn:
+        conn.execute(
+            "UPDATE film_categorie_types SET naam=?, icon_path=? WHERE id=?",
+            (naam, icon_path, cat_id)
+        )
+        conn.commit()
+
+
+def delete_film_categorie_type(cat_id: int):
+    with _db() as conn:
+        conn.execute("DELETE FROM film_categorie_types WHERE id=?", (cat_id,))
+        conn.commit()
+
+
+# ── Film Categorieën (film ↔ categorie links) ──
+
+def get_film_category_ids(film_id: int) -> set:
+    with _db() as conn:
+        rows = conn.execute(
+            "SELECT categorie_id FROM film_categorie_links WHERE film_id=?", (film_id,)
+        ).fetchall()
+        return {r['categorie_id'] for r in rows}
+
+
+def set_film_categories(film_id: int, cat_ids: list):
+    """Vervang alle filmcategorieën door de gegeven lijst."""
+    with _db() as conn:
+        conn.execute("DELETE FROM film_categorie_links WHERE film_id=?", (film_id,))
+        for cid in cat_ids:
+            conn.execute(
+                "INSERT OR IGNORE INTO film_categorie_links (film_id, categorie_id) VALUES (?, ?)",
+                (film_id, cid)
+            )
+        conn.commit()
+
+
+def get_film_category_ids_batch() -> dict:
+    """Return {film_id: set(categorie_id)} voor alle films in één query."""
+    with _db() as conn:
+        rows = conn.execute(
+            "SELECT film_id, categorie_id FROM film_categorie_links"
+        ).fetchall()
+    result: dict = {}
+    for r in rows:
+        result.setdefault(r['film_id'], set()).add(r['categorie_id'])
+    return result
+
+
+def get_actor_trait_ids_batch() -> dict:
+    """Return {actor_id: set(trait_id)} voor alle acteurs in één query."""
+    with _db() as conn:
+        rows = conn.execute(
+            "SELECT actor_id, trait_id FROM actor_traits"
+        ).fetchall()
+    result: dict = {}
+    for r in rows:
+        result.setdefault(r['actor_id'], set()).add(r['trait_id'])
+    return result
+
+
+def get_actor_metadata_batch() -> dict:
+    """Return {actor_id: {'kleur': str, 'grootte': str, 'decennia': str}}
+    voor alle acteurs in één query."""
+    with _db() as conn:
+        rows = conn.execute("SELECT id, notes FROM actors").fetchall()
+    result: dict = {}
+    for r in rows:
+        try:
+            meta = json.loads(r['notes'] or '{}')
+        except Exception:
+            meta = {}
+        result[r['id']] = {
+            'kleur':    str(meta.get('kleur',    '') or ''),
+            'grootte':  str(meta.get('grootte',  '') or ''),
+            'decennia': str(meta.get('decennia', '') or ''),
+        }
+    return result
+
+
+# ── Cross-entity filter queries ───────────────
+
+def get_film_ids_by_actor_kleuren(kleur_ids: list) -> set:
+    """Film-IDs waar minstens één acteur één van de gegeven kleuren heeft."""
+    if not kleur_ids:
+        return set()
+    kleur_strs = {str(k) for k in kleur_ids}
+    with _db() as conn:
+        actors = conn.execute("SELECT id, notes FROM actors").fetchall()
+        matching = []
+        for a in actors:
+            try:
+                meta = json.loads(a['notes'] or '{}')
+                if str(meta.get('kleur', '')) in kleur_strs:
+                    matching.append(a['id'])
+            except Exception:
+                pass
+        if not matching:
+            return set()
+        ph = ','.join('?' for _ in matching)
+        rows = conn.execute(
+            f"SELECT DISTINCT film_id FROM actor_films WHERE actor_id IN ({ph})", matching
+        ).fetchall()
+        return {r['film_id'] for r in rows}
+
+
+def get_film_ids_by_actor_grootte(min_g: int | None, max_g: int | None) -> set:
+    """Film-IDs waar minstens één acteur grootte binnen het gegeven bereik heeft."""
+    if min_g is None and max_g is None:
+        return set()
+    with _db() as conn:
+        actors = conn.execute("SELECT id, notes FROM actors").fetchall()
+        matching = []
+        for a in actors:
+            try:
+                meta = json.loads(a['notes'] or '{}')
+                g = int(meta.get('grootte', 0) or 0)
+                if g == 0:
+                    continue
+                if min_g is not None and g < min_g:
+                    continue
+                if max_g is not None and g > max_g:
+                    continue
+                matching.append(a['id'])
+            except Exception:
+                pass
+        if not matching:
+            return set()
+        ph = ','.join('?' for _ in matching)
+        rows = conn.execute(
+            f"SELECT DISTINCT film_id FROM actor_films WHERE actor_id IN ({ph})", matching
+        ).fetchall()
+        return {r['film_id'] for r in rows}
+
+
+def get_film_ids_by_actor_traits(trait_ids: list) -> set:
+    """Film-IDs waar minstens één acteur één van de gegeven traits heeft."""
+    if not trait_ids:
+        return set()
+    with _db() as conn:
+        ph = ','.join('?' for _ in trait_ids)
+        rows = conn.execute(f"""
+            SELECT DISTINCT af.film_id
+            FROM actor_films af
+            JOIN actor_traits at2 ON at2.actor_id = af.actor_id
+            WHERE at2.trait_id IN ({ph})
+        """, trait_ids).fetchall()
+        return {r['film_id'] for r in rows}
+
+
+def get_film_ids_by_actor_decennia(decennia_keys: list) -> set:
+    """Film-IDs waar minstens één acteur één van de gegeven decennia-waarden heeft.
+    decennia_keys: list of strings like ['7','8','9','0'] (eerste cijfer van het decennium)."""
+    if not decennia_keys:
+        return set()
+    dec_strs = {str(d) for d in decennia_keys}
+    with _db() as conn:
+        actors = conn.execute("SELECT id, notes FROM actors").fetchall()
+        matching = []
+        for a in actors:
+            try:
+                meta = json.loads(a['notes'] or '{}')
+                if str(meta.get('decennia', '')) in dec_strs:
+                    matching.append(a['id'])
+            except Exception:
+                pass
+        if not matching:
+            return set()
+        ph = ','.join('?' for _ in matching)
+        rows = conn.execute(
+            f"SELECT DISTINCT film_id FROM actor_films WHERE actor_id IN ({ph})", matching
+        ).fetchall()
+        return {r['film_id'] for r in rows}
+
+
+def get_film_ids_by_film_categories(cat_ids: list) -> set:
+    """Film-IDs die minstens één van de gegeven filmcategorieën hebben."""
+    if not cat_ids:
+        return set()
+    with _db() as conn:
+        ph = ','.join('?' for _ in cat_ids)
+        rows = conn.execute(
+            f"SELECT DISTINCT film_id FROM film_categorie_links WHERE categorie_id IN ({ph})",
+            cat_ids
+        ).fetchall()
+        return {r['film_id'] for r in rows}
+
+
+# ── Film publicatiedatum ──────────────────────
+
+def update_film_publicatiedatum(film_id: int, datum: str):
+    conn = get_connection()
+    conn.execute("UPDATE films SET publicatiedatum=? WHERE id=?", (datum, film_id))
+    conn.commit()
+    conn.close()
+
+
+def update_afgeleide_rating(file_path: str, value: float):
+    """Sla de berekende afgeleide rating op (som marker-sterren, max 10)."""
+    conn = get_connection()
+    conn.execute(
+        "UPDATE films SET afgeleide_rating=? WHERE file_path=?",
+        (value, file_path)
+    )
+    conn.commit()
+    conn.close()
 
 
 # ── Auto-link actor photos ────────────────────

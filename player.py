@@ -61,7 +61,7 @@ except OSError:
     sys.exit(1)
 from actors_panel import ActorsPanel
 from films_panel import FilmsPanel
-from database_panel import DatabasePanel
+from database_panel import DatabasePanel, SHORTCUT_DEFS
 from sorter_panel import SorterPanel
 from markers_panel import MarkersPanel
 import database as db
@@ -184,7 +184,6 @@ _HELP_HTML = r"""
 <tr><td>Klik acteur-foto <span class="dim">(overlay)</span></td><td>Acteur selecteren / deselecteren voor marker</td></tr>
 <tr><td>Klik categorie-icoon <span class="dim">(overlay)</span></td><td>Marker aanmaken voor geselecteerde acteurs</td></tr>
 <tr><td>⊡ thumbnail-knop</td><td>Huidig frame opslaan als film-thumbnail</td></tr>
-<tr><td>+ knop <span class="dim">(overlay)</span></td><td>Nieuwe categorie aanmaken</td></tr>
 <tr><td>✕ naast marker</td><td>Marker verwijderen</td></tr>
 </table>
 
@@ -409,12 +408,18 @@ class TimelineSlider(QSlider):
         super().__init__(Qt.Orientation.Horizontal)
         self.setRange(0, 10000)
         self._markers  = []
-        self._neg_zones: list = []   # [(start_frac, end_frac), ...]
+        self._neg_zones:    list = []   # [(start_frac, end_frac), ...]
+        self._marker_fracs: list = []   # [frac, ...]  — gewone markers
         # NoFocus: slider should never steal keyboard focus (shortcuts handle seeking)
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
 
     def set_neg_zones(self, zones: list):
         self._neg_zones = zones
+        self.update()
+
+    def set_marker_fracs(self, fracs: list):
+        """Stel de fractie-posities in van gewone (niet-negatieve) markers."""
+        self._marker_fracs = fracs
         self.update()
 
     def mousePressEvent(self, event):
@@ -448,21 +453,36 @@ class TimelineSlider(QSlider):
             return
         p = QPainter(self)
 
-        # Background
+        val_f    = self.value() / self.maximum() if self.maximum() > 0 else 0
+        played_w = int(val_f * w)
+
+        # 1 — Background
         p.fillRect(0, 0, w, h, QColor('#141414'))
 
-        # Played portion (amber)
-        val_f = self.value() / self.maximum() if self.maximum() > 0 else 0
-        played_w = int(val_f * w)
+        # 2 — Amber progress (non-negative parts)
         if played_w > 0:
             p.fillRect(0, 0, played_w, h, QColor('#e8b86d'))
 
-        # Negative zones — red overlay on top of everything
+        # 3 — Red zones (full extent, unplayed and played alike)
         for start_f, end_f in self._neg_zones:
             x0 = int(start_f * w)
             x1 = int(end_f   * w)
             if x1 > x0:
                 p.fillRect(x0, 0, max(3, x1 - x0), h, QColor('#cc2222'))
+
+        # 4 — Orange re-paint for the portion of each red zone already played
+        #     so the playhead position is visible even inside negative zones
+        if played_w > 0:
+            for start_f, end_f in self._neg_zones:
+                x0 = int(start_f * w)
+                x1 = min(int(end_f * w), played_w)
+                if x1 > x0:
+                    p.fillRect(x0, 0, x1 - x0, h, QColor('#e87800'))
+
+        # 5 — Marker dots (blue ticks, always on top)
+        for frac in self._marker_fracs:
+            x = int(frac * w)
+            p.fillRect(max(0, x - 1), 0, 2, h, QColor('#4488ff'))
 
         p.end()
 
@@ -1075,17 +1095,6 @@ class _FilmActorsOverlay(QWidget):
         )
         self._btn_thumb.clicked.connect(self.thumbnail_requested)
 
-        self._btn_add_cat = QPushButton("+", self)
-        self._btn_add_cat.setFixedSize(self.BTN_W, self.BTN_W)
-        self._btn_add_cat.setToolTip("Categorie toevoegen")
-        self._btn_add_cat.setStyleSheet(
-            "QPushButton { background: #0a0a1a; border: 1px solid #2a2a6b;"
-            "  border-radius: 4px; color: #5555cc; font-size: 18px; font-weight: bold; }"
-            "QPushButton:hover { background: #10103a; border-color: #5555cc; color: #8888ff; }"
-            "QPushButton:pressed { background: #5555cc; color: #fff; }"
-        )
-        self._btn_add_cat.clicked.connect(self._add_category)
-
         self._btn_edit = _HtmlClickLabel(self)
         self._btn_edit.setFixedSize(self.BTN_EDIT_W, self.BTN_W)
         self._btn_edit.setToolTip("Acteurs en thumbnails beheren")
@@ -1114,8 +1123,8 @@ class _FilmActorsOverlay(QWidget):
         return n * (self.CW + self.SPACING) - (self.SPACING if n else 0)
 
     def _total_width(self):
-        # Cat row: icons + (+) button + edit button + spacing + thumb button
-        cat_total = (self._cat_row_width() + self.SPACING + self.BTN_W
+        # Cat row: icons + edit button + spacing + thumb button
+        cat_total = (self._cat_row_width()
                      + self.SPACING + self.BTN_EDIT_W + self.SPACING + self.BTN_TW)
         return self.PAD + max(self._actor_row_width(), cat_total) + self.PAD
 
@@ -1127,9 +1136,6 @@ class _FilmActorsOverlay(QWidget):
         # edit button — just left of the thumbnail button
         edit_x = thumb_x - self.SPACING - self.BTN_EDIT_W
         self._btn_edit.move(edit_x, cat_row_y + (self.CELL_C - self.BTN_W) // 2)
-        # + button — just left of the edit button
-        plus_x = edit_x - self.SPACING - self.BTN_W
-        self._btn_add_cat.move(plus_x, cat_row_y + (self.CELL_C - self.BTN_W) // 2)
 
     # ── Paint ────────────────────────────────────
 
@@ -1327,7 +1333,8 @@ class _FilmActorsOverlay(QWidget):
 
     def _reload_categories(self):
         self._cats.clear(); self._cat_pixes.clear()
-        for cat in db.get_all_categories():
+        # Overlay toont alleen hoofdcategorieën (geen subcategorieën)
+        for cat in [c for c in db.get_all_categories() if not c.get('parent_id')]:
             self._cats.append(cat)
             path = cat.get('icon_path', '')
             pix = None
@@ -1346,19 +1353,6 @@ class _FilmActorsOverlay(QWidget):
         return [a for a in self._actors if a['id'] in self._selected]
 
     # ── Category management ──────────────────────
-
-    def _add_category(self):
-        name, ok = QInputDialog.getText(self, "Categorie toevoegen", "Naam:")
-        if not ok or not name.strip():
-            return
-        icon_path, _ = QFileDialog.getOpenFileName(
-            self, "Kies icoon (optioneel)", "",
-            "Afbeeldingen (*.jpg *.jpeg *.png *.webp *.bmp *.gif *.tiff)"
-        )
-        db.create_category(name.strip(), icon_path)
-        self._reload_categories()
-        self._reposition()
-        self.update()
 
     def _delete_category_menu(self, cat):
         menu = QMenu(self)
@@ -1590,22 +1584,42 @@ class _MarkerQuickDlg(QDialog):
     - Toont alle categorieën — één klik maakt de marker en sluit de popup
     """
 
-    def __init__(self, parent, actors: list, pos: float, frame_pix, categories: list):
+    def __init__(self, parent, actors: list, pos: float, frame_pix, categories: list,
+                 initial_stars: int = 0, show_delete: bool = False,
+                 initial_cat_id: int | None = None):
         super().__init__(parent)
         self.setModal(True)
         self.setWindowFlags(
             Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint
         )
-        self._actors      = list(actors)   # mutable kopie
-        self._pos         = pos
-        self._chosen_cat  = None
-        self._actor_btns  = {}             # id → QPushButton
-        self._build(frame_pix, categories)
+        self._actors           = list(actors)
+        self._pos              = pos
+        self._chosen_cat       = None
+        self._stars            = 0
+        self._deleted          = False
+        self._actor_btns       = {}
+        self._initial_cat_id   = initial_cat_id
+        self._wants_thumbnail  = False
+        # Pre-populate _chosen_cat from the existing category if editing
+        if initial_cat_id is not None:
+            for c in categories:
+                if c['id'] == initial_cat_id:
+                    self._chosen_cat = c
+                    break
+        self._build(frame_pix, categories, show_delete)
+        if initial_stars:
+            self._set_stars(initial_stars)
         self._center_on_parent()
+
+    def was_deleted(self) -> bool:
+        return self._deleted
+
+    def wants_thumbnail(self) -> bool:
+        return self._wants_thumbnail
 
     # ── Opbouw ───────────────────────────────────
 
-    def _build(self, frame_pix, categories):
+    def _build(self, frame_pix, categories, show_delete: bool = False):
         self.setStyleSheet("""
             QDialog   { background:#1a1a1a; border:1px solid #555; border-radius:8px; }
             QLabel    { color:#ccc; }
@@ -1640,6 +1654,22 @@ class _MarkerQuickDlg(QDialog):
             lbl_frame.setAlignment(Qt.AlignmentFlag.AlignCenter)
             v.addWidget(lbl_frame)
 
+            # Thumbnail-toggle knop onder het frame
+            btn_thumb = QPushButton("📷  Als thumbnail opslaan")
+            btn_thumb.setCheckable(True)
+            btn_thumb.setChecked(False)
+            btn_thumb.setStyleSheet(
+                "QPushButton { background:#0d1a2a; border:1px solid #1e4a6e;"
+                "  border-radius:4px; padding:4px 12px; color:#4488cc; font-size:11px; }"
+                "QPushButton:hover  { background:#142233; border-color:#4488cc; color:#66aaee; }"
+                "QPushButton:checked { background:#1a3a5a; border:2px solid #4488ff;"
+                "  color:#88ccff; font-weight:bold; }"
+            )
+            def _toggle_thumb(checked, _btn=btn_thumb):
+                self._wants_thumbnail = checked
+            btn_thumb.toggled.connect(_toggle_thumb)
+            v.addWidget(btn_thumb, alignment=Qt.AlignmentFlag.AlignLeft)
+
         # ── Acteurs (deselecteerbaar) ──
         actors_h = QHBoxLayout()
         actors_h.setSpacing(6)
@@ -1654,35 +1684,139 @@ class _MarkerQuickDlg(QDialog):
         actors_h.addStretch()
         v.addLayout(actors_h)
 
+        # ── Sterren (0-5, optioneel) ──
+        stars_h = QHBoxLayout()
+        stars_h.setSpacing(4)
+        lbl_stars = QLabel("Score:")
+        lbl_stars.setStyleSheet("color:#666; font-size:10px;")
+        stars_h.addWidget(lbl_stars)
+        self._star_btns = []
+        for n in range(1, 6):
+            sb = QPushButton("★")
+            sb.setFixedSize(28, 28)
+            sb.setCheckable(True)
+            sb.setStyleSheet(
+                "QPushButton{background:transparent;border:none;color:#444;font-size:14px;padding:0;}"
+                "QPushButton:hover{color:#e8b86d;}"
+                "QPushButton:checked{color:#e8b86d;background:transparent;border:none;}"
+            )
+            sb.clicked.connect(lambda _, num=n: self._set_stars(num))
+            stars_h.addWidget(sb)
+            self._star_btns.append(sb)
+        stars_h.addStretch()
+        v.addLayout(stars_h)
+
         # ── Scheidingslijn ──
         sep = QFrame()
         sep.setFrameShape(QFrame.Shape.HLine)
         sep.setStyleSheet("color:#333;")
         v.addWidget(sep)
 
-        # ── Categorie-knoppen ──
+        # ── Categorie-knoppen (gegroepeerd per hoofdcategorie) ──
         lbl = QLabel("Kies een categorie:")
         lbl.setStyleSheet("color:#888; font-size:11px;")
         v.addWidget(lbl)
 
-        grid = QGridLayout()
-        grid.setSpacing(6)
-        cols = 4
-        for i, cat in enumerate(categories):
+        roots = [c for c in categories if not c.get('parent_id')]
+        subs  = {c['id']: [] for c in roots}
+        for c in categories:
+            pid = c.get('parent_id')
+            if pid and pid in subs:
+                subs[pid].append(c)
+
+        cat_container = QWidget()
+        cat_v = QVBoxLayout(cat_container)
+        cat_v.setContentsMargins(0, 0, 0, 0)
+        cat_v.setSpacing(6)
+
+        SUB_SS = (
+            "QPushButton { background:#1e1200; color:#e8b86d; "
+            "  border:1px solid #4a3800; border-radius:4px; "
+            "  padding:5px 10px; font-size:12px; }"
+            "QPushButton:hover  { background:#2a1a00; border-color:#e8b86d; }"
+            "QPushButton:pressed { background:#e8b86d; color:#000; }"
+        )
+        ACTIVE_SS = (
+            "QPushButton { background:#2a2000; color:#e8b86d; "
+            "  border:2px solid #e8b86d; border-radius:4px; "
+            "  padding:5px 10px; font-size:12px; font-weight:bold; }"
+            "QPushButton:hover  { background:#3a2e00; }"
+            "QPushButton:pressed { background:#e8b86d; color:#000; }"
+        )
+
+        self._cat_btns = {}   # cat_id -> QPushButton, for highlighting
+
+        def _cat_btn(cat):
             btn = QPushButton(cat['name'])
             ip = cat.get('icon_path', '')
             if ip and os.path.exists(ip):
                 btn.setIcon(QIcon(ip))
                 btn.setIconSize(QSize(20, 20))
+            # Highlight if this is the currently selected category
+            if cat['id'] == self._initial_cat_id:
+                btn.setStyleSheet(ACTIVE_SS)
             btn.clicked.connect(lambda _, c=cat: self._choose(c))
-            grid.addWidget(btn, i // cols, i % cols)
-        v.addLayout(grid)
+            self._cat_btns[cat['id']] = btn
+            return btn
 
-        # ── Annuleren ──
+        for root in roots:
+            row_h = QHBoxLayout()
+            row_h.setSpacing(6)
+            row_h.addWidget(_cat_btn(root))
+            for sub in subs.get(root['id'], []):
+                sb = _cat_btn(sub)
+                if sub['id'] != self._initial_cat_id:
+                    sb.setStyleSheet(SUB_SS)
+                row_h.addWidget(sb)
+            row_h.addStretch()
+            cat_v.addLayout(row_h)
+
+        v.addWidget(cat_container)
+
+        # ── Onderste balk: optioneel verwijder + opslaan + annuleren ──
+        bottom_h = QHBoxLayout()
+        bottom_h.setSpacing(8)
+
+        if show_delete:
+            btn_del_marker = QPushButton("✕  Verwijder marker")
+            btn_del_marker.setStyleSheet(
+                "QPushButton { background:#2a0808; border:1px solid #6b1f1f;"
+                "  border-radius:4px; padding:5px 14px; color:#cc4444; font-size:11px; }"
+                "QPushButton:hover  { background:#3a0a0a; border-color:#e05555; color:#ff6666; }"
+                "QPushButton:pressed { background:#e05555; color:#fff; }"
+            )
+            def _do_delete():
+                self._deleted = True
+                self.accept()
+            btn_del_marker.clicked.connect(_do_delete)
+            bottom_h.addWidget(btn_del_marker)
+
+        bottom_h.addStretch()
         btn_cancel = QPushButton("Annuleren")
         btn_cancel.setObjectName("cancel")
         btn_cancel.clicked.connect(self.reject)
-        v.addWidget(btn_cancel, alignment=Qt.AlignmentFlag.AlignRight)
+        bottom_h.addWidget(btn_cancel)
+
+        if show_delete:
+            btn_save = QPushButton("✓  Opslaan")
+            btn_save.setStyleSheet(
+                "QPushButton { background:#1a2a00; border:1px solid #4a7a1f;"
+                "  border-radius:4px; padding:5px 14px; color:#88cc44; font-size:11px; }"
+                "QPushButton:hover  { background:#253800; border-color:#88cc44; color:#aaee66; }"
+                "QPushButton:pressed { background:#88cc44; color:#000; }"
+            )
+            def _do_save():
+                excluded = {aid for aid, b in self._actor_btns.items() if b.isChecked()}
+                self._actors = [a for a in self._actors if a['id'] not in excluded]
+                if not self._actors:
+                    return
+                if self._chosen_cat is None:
+                    return   # geen categorie — klik eerst op een categorie
+                self.accept()
+            btn_save.clicked.connect(_do_save)
+            bottom_h.addWidget(btn_save)
+
+        v.addLayout(bottom_h)
 
     # ── Acties ───────────────────────────────────
 
@@ -1695,6 +1829,14 @@ class _MarkerQuickDlg(QDialog):
             # Laatste acteur — niet toestaan
             btn.setChecked(False)
 
+    def _set_stars(self, n: int):
+        """Selecteer n sterren — klik nogmaals op hetzelfde om te wissen."""
+        if self._stars == n:
+            n = 0   # toggle: klik dezelfde ster → wis
+        self._stars = n
+        for i, btn in enumerate(self._star_btns):
+            btn.setChecked(i < n)
+
     def _choose(self, cat: dict):
         excluded = {aid for aid, b in self._actor_btns.items() if b.isChecked()}
         self._actors = [a for a in self._actors if a['id'] not in excluded]
@@ -1704,7 +1846,7 @@ class _MarkerQuickDlg(QDialog):
         self.accept()
 
     def get_result(self):
-        return self._actors, self._chosen_cat
+        return self._actors, self._chosen_cat, self._stars
 
     def _center_on_parent(self):
         self.adjustSize()
@@ -1712,6 +1854,8 @@ class _MarkerQuickDlg(QDialog):
         if parent:
             center = parent.frameGeometry().center()
             self.move(center - self.rect().center())
+
+
 
 
 # ─────────────────────────────────────────────
@@ -1743,6 +1887,7 @@ class CineMarker(QMainWindow):
         self._reverse_use_frameback = False # True = frame_back_step(), False = seek
         self._selection_entries: list = []   # cross-film afspeellijst vanuit markers-tab
         self._current_marker_row: int = -1  # blijft bewaard over list-rebuilds heen
+        self._active_shortcuts: list = []   # QShortcut-objecten (voor herladen)
 
         # Persistente caches voor marker-lijst — worden niet bij elke rebuild gewist
         self._actor_pix_cache: dict = {}   # actor_id  -> QPixmap | None
@@ -2084,6 +2229,7 @@ class CineMarker(QMainWindow):
         self.markers_panel = MarkersPanel(self.player)
         self.markers_panel.scene_jump_requested.connect(self._on_scene_jump)
         self.markers_panel.play_selection_requested.connect(self._load_selection)
+        self.markers_panel.edit_marker_requested.connect(self._edit_marker_from_panel)
         self.main_tabs.addTab(self.markers_panel, "◈  MARKERS")
 
         # Acteurs tab
@@ -2100,6 +2246,7 @@ class CineMarker(QMainWindow):
 
         # Database tab
         self.db_panel = DatabasePanel()
+        self.db_panel.shortcuts_saved.connect(self._reload_shortcuts)
         self.main_tabs.addTab(self.db_panel, "⊞  DATABASE")
 
         # Sorter tab
@@ -2122,12 +2269,17 @@ class CineMarker(QMainWindow):
     def _on_tab_changed(self, idx):
         actors_idx  = self.main_tabs.indexOf(self.actors_panel)
         markers_idx = self.main_tabs.indexOf(self.markers_panel)
+        films_idx   = self.main_tabs.indexOf(self.films_panel)
         self._actors_tb.setVisible(idx == actors_idx)
         player_idx = self.main_tabs.indexOf(self._player_widget)
         on_player = (idx == player_idx)
         on_actors = (idx == actors_idx)
         if idx == markers_idx:
             QTimer.singleShot(0, self.markers_panel.refresh)
+        if idx == films_idx:
+            # Herlaad filterbalk zodat nieuw aangemaakte filmcategorieën/kleuren
+            # direct zichtbaar zijn na een bezoek aan de DATABASE-tab
+            QTimer.singleShot(0, self.films_panel.reload_filter_bar2)
         self._panel.setVisible(on_player)
         if on_player and self._video_path:
             self._actors_overlay.show()
@@ -2342,31 +2494,60 @@ class CineMarker(QMainWindow):
 
     # ── Shortcuts ─────────────────────────────
 
+    def _shortcut_dispatch(self) -> dict:
+        """Geeft een mapping van action_key → slot-methode terug."""
+        return {
+            'play_pause':    self._shortcut_space,
+            'marker':        self._shortcut_m,
+            'neg_marker':    self._add_negative_marker,
+            'thumbnail':     self.export_thumbnail,
+            'volgende_film': self._next_film,
+            'marker_voor':   self._shortcut_p,
+            'marker_achter': self._shortcut_o,
+            'skip_voor':     self._shortcut_l,
+            'skip_achter':   self._shortcut_n,
+            'sneller':       self._speed_up,
+            'langzamer':     self._speed_down,
+            'reset_speed':   self._reset_speed,
+            'zoom_in':       self._shortcut_plus,
+            'zoom_uit':      self._shortcut_minus,
+            'zoom_reset':    self._reset_zoom,
+            'fullscreen':    self._toggle_fullscreen,
+            'open_bestand':  self.open_file,
+            'acteurs_tonen': self._show_actor_overlay,
+            'begin':         self.go_to_start,
+            'einde':         self.go_to_end,
+            'links':         self._shortcut_left,
+            'rechts':        self._shortcut_right,
+            'ontsnappen':    self._shortcut_esc,
+        }
+
     def _setup_shortcuts(self):
-        QShortcut(QKeySequence("Escape"), self).activated.connect(self._shortcut_esc)
-        QShortcut(QKeySequence("Space"), self).activated.connect(self._shortcut_space)
-        QShortcut(QKeySequence("Left"),  self).activated.connect(self._shortcut_left)
-        QShortcut(QKeySequence("Right"), self).activated.connect(self._shortcut_right)
-        QShortcut(QKeySequence("L"),     self).activated.connect(self._shortcut_l)
-        QShortcut(QKeySequence("M"),     self).activated.connect(self._shortcut_m)
-        QShortcut(QKeySequence("N"),     self).activated.connect(self._shortcut_n)
-        QShortcut(QKeySequence(Qt.Key.Key_Plus),  self).activated.connect(self._shortcut_plus)
-        QShortcut(QKeySequence(Qt.Key.Key_Equal), self).activated.connect(self._shortcut_plus)
-        QShortcut(QKeySequence(Qt.Key.Key_Minus), self).activated.connect(self._shortcut_minus)
-        QShortcut(QKeySequence(Qt.Key.Key_0), self).activated.connect(self._reset_zoom)
-        QShortcut(QKeySequence("T"), self).activated.connect(self.export_thumbnail)
-        QShortcut(QKeySequence("V"),      self).activated.connect(self._next_film)
-        QShortcut(QKeySequence("X"),      self).activated.connect(self._add_negative_marker)
-        QShortcut(QKeySequence("Ctrl+O"), self).activated.connect(self.open_file)
-        QShortcut(QKeySequence("F11"),    self).activated.connect(self._toggle_fullscreen)
-        QShortcut(QKeySequence("Ctrl+L"), self).activated.connect(self._show_actor_overlay)
-        QShortcut(QKeySequence("Home"), self).activated.connect(self.go_to_start)
-        QShortcut(QKeySequence("End"), self).activated.connect(self.go_to_end)
-        QShortcut(QKeySequence("]"),  self).activated.connect(self._speed_up)
-        QShortcut(QKeySequence("["),  self).activated.connect(self._speed_down)
-        QShortcut(QKeySequence("\\"), self).activated.connect(self._reset_speed)
-        QShortcut(QKeySequence("P"),  self).activated.connect(self._shortcut_p)
-        QShortcut(QKeySequence("O"),  self).activated.connect(self._shortcut_o)
+        """Laad sneltoetsen uit de DB (of gebruik standaardwaarden) en registreer ze."""
+        dispatch = self._shortcut_dispatch()
+        for action, _label, default in SHORTCUT_DEFS:
+            slot = dispatch.get(action)
+            if not slot:
+                continue
+            raw = db.get_setting(f'shortcut_{action}', default)
+            for key_str in raw.split(','):
+                key_str = key_str.strip()
+                if not key_str:
+                    continue
+                try:
+                    sc = QShortcut(QKeySequence(key_str), self)
+                    sc.activated.connect(slot)
+                    self._active_shortcuts.append(sc)
+                except Exception:
+                    pass
+
+    def _reload_shortcuts(self):
+        """Verwijder alle huidige sneltoetsen en laad ze opnieuw uit de DB."""
+        for sc in self._active_shortcuts:
+            sc.setEnabled(False)
+            sc.setParent(None)
+        self._active_shortcuts.clear()
+        self._setup_shortcuts()
 
     # ── Marker-list helpers ───────────────────
     # Grootte-constanten voor acteur-/categorie-icoontjes in de markerlijst.
@@ -2962,6 +3143,28 @@ class CineMarker(QMainWindow):
 
     # ── Markers ───────────────────────────────
 
+    def _save_thumbnail_from_file(self, src_path: str):
+        """Kopieer een al-bestaand afbeeldingsbestand als filmthumbnail naar de thumb-map."""
+        if not self._video_path:
+            return
+        film = db.get_or_create_film(self._video_path)
+        thumb_dir = THUMBNAILS_DIR
+        thumb_dir.mkdir(exist_ok=True)
+        import time as _time, shutil
+        ts   = int(_time.time() * 1000)
+        dest = str(thumb_dir / f"{film['id']}_thumb_{ts}.jpg")
+        try:
+            shutil.copy2(src_path, dest)
+            db.add_film_thumbnail(film['id'], dest)
+            db.set_film_thumbnail(film['id'], dest)
+            self._actors_overlay.load_thumbnails(film['id'])
+            folder = db.get_setting('film_folder', '')
+            if folder:
+                self.films_panel._scan_folder(folder)
+            self.status.showMessage(f"  Thumbnail opgeslagen voor {Path(self._video_path).name}")
+        except Exception as e:
+            self.status.showMessage(f"  Thumbnail mislukt: {e}")
+
     def _capture_thumbnail(self):
         if not self._video_path:
             return
@@ -2999,7 +3202,8 @@ class CineMarker(QMainWindow):
         except Exception as e:
             self.status.showMessage(f"  Thumbnail mislukt: {e}")
 
-    def _quick_marker(self, actors: list, categories: list, pos: float | None = None):
+    def _quick_marker(self, actors: list, categories: list,
+                      pos: float | None = None, stars: int = 0):
         """Create marker — actor + category both required."""
         if not self._video_path:
             return
@@ -3027,16 +3231,20 @@ class CineMarker(QMainWindow):
         actor_names = [a['name'] for a in actors]
         name = ', '.join(cat_names) + ' — ' + ', '.join(actor_names)
 
+        import time as _time
         marker = {
             'time':       pos,
             'name':       name,
             'actors':     [a['id'] for a in actors],
             'categories': [c['id'] for c in categories],
             'created':    datetime.now().isoformat(),
+            'created_at': _time.time(),
+            'stars':      stars if stars > 0 else None,
         }
         self._markers.append(marker)
         self._markers.sort(key=lambda m: m['time'])
         save_markers(self._video_path, self._markers)
+        self._recalc_film_rating(self._video_path)
         self._refresh_marker_list()
         self._actors_overlay._cat_sel.clear()
         self._actors_overlay.update()
@@ -3150,20 +3358,35 @@ class CineMarker(QMainWindow):
 
         # Frame opvangen via mpv screenshot naar tijdelijk bestand
         frame_pix = None
+        tmp_path: str | None = None
         try:
             import tempfile
-            tmp = tempfile.mktemp(suffix='.jpg')
-            self.player.command('screenshot-to-file', tmp, 'video')
-            if os.path.exists(tmp):
-                frame_pix = QPixmap(tmp)
-                os.unlink(tmp)
+            tmp_path = tempfile.mktemp(suffix='.jpg')
+            self.player.command('screenshot-to-file', tmp_path, 'video')
+            if os.path.exists(tmp_path):
+                frame_pix = QPixmap(tmp_path)
+            else:
+                tmp_path = None
         except Exception:
+            tmp_path = None
             pass  # popup werkt ook zonder frame
 
-        dlg = _MarkerQuickDlg(self, actors, pos, frame_pix, cats)
-        if dlg.exec() == QDialog.DialogCode.Accepted:
-            chosen_actors, chosen_cat = dlg.get_result()
-            self._quick_marker(chosen_actors, [chosen_cat], pos=pos)
+        try:
+            dlg = _MarkerQuickDlg(self, actors, pos, frame_pix, cats)
+            if dlg.exec() == QDialog.DialogCode.Accepted:
+                chosen_actors, chosen_cat, stars = dlg.get_result()
+                self._quick_marker(chosen_actors, [chosen_cat], pos=pos, stars=stars)
+
+                # Thumbnail opslaan als de gebruiker dat gevraagd heeft
+                if dlg.wants_thumbnail() and tmp_path and os.path.exists(tmp_path):
+                    self._save_thumbnail_from_file(tmp_path)
+        finally:
+            # Tijdelijk bestand altijd opruimen
+            if tmp_path and os.path.exists(tmp_path):
+                try:
+                    os.unlink(tmp_path)
+                except Exception:
+                    pass
 
     def _shortcut_n(self):
         if self.main_tabs.currentWidget() is not self.sorter_panel:
@@ -3306,6 +3529,10 @@ class CineMarker(QMainWindow):
         self._neg_zones_cache = zones
         dur = self._duration or 1
         self.timeline.set_neg_zones([(s / dur, e / dur) for s, e in zones])
+        # Blauwe stipjes voor gewone (niet-negatieve) markers
+        fracs = [m['time'] / dur for m in self._markers
+                 if not m.get('negative') and dur > 0]
+        self.timeline.set_marker_fracs(fracs)
 
     def _add_negative_marker(self):
         if not self._video_path:
@@ -3327,7 +3554,12 @@ class CineMarker(QMainWindow):
         self._panel.show_search(False)
         if not self._panel.isVisible():
             self._panel.show()
-        self.status.showMessage(f"  Negatieve marker gezet op {_fmt_hms(pos)}")
+        # Zet skip-negative altijd uit zodat je niet direct naar het einde springt
+        if self._skip_negative:
+            self._skip_negative = False
+            self._btn_skip_neg.setChecked(False)
+            db.set_setting('skip_negative', '0')
+        self.status.showMessage(f"  Negatieve marker gezet op {_fmt_hms(pos)}  •  skip UIT")
 
     def _toggle_skip_negative(self):
         self._skip_negative = self._btn_skip_neg.isChecked()
@@ -3392,16 +3624,28 @@ class CineMarker(QMainWindow):
 
             rh.addStretch()
 
-            # Delete button (same for both types)
-            btn_del = QPushButton("✕")
-            btn_del.setFixedSize(20, 20)
-            btn_del.setStyleSheet(
-                "QPushButton{background:#2a2a2a;border:1px solid #444;"
-                "border-radius:3px;color:#ccc;font-size:12px;font-weight:bold;}"
-                "QPushButton:hover{background:#6b1f1f;border-color:#e05555;color:#fff;}"
-                "QPushButton:pressed{background:#e05555;color:#fff;}")
-            btn_del.clicked.connect(lambda _, i=idx: self._delete_marker_by_index(i))
-            rh.addWidget(btn_del)
+            # Edit button (gewone markers) / delete button (negatieve markers)
+            if not is_neg:
+                btn_edit = QPushButton("✎")
+                btn_edit.setFixedSize(20, 20)
+                btn_edit.setToolTip("Categorie / acteurs / score aanpassen of marker verwijderen")
+                btn_edit.setStyleSheet(
+                    "QPushButton{background:#1a1a2a;border:1px solid #333;"
+                    "border-radius:3px;color:#888;font-size:12px;}"
+                    "QPushButton:hover{background:#1e1e40;border-color:#8888cc;color:#aaaaff;}"
+                    "QPushButton:pressed{background:#3333aa;color:#fff;}")
+                btn_edit.clicked.connect(lambda _, i=idx: self._edit_marker_by_index(i))
+                rh.addWidget(btn_edit)
+            else:
+                btn_del = QPushButton("✕")
+                btn_del.setFixedSize(20, 20)
+                btn_del.setStyleSheet(
+                    "QPushButton{background:#2a2a2a;border:1px solid #444;"
+                    "border-radius:3px;color:#ccc;font-size:12px;font-weight:bold;}"
+                    "QPushButton:hover{background:#6b1f1f;border-color:#e05555;color:#fff;}"
+                    "QPushButton:pressed{background:#e05555;color:#fff;}")
+                btn_del.clicked.connect(lambda _, i=idx: self._delete_marker_by_index(i))
+                rh.addWidget(btn_del)
 
             item.setSizeHint(QSize(0, self._MARKER_ROW_H))
             self.marker_list.setItemWidget(item, row_w)
@@ -3413,7 +3657,96 @@ class CineMarker(QMainWindow):
         if 0 <= idx < len(self._markers):
             self._markers.pop(idx)
             save_markers(self._video_path, self._markers)
+            self._recalc_film_rating(self._video_path)
             self._refresh_marker_list()
+
+    def _edit_marker_by_index(self, idx: int):
+        if not (0 <= idx < len(self._markers)):
+            return
+        m = self._markers[idx]
+        if m.get('negative'):
+            return
+        actors = [db.get_actor(aid) for aid in (m.get('actors') or [])]
+        actors = [a for a in actors if a]
+        cats   = db.get_all_categories()
+        if not cats:
+            self.status.showMessage("  Maak eerst een categorie aan in het database-tabblad")
+            return
+        stars      = int(m.get('stars') or 0)
+        cur_cat_id = (m.get('categories') or [None])[0]
+        dlg = _MarkerQuickDlg(self, actors, m.get('time', 0), None, cats,
+                              initial_stars=stars, show_delete=True,
+                              initial_cat_id=cur_cat_id)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            if dlg.was_deleted():
+                self._delete_marker_by_index(idx)
+                return
+            new_actors, chosen_cat, new_stars = dlg.get_result()
+            m['actors']     = [a['id'] for a in new_actors]
+            m['categories'] = [chosen_cat['id']] if chosen_cat else m.get('categories', [])
+            m['stars']      = new_stars if new_stars > 0 else None
+            save_markers(self._video_path, self._markers)
+            self._recalc_film_rating(self._video_path)
+            self._refresh_marker_list()
+
+    def _edit_marker_from_panel(self, marker: dict, film_path: str):
+        """Bewerk een marker vanuit het markers-tabblad (context menu ✎)."""
+        import json as _json
+        from pathlib import Path as _Path
+        actors = [db.get_actor(aid) for aid in (marker.get('actors') or [])]
+        actors = [a for a in actors if a]
+        cats   = db.get_all_categories()
+        if not cats:
+            self.status.showMessage("  Maak eerst een categorie aan in het database-tabblad")
+            return
+        stars      = int(marker.get('stars') or 0)
+        cur_cat_id = (marker.get('categories') or [None])[0]
+        dlg = _MarkerQuickDlg(self, actors, marker.get('time', 0), None, cats,
+                              initial_stars=stars, show_delete=True,
+                              initial_cat_id=cur_cat_id)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        p  = _Path(film_path)
+        mf = p.parent / f".{p.stem}_markers.json"
+        if not mf.exists():
+            return
+        try:
+            markers = _json.loads(mf.read_text('utf-8'))
+        except Exception:
+            return
+        target_time = marker.get('time')
+        if dlg.was_deleted():
+            markers = [m for m in markers if m.get('time') != target_time]
+        else:
+            new_actors, chosen_cat, new_stars = dlg.get_result()
+            for m in markers:
+                if m.get('time') == target_time:
+                    m['actors']     = [a['id'] for a in new_actors]
+                    m['categories'] = [chosen_cat['id']] if chosen_cat else m.get('categories', [])
+                    m['stars']      = new_stars if new_stars > 0 else None
+                    break
+        mf.write_text(_json.dumps(markers, ensure_ascii=False, indent=2), 'utf-8')
+        self._recalc_film_rating(film_path)
+        self.markers_panel.refresh()
+        # Als de film ook open staat in de speler, herlaad de markerlijst
+        if self._video_path and str(_Path(self._video_path).resolve()) == str(p.resolve()):
+            self._markers = markers
+            self._refresh_marker_list()
+
+    def _recalc_film_rating(self, film_path: str):
+        """Herbereken de afgeleide_rating van een film op basis van marker-sterren.
+        Som van alle sterren (niet-negatieve markers), afgetopt op 10.
+        Slaat op in DB en werkt het films-panel live bij."""
+        try:
+            markers = load_markers(film_path)
+            total = sum(int(m.get('stars') or 0)
+                        for m in markers
+                        if not m.get('negative'))
+            total = min(total, 10)
+            db.update_afgeleide_rating(film_path, total)
+            self.films_panel.update_film_rating(film_path, total)
+        except Exception:
+            pass
 
     def _on_marker_jump(self, item=None):
         row = self.marker_list.currentRow()
@@ -3587,56 +3920,339 @@ class CineMarker(QMainWindow):
         self.conv_progress.setVisible(False)
         self.conv_status.setText(f"✗ Fout: {err[:200]}")
 
-    # ── Help ──────────────────────────────────
+    # ── Help / Settings ───────────────────────
 
     def _show_help(self):
-        from PyQt6.QtWidgets import QTextEdit, QGroupBox
-        dlg = QDialog(self)
-        dlg.setWindowTitle("Instellingen & sneltoetsen")
-        dlg.resize(680, 760)
-        dlg.setStyleSheet("""
+        from PyQt6.QtWidgets import (
+            QTextEdit, QGroupBox, QTabWidget, QTreeWidget, QTreeWidgetItem,
+            QListWidget, QListWidgetItem, QLineEdit, QLabel, QSplitter,
+            QScrollArea,
+        )
+
+        # ── stylesheet helpers ──────────────────
+        BASE_SS = """
             QDialog    { background: #0e0e0e; }
+            QTabWidget::pane  { border: 1px solid #1e1e1e; background: #0e0e0e; }
+            QTabBar::tab      { background: #141414; color: #666;
+                                padding: 6px 18px; border: 1px solid #1e1e1e;
+                                border-bottom: none; border-radius: 3px 3px 0 0;
+                                margin-right: 2px; font-size: 11px; letter-spacing: 1px; }
+            QTabBar::tab:selected  { background: #0e0e0e; color: #e8b86d; }
+            QTabBar::tab:hover     { color: #ccc; }
             QTextEdit  { background: #0e0e0e; border: none;
                          color: #ccc; font-size: 12px;
                          font-family: 'Consolas', monospace; }
             QGroupBox  { color: #555; font-size: 10px; letter-spacing: 3px;
                          border: 1px solid #1e1e1e; border-radius: 4px;
                          margin-top: 6px; padding: 8px 10px 6px; }
-            QGroupBox::title { subcontrol-origin: margin; left: 8px;
-                               padding: 0 4px; }
+            QGroupBox::title { subcontrol-origin: margin; left: 8px; padding: 0 4px; }
+            QTreeWidget, QListWidget {
+                background: #0a0a0a; border: 1px solid #1e1e1e;
+                color: #ccc; font-size: 12px; outline: none; }
+            QTreeWidget::item, QListWidget::item {
+                padding: 4px 6px; border-bottom: 1px solid #141414; }
+            QTreeWidget::item:selected, QListWidget::item:selected {
+                background: #1a1200; color: #e8b86d; }
+            QTreeWidget::item:hover, QListWidget::item:hover { background: #141414; }
+            QLineEdit  { background: #141414; border: 1px solid #2a2a2a;
+                         border-radius: 4px; padding: 5px 8px; color: #e0e0e0;
+                         font-size: 12px; }
+            QLineEdit:focus { border-color: #e8b86d; }
             QPushButton { background: #1e1e1e; border: 1px solid #333;
-                          border-radius: 4px; padding: 5px 16px; color: #ccc; }
-            QPushButton:hover { border-color: #e8b86d; color: #e8b86d; }
-        """)
+                          border-radius: 4px; padding: 5px 14px; color: #ccc;
+                          font-size: 11px; }
+            QPushButton:hover  { border-color: #e8b86d; color: #e8b86d; }
+            QPushButton:pressed { background: #2a2000; }
+            QPushButton#del_btn { color: #884444; border-color: #441414; }
+            QPushButton#del_btn:hover { color: #ff6666; border-color: #884444; }
+        """
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Instellingen & sneltoetsen")
+        dlg.resize(760, 820)
+        dlg.setStyleSheet(BASE_SS)
+
         v = QVBoxLayout(dlg)
         v.setContentsMargins(10, 10, 10, 10)
         v.setSpacing(8)
 
-        # ── Acties ──────────────────────────────
-        grp = QGroupBox("ACTIES")
-        gh = QHBoxLayout(grp)
+        # ── Acties (always visible, above tabs) ──
+        grp_acties = QGroupBox("ACTIES")
+        gh = QHBoxLayout(grp_acties)
         gh.setSpacing(8)
 
-        btn_refresh_actors = QPushButton("↻  Acteurs herladen")
+        btn_refresh_actors = QPushButton("↻  Acteurs & foto's herladen")
         btn_refresh_actors.setToolTip(
             "Nieuwe foto's in acteurfotos/ oppikken en acteurs-tab vernieuwen"
         )
         def _do_refresh():
             self.actors_panel.refresh()
             btn_refresh_actors.setText("✓  Herladen")
-            QTimer.singleShot(1500, lambda: btn_refresh_actors.setText("↻  Acteurs herladen"))
+            QTimer.singleShot(1500, lambda: btn_refresh_actors.setText("↻  Acteurs & foto's herladen"))
         btn_refresh_actors.clicked.connect(_do_refresh)
         gh.addWidget(btn_refresh_actors)
         gh.addStretch()
+        v.addWidget(grp_acties)
 
-        v.addWidget(grp)
+        # ── Tab widget ───────────────────────────
+        tabs = QTabWidget()
+        v.addWidget(tabs, 1)
 
-        # ── Sneltoetsen ─────────────────────────
+        # ═══════════════════════════════════════
+        #  TAB 1 — Sneltoetsen
+        # ═══════════════════════════════════════
         te = QTextEdit()
         te.setReadOnly(True)
         te.setHtml(_HELP_HTML)
-        v.addWidget(te)
+        tabs.addTab(te, "Sneltoetsen")
 
+        # ═══════════════════════════════════════
+        #  TAB 2 — Categorieën
+        # ═══════════════════════════════════════
+        cat_page = QWidget()
+        cat_page.setStyleSheet("QWidget { background: #0e0e0e; }")
+        cat_v = QVBoxLayout(cat_page)
+        cat_v.setContentsMargins(8, 8, 8, 8)
+        cat_v.setSpacing(10)
+
+        # ── Helper: styled small button ──────────
+        def _mk_btn(label, obj_name=None):
+            b = QPushButton(label)
+            if obj_name:
+                b.setObjectName(obj_name)
+            b.setFixedHeight(28)
+            return b
+
+        def _mk_input(placeholder):
+            e = QLineEdit()
+            e.setPlaceholderText(placeholder)
+            e.setFixedHeight(28)
+            return e
+
+        # ─────────────────────────────────────────
+        #  Marker-categorieën met subcategorieën
+        # ─────────────────────────────────────────
+        grp_marker = QGroupBox("MARKER CATEGORIEËN  (+ subcategorieën)")
+        gm_v = QVBoxLayout(grp_marker)
+        gm_v.setSpacing(6)
+
+        marker_tree = QTreeWidget()
+        marker_tree.setHeaderHidden(True)
+        marker_tree.setMinimumHeight(180)
+        gm_v.addWidget(marker_tree)
+
+        inp_marker = _mk_input("Naam…")
+        btn_add_root   = _mk_btn("+ Hoofdcat.")
+        btn_add_sub    = _mk_btn("+ Subcat. van geselecteerde")
+        btn_del_marker = _mk_btn("✕ Verwijder", "del_btn")
+        row_m = QHBoxLayout()
+        row_m.setSpacing(6)
+        row_m.addWidget(inp_marker, 1)
+        row_m.addWidget(btn_add_root)
+        row_m.addWidget(btn_add_sub)
+        row_m.addWidget(btn_del_marker)
+        gm_v.addLayout(row_m)
+        cat_v.addWidget(grp_marker)
+
+        def _load_marker_cats():
+            marker_tree.clear()
+            cats = db.get_all_categories()
+            roots = [c for c in cats if not c.get('parent_id')]
+            subs  = [c for c in cats if c.get('parent_id')]
+            p_items = {}
+            for cat in sorted(roots, key=lambda x: x['name'].lower()):
+                it = QTreeWidgetItem(marker_tree, [cat['name']])
+                it.setData(0, Qt.ItemDataRole.UserRole, cat['id'])
+                p_items[cat['id']] = it
+            for cat in sorted(subs, key=lambda x: x['name'].lower()):
+                parent_it = p_items.get(cat['parent_id'])
+                if parent_it:
+                    it = QTreeWidgetItem(parent_it, [f"  {cat['name']}"])
+                    it.setData(0, Qt.ItemDataRole.UserRole, cat['id'])
+            marker_tree.expandAll()
+
+        def _add_root_cat():
+            name = inp_marker.text().strip()
+            if not name:
+                return
+            db.create_category(name)
+            inp_marker.clear()
+            _load_marker_cats()
+            # Reload overlay categories in the player
+            if hasattr(self, '_actors_overlay'):
+                self._actors_overlay._reload_categories()
+                self._actors_overlay._reposition()
+
+        def _add_sub_cat():
+            name = inp_marker.text().strip()
+            sel = marker_tree.currentItem()
+            if not name or not sel:
+                return
+            # find root item (parent_id=None parent)
+            top = sel
+            while top.parent():
+                top = top.parent()
+            parent_id = top.data(0, Qt.ItemDataRole.UserRole)
+            db.create_category(name, parent_id=parent_id)
+            inp_marker.clear()
+            _load_marker_cats()
+
+        def _del_marker_cat():
+            sel = marker_tree.currentItem()
+            if not sel:
+                return
+            cat_id = sel.data(0, Qt.ItemDataRole.UserRole)
+            db.delete_category(cat_id)
+            _load_marker_cats()
+            if hasattr(self, '_actors_overlay'):
+                self._actors_overlay._reload_categories()
+                self._actors_overlay._reposition()
+
+        btn_add_root.clicked.connect(_add_root_cat)
+        btn_add_sub.clicked.connect(_add_sub_cat)
+        btn_del_marker.clicked.connect(_del_marker_cat)
+
+        # ─────────────────────────────────────────
+        #  Film-categorieën
+        # ─────────────────────────────────────────
+        grp_film = QGroupBox("FILM CATEGORIEËN")
+        gf_v = QVBoxLayout(grp_film)
+        gf_v.setSpacing(6)
+
+        film_cat_list = QListWidget()
+        film_cat_list.setMaximumHeight(130)
+        gf_v.addWidget(film_cat_list)
+
+        inp_film_cat = _mk_input("Naam nieuwe filmcategorie…")
+        btn_add_film_cat = _mk_btn("+ Toevoegen")
+        btn_del_film_cat = _mk_btn("✕ Verwijder", "del_btn")
+        row_f = QHBoxLayout()
+        row_f.setSpacing(6)
+        row_f.addWidget(inp_film_cat, 1)
+        row_f.addWidget(btn_add_film_cat)
+        row_f.addWidget(btn_del_film_cat)
+        gf_v.addLayout(row_f)
+        cat_v.addWidget(grp_film)
+
+        def _load_film_cats():
+            film_cat_list.clear()
+            for fc in db.get_film_categorie_types():
+                it = QListWidgetItem(fc['naam'])
+                it.setData(Qt.ItemDataRole.UserRole, fc['id'])
+                film_cat_list.addItem(it)
+
+        def _add_film_cat():
+            name = inp_film_cat.text().strip()
+            if not name:
+                return
+            db.create_film_categorie_type(name)
+            inp_film_cat.clear()
+            _load_film_cats()
+            if hasattr(self, 'films_panel'):
+                self.films_panel.reload_filter_bar2()
+
+        def _del_film_cat():
+            sel = film_cat_list.currentItem()
+            if not sel:
+                return
+            db.delete_film_categorie_type(sel.data(Qt.ItemDataRole.UserRole))
+            _load_film_cats()
+            if hasattr(self, 'films_panel'):
+                self.films_panel.reload_filter_bar2()
+
+        btn_add_film_cat.clicked.connect(_add_film_cat)
+        btn_del_film_cat.clicked.connect(_del_film_cat)
+
+        tabs.addTab(cat_page, "Categorieën")
+
+        # ═══════════════════════════════════════
+        #  TAB 3 — Acteur-eigenschappen
+        # ═══════════════════════════════════════
+        from PyQt6.QtWidgets import QComboBox as _QComboBox
+        trait_page = QWidget()
+        trait_page.setStyleSheet("QWidget { background: #0e0e0e; }")
+        trait_v = QVBoxLayout(trait_page)
+        trait_v.setContentsMargins(8, 8, 8, 8)
+        trait_v.setSpacing(8)
+
+        _WEERGAVE_LABELS = {
+            'beide':    'beide (sterk + zwak)',
+            'positief': 'alleen positief (sterk)',
+            'negatief': 'alleen negatief (zwak)',
+        }
+
+        grp_traits = QGroupBox("ACTEUR EIGENSCHAPPEN")
+        gt_v = QVBoxLayout(grp_traits)
+        gt_v.setSpacing(6)
+
+        traits_list = QListWidget()
+        gt_v.addWidget(traits_list)
+
+        # Invoer-rij: naam + weergave-dropdown + knoppen
+        inp_trait   = _mk_input("Naam nieuwe eigenschap…")
+        cmb_weergave = _QComboBox()
+        cmb_weergave.setFixedHeight(28)
+        for val, lbl in _WEERGAVE_LABELS.items():
+            cmb_weergave.addItem(lbl, val)
+        cmb_weergave.setCurrentIndex(0)   # 'beide' is standaard
+        btn_add_trait = _mk_btn("+ Toevoegen")
+        btn_del_trait = _mk_btn("✕ Verwijder", "del_btn")
+
+        add_row = QHBoxLayout()
+        add_row.setSpacing(6)
+        add_row.addWidget(inp_trait, 1)
+        add_row.addWidget(cmb_weergave)
+        add_row.addWidget(btn_add_trait)
+        add_row.addWidget(btn_del_trait)
+        gt_v.addLayout(add_row)
+
+        # Hint
+        lbl_hint = QLabel(
+            "Weergave bepaalt in welke sectie de eigenschap verschijnt bij acteurs  "
+            "(sterke kanten / zwakke kanten / beide)"
+        )
+        lbl_hint.setStyleSheet("color:#333; font-size:10px;")
+        lbl_hint.setWordWrap(True)
+        gt_v.addWidget(lbl_hint)
+
+        trait_v.addWidget(grp_traits)
+
+        def _load_traits():
+            traits_list.clear()
+            for tt in db.get_actor_trait_types():
+                weergave = tt.get('type', 'beide')
+                lbl = _WEERGAVE_LABELS.get(weergave, weergave)
+                it = QListWidgetItem(f"{tt['naam']}  —  {lbl}")
+                it.setData(Qt.ItemDataRole.UserRole, tt['id'])
+                traits_list.addItem(it)
+
+        def _add_trait():
+            name = inp_trait.text().strip()
+            if not name:
+                return
+            weergave = cmb_weergave.currentData()
+            db.create_actor_trait_type(name, weergave)
+            inp_trait.clear()
+            _load_traits()
+
+        def _del_trait():
+            sel = traits_list.currentItem()
+            if not sel:
+                return
+            db.delete_actor_trait_type(sel.data(Qt.ItemDataRole.UserRole))
+            _load_traits()
+
+        btn_add_trait.clicked.connect(_add_trait)
+        btn_del_trait.clicked.connect(_del_trait)
+
+        tabs.addTab(trait_page, "Acteur-eigenschappen")
+
+        # ── Initial data load ────────────────────
+        _load_marker_cats()
+        _load_film_cats()
+        _load_traits()
+
+        # ── Close button ─────────────────────────
         btn_close = QPushButton("Sluiten")
         btn_close.setFixedWidth(100)
         btn_close.clicked.connect(dlg.accept)

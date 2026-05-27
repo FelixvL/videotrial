@@ -10,9 +10,10 @@ from pathlib import Path
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel,
     QLineEdit, QTableWidget, QTableWidgetItem, QFrame,
-    QMessageBox, QHeaderView, QAbstractItemView, QSplitter
+    QMessageBox, QHeaderView, QAbstractItemView, QSplitter,
+    QScrollArea, QGridLayout,
 )
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QPixmap
 
 import database as db
@@ -68,7 +69,39 @@ def _icon_path(filename: str) -> str:
     return str(ICONEN_DIR / filename) if filename else ''
 
 
+# ─── Shortcut definitions ──────────────────────────────────────────────────
+# Each entry: (action_key, dutch_label, default_keys)
+# default_keys is comma-separated — every listed key triggers that action.
+SHORTCUT_DEFS = [
+    ('play_pause',    'Afspelen / Pauzeren',   'Space'),
+    ('marker',        'Marker plaatsen',        'M'),
+    ('neg_marker',    'Negatieve marker',       'X'),
+    ('thumbnail',     'Thumbnail opslaan',      'T'),
+    ('volgende_film', 'Volgende film',          'V'),
+    ('marker_voor',   'Volgende marker',        'P'),
+    ('marker_achter', 'Vorige marker',          'O'),
+    ('skip_voor',     'Vooruitspoelen',         'L'),
+    ('skip_achter',   'Terugspoelen',           'N'),
+    ('sneller',       'Sneller afspelen',       ']'),
+    ('langzamer',     'Langzamer afspelen',     '['),
+    ('reset_speed',   'Snelheid resetten',      '\\'),
+    ('zoom_in',       'Inzoomen',               '+,='),
+    ('zoom_uit',      'Uitzoomen',              '-'),
+    ('zoom_reset',    'Zoom resetten',          '0'),
+    ('fullscreen',    'Volledig scherm',        'F11'),
+    ('open_bestand',  'Bestand openen',         'Ctrl+O'),
+    ('acteurs_tonen', 'Acteurs overlay tonen',  'Ctrl+L'),
+    ('begin',         'Naar begin',             'Home'),
+    ('einde',         'Naar einde',             'End'),
+    ('links',         'Links / terug',          'Left'),
+    ('rechts',        'Rechts / voor',          'Right'),
+    ('ontsnappen',    'Sluiten / annuleren',    'Escape'),
+]
+
+
 class DatabasePanel(QWidget):
+
+    shortcuts_saved = pyqtSignal()   # emitted after shortcut keys are changed
 
     def __init__(self):
         super().__init__()
@@ -88,7 +121,11 @@ class DatabasePanel(QWidget):
         splitter.setStyleSheet("QSplitter::handle { background: #1e1e1e; height: 4px; }")
         splitter.addWidget(self._build_actors_widget())
         splitter.addWidget(self._build_categories_widget())
-        splitter.setSizes([500, 260])
+        splitter.addWidget(self._build_traits_widget())
+        splitter.addWidget(self._build_film_cats_widget())
+        splitter.addWidget(self._build_kleuren_widget())
+        splitter.addWidget(self._build_shortcuts_widget())
+        splitter.setSizes([400, 200, 160, 160, 120, 260])
         v.addWidget(splitter)
 
     # ── Actors widget ────────────────────────────
@@ -213,8 +250,8 @@ class DatabasePanel(QWidget):
         v.addWidget(bar)
 
         self.cat_table = QTableWidget()
-        self.cat_table.setColumnCount(CAT_COL_COUNT + 1)  # +1 for icon preview
-        self.cat_table.setHorizontalHeaderLabels(['Naam', 'Icoon bestand', 'Voorbeeld'])
+        self.cat_table.setColumnCount(4)  # naam, icoon, voorbeeld, bovencat
+        self.cat_table.setHorizontalHeaderLabels(['Naam', 'Icoon bestand', 'Voorbeeld', 'Bovencat.'])
         self.cat_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.cat_table.setAlternatingRowColors(True)
         self.cat_table.setSortingEnabled(False)
@@ -224,12 +261,14 @@ class DatabasePanel(QWidget):
         self.cat_table.setStyleSheet(_TABLE_STYLE)
 
         hdr = self.cat_table.horizontalHeader()
-        self.cat_table.setColumnWidth(0, 200)
+        self.cat_table.setColumnWidth(0, 180)
         hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
-        self.cat_table.setColumnWidth(1, 260)
+        self.cat_table.setColumnWidth(1, 220)
         hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         self.cat_table.setColumnWidth(2, 48)
         hdr.setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
+        self.cat_table.setColumnWidth(3, 160)
+        hdr.setSectionResizeMode(3, QHeaderView.ResizeMode.Interactive)
 
         self.cat_table.itemChanged.connect(self._on_cat_cell_changed)
         v.addWidget(self.cat_table)
@@ -247,11 +286,212 @@ class DatabasePanel(QWidget):
 
         return w
 
+    # ── Traits widget ────────────────────────────
+
+    def _build_traits_widget(self):
+        from PyQt6.QtWidgets import QComboBox
+        w = QWidget()
+        v = QVBoxLayout(w)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(0)
+
+        bar = QFrame()
+        bar.setFixedHeight(44)
+        bar.setStyleSheet("QFrame { background: #0d0d0d; border-bottom: 1px solid #1e1e1e; border-top: 1px solid #1e1e1e; }")
+        b = QHBoxLayout(bar)
+        b.setContentsMargins(12, 0, 12, 0)
+        b.setSpacing(10)
+
+        lbl = QLabel("ACTOR TRAITS  (sterke / zwakke kanten)")
+        lbl.setStyleSheet("color: #555; font-size: 10px; letter-spacing: 3px;")
+        b.addWidget(lbl)
+        b.addStretch()
+
+        self._cmb_trait_type = QComboBox()
+        self._cmb_trait_type.addItem("beide",    "beide")
+        self._cmb_trait_type.addItem("positief", "positief")
+        self._cmb_trait_type.addItem("negatief", "negatief")
+        self._cmb_trait_type.setFixedWidth(80)
+        b.addWidget(self._cmb_trait_type)
+
+        self._inp_trait = QLineEdit()
+        self._inp_trait.setPlaceholderText("Naam nieuw trait…")
+        self._inp_trait.setFixedWidth(180)
+        self._inp_trait.returnPressed.connect(self._add_trait)
+        b.addWidget(self._inp_trait)
+
+        btn_add = QPushButton("＋")
+        btn_add.setFixedHeight(28)
+        btn_add.clicked.connect(self._add_trait)
+        b.addWidget(btn_add)
+
+        btn_del = QPushButton("✕")
+        btn_del.setObjectName("danger")
+        btn_del.setFixedHeight(28)
+        btn_del.clicked.connect(self._delete_trait)
+        b.addWidget(btn_del)
+
+        v.addWidget(bar)
+
+        self.traits_table = QTableWidget()
+        self.traits_table.setColumnCount(2)
+        self.traits_table.setHorizontalHeaderLabels(['Naam', 'Weergave'])
+        self.traits_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.traits_table.setAlternatingRowColors(True)
+        self.traits_table.verticalHeader().setDefaultSectionSize(28)
+        self.traits_table.verticalHeader().hide()
+        self.traits_table.setShowGrid(True)
+        self.traits_table.setSortingEnabled(True)
+        self.traits_table.setStyleSheet(_TABLE_STYLE)
+        hdr = self.traits_table.horizontalHeader()
+        self.traits_table.setColumnWidth(0, 220)
+        hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self.traits_table.setColumnWidth(1, 60)
+        hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)
+        self.traits_table.itemChanged.connect(self._on_trait_cell_changed)
+        v.addWidget(self.traits_table)
+        return w
+
+    def _build_film_cats_widget(self):
+        w = QWidget()
+        v = QVBoxLayout(w)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(0)
+
+        bar = QFrame()
+        bar.setFixedHeight(44)
+        bar.setStyleSheet("QFrame { background: #0d0d0d; border-bottom: 1px solid #1e1e1e; border-top: 1px solid #1e1e1e; }")
+        b = QHBoxLayout(bar)
+        b.setContentsMargins(12, 0, 12, 0)
+        b.setSpacing(8)
+
+        lbl = QLabel("FILM CATEGORIEËN")
+        lbl.setStyleSheet("color: #555; font-size: 10px; letter-spacing: 3px;")
+        b.addWidget(lbl)
+        b.addStretch()
+
+        self._inp_filmcat = QLineEdit()
+        self._inp_filmcat.setPlaceholderText("Naam…")
+        self._inp_filmcat.setFixedWidth(130)
+        self._inp_filmcat.returnPressed.connect(self._add_filmcat)
+        b.addWidget(self._inp_filmcat)
+
+        btn_add = QPushButton("＋")
+        btn_add.setFixedHeight(28)
+        btn_add.clicked.connect(self._add_filmcat)
+        b.addWidget(btn_add)
+
+        btn_del = QPushButton("✕")
+        btn_del.setObjectName("danger")
+        btn_del.setFixedHeight(28)
+        btn_del.clicked.connect(self._delete_filmcat)
+        b.addWidget(btn_del)
+
+        v.addWidget(bar)
+
+        self.filmcat_table = QTableWidget()
+        self.filmcat_table.setColumnCount(3)
+        self.filmcat_table.setHorizontalHeaderLabels(['Naam', 'Icoon bestand', 'Voorbeeld'])
+        self.filmcat_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.filmcat_table.setAlternatingRowColors(True)
+        self.filmcat_table.verticalHeader().setDefaultSectionSize(36)
+        self.filmcat_table.verticalHeader().hide()
+        self.filmcat_table.setShowGrid(True)
+        self.filmcat_table.setSortingEnabled(False)
+        self.filmcat_table.setStyleSheet(_TABLE_STYLE)
+        fhdr = self.filmcat_table.horizontalHeader()
+        self.filmcat_table.setColumnWidth(0, 160)
+        fhdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
+        self.filmcat_table.setColumnWidth(1, 220)
+        fhdr.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.filmcat_table.setColumnWidth(2, 48)
+        fhdr.setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
+        self.filmcat_table.itemChanged.connect(self._on_filmcat_changed)
+        self._loading_filmcats = False
+        v.addWidget(self.filmcat_table)
+
+        fc_status = QFrame()
+        fc_status.setFixedHeight(26)
+        fc_status.setStyleSheet("QFrame { background: #080808; border-top: 1px solid #1a1a1a; }")
+        fcs_h = QHBoxLayout(fc_status)
+        fcs_h.setContentsMargins(12, 0, 12, 0)
+        self.lbl_filmcat_status = QLabel("Typ alleen de bestandsnaam, bijv.  genre_drama.png")
+        self.lbl_filmcat_status.setStyleSheet("color: #333; font-size: 10px;")
+        fcs_h.addWidget(self.lbl_filmcat_status)
+        fcs_h.addStretch()
+        v.addWidget(fc_status)
+
+        return w
+
+    def _build_kleuren_widget(self):
+        w = QWidget()
+        v = QVBoxLayout(w)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(0)
+
+        bar = QFrame()
+        bar.setFixedHeight(44)
+        bar.setStyleSheet("QFrame { background: #0d0d0d; border-bottom: 1px solid #1e1e1e; border-top: 1px solid #1e1e1e; }")
+        b = QHBoxLayout(bar)
+        b.setContentsMargins(12, 0, 12, 0)
+        b.setSpacing(8)
+
+        lbl = QLabel("ACTOR KLEUREN")
+        lbl.setStyleSheet("color: #555; font-size: 10px; letter-spacing: 3px;")
+        b.addWidget(lbl)
+        b.addStretch()
+
+        self._inp_kleur = QLineEdit()
+        self._inp_kleur.setPlaceholderText("Naam…")
+        self._inp_kleur.setFixedWidth(100)
+        self._inp_kleur.returnPressed.connect(self._add_kleur)
+        b.addWidget(self._inp_kleur)
+
+        self._inp_kleur_hex = QLineEdit()
+        self._inp_kleur_hex.setPlaceholderText("#rrggbb")
+        self._inp_kleur_hex.setFixedWidth(70)
+        b.addWidget(self._inp_kleur_hex)
+
+        btn_add = QPushButton("＋")
+        btn_add.setFixedHeight(28)
+        btn_add.clicked.connect(self._add_kleur)
+        b.addWidget(btn_add)
+
+        btn_del = QPushButton("✕")
+        btn_del.setObjectName("danger")
+        btn_del.setFixedHeight(28)
+        btn_del.clicked.connect(self._delete_kleur)
+        b.addWidget(btn_del)
+
+        v.addWidget(bar)
+
+        self.kleuren_table = QTableWidget()
+        self.kleuren_table.setColumnCount(2)
+        self.kleuren_table.setHorizontalHeaderLabels(['Naam', 'Hex'])
+        self.kleuren_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.kleuren_table.setAlternatingRowColors(True)
+        self.kleuren_table.verticalHeader().setDefaultSectionSize(28)
+        self.kleuren_table.verticalHeader().hide()
+        self.kleuren_table.setShowGrid(True)
+        self.kleuren_table.setStyleSheet(_TABLE_STYLE)
+        hdr = self.kleuren_table.horizontalHeader()
+        self.kleuren_table.setColumnWidth(0, 130)
+        hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self.kleuren_table.setColumnWidth(1, 70)
+        hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)
+        self.kleuren_table.itemChanged.connect(self._on_kleur_changed)
+        self._loading_kleuren = False
+        v.addWidget(self.kleuren_table)
+        return w
+
     # ── Data ─────────────────────────────────────
 
     def load_data(self):
         self._load_actors()
         self._load_categories()
+        self._load_traits()
+        self._load_filmcats()
+        self._load_kleuren()
 
     def _load_actors(self):
         self._loading_actors = True
@@ -286,13 +526,32 @@ class DatabasePanel(QWidget):
         self._loading_cats = True
         self.cat_table.setRowCount(0)
 
-        for cat in db.get_all_categories():
-            self._append_cat_row(cat)
+        cats = db.get_all_categories()
+        name_map = {c['id']: c['name'] for c in cats}
+        # Sort: roots first (no parent), then subcategories grouped under their parent
+        roots = [c for c in cats if not c.get('parent_id')]
+        subs  = [c for c in cats if c.get('parent_id')]
+        ordered = []
+        for root in sorted(roots, key=lambda x: x['name'].lower()):
+            ordered.append((root, ''))
+            for sub in sorted(
+                [s for s in subs if s['parent_id'] == root['id']],
+                key=lambda x: x['name'].lower()
+            ):
+                ordered.append((sub, root['name']))
+        # Orphaned subcategories (parent deleted) at end
+        known_root_ids = {r['id'] for r in roots}
+        for sub in subs:
+            if sub['parent_id'] not in known_root_ids:
+                ordered.append((sub, f"? (id {sub['parent_id']})"))
+
+        for cat, parent_name in ordered:
+            self._append_cat_row(cat, parent_name)
 
         self._loading_cats = False
         self._update_cat_count()
 
-    def _append_cat_row(self, cat: dict):
+    def _append_cat_row(self, cat: dict, parent_name: str = ''):
         icon_path = cat.get('icon_path', '')
         icon_file = Path(icon_path).name if icon_path else ''
 
@@ -308,6 +567,11 @@ class DatabasePanel(QWidget):
         self.cat_table.setItem(row, 1, file_cell)
 
         self._set_icon_preview(row, icon_file)
+
+        parent_cell = QTableWidgetItem(parent_name)
+        parent_cell.setFlags(parent_cell.flags() & ~Qt.ItemFlag.ItemIsEditable)
+        parent_cell.setForeground(QColor('#666' if parent_name else '#2a2a2a'))
+        self.cat_table.setItem(row, 3, parent_cell)
 
     def _set_icon_preview(self, row: int, icon_file: str):
         preview_cell = QTableWidgetItem()
@@ -476,3 +740,310 @@ class DatabasePanel(QWidget):
         self._loading_cats = False
         self._update_cat_count()
         self.lbl_cat_status.setText(f"{len(rows)} categorie(ën) verwijderd")
+
+    # ── Traits ───────────────────────────────────
+
+    def _load_traits(self):
+        self.traits_table.blockSignals(True)
+        self.traits_table.setSortingEnabled(False)
+        self.traits_table.setRowCount(0)
+        for tt in db.get_actor_trait_types():
+            row = self.traits_table.rowCount()
+            self.traits_table.insertRow(row)
+            n = QTableWidgetItem(tt['naam'])
+            n.setData(ID_ROLE, tt['id'])
+            self.traits_table.setItem(row, 0, n)
+            t = QTableWidgetItem(tt['type'])
+            t.setData(ID_ROLE, tt['id'])
+            self.traits_table.setItem(row, 1, t)
+        self.traits_table.setSortingEnabled(True)
+        self.traits_table.blockSignals(False)
+
+    def _on_trait_cell_changed(self, item):
+        row    = item.row()
+        tid    = item.data(ID_ROLE)
+        if tid is None:
+            return
+        naam_c = self.traits_table.item(row, 0)
+        type_c = self.traits_table.item(row, 1)
+        naam   = naam_c.text().strip() if naam_c else ''
+        ttype  = type_c.text().strip() if type_c else 'beide'
+        if ttype not in ('beide', 'positief', 'negatief'):
+            ttype = 'beide'
+        if naam:
+            with db._db() as conn:
+                conn.execute(
+                    "UPDATE actor_trait_types SET naam=?, type=? WHERE id=?",
+                    (naam, ttype, tid)
+                )
+                conn.commit()
+
+    def _add_trait(self):
+        naam  = self._inp_trait.text().strip()
+        ttype = self._cmb_trait_type.currentData()
+        if not naam:
+            return
+        db.create_actor_trait_type(naam, ttype)
+        self._inp_trait.clear()
+        self._load_traits()
+
+    def _delete_trait(self):
+        rows = sorted({idx.row() for idx in self.traits_table.selectedIndexes()}, reverse=True)
+        if not rows:
+            return
+        for r in rows:
+            cell = self.traits_table.item(r, 0)
+            tid  = cell.data(ID_ROLE) if cell else None
+            if tid:
+                db.delete_actor_trait_type(tid)
+        self._load_traits()
+
+    # ── Film Categorieën ──────────────────────────
+
+    def _load_filmcats(self):
+        self._loading_filmcats = True
+        self.filmcat_table.blockSignals(True)
+        self.filmcat_table.setRowCount(0)
+        for fc in db.get_film_categorie_types():
+            row = self.filmcat_table.rowCount()
+            self.filmcat_table.insertRow(row)
+
+            naam_c = QTableWidgetItem(fc['naam'])
+            naam_c.setData(ID_ROLE, fc['id'])
+            self.filmcat_table.setItem(row, 0, naam_c)
+
+            icon_path = fc.get('icon_path', '') or ''
+            icon_file = Path(icon_path).name if icon_path else ''
+            file_c = QTableWidgetItem(icon_file)
+            file_c.setData(ID_ROLE, fc['id'])
+            self.filmcat_table.setItem(row, 1, file_c)
+
+            self._set_filmcat_icon_preview(row, icon_file)
+
+        self.filmcat_table.blockSignals(False)
+        self._loading_filmcats = False
+
+    def _set_filmcat_icon_preview(self, row: int, icon_file: str):
+        preview = QTableWidgetItem()
+        preview.setFlags(preview.flags() & ~Qt.ItemFlag.ItemIsEditable)
+        if icon_file:
+            full = ICONEN_DIR / icon_file
+            if full.exists():
+                pix = QPixmap(str(full)).scaled(
+                    28, 28,
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+                preview.setData(Qt.ItemDataRole.DecorationRole, pix)
+            else:
+                preview.setForeground(QColor('#6b2a2a'))
+                preview.setText('?')
+        self.filmcat_table.setItem(row, 2, preview)
+
+    def _on_filmcat_changed(self, item):
+        if self._loading_filmcats:
+            return
+        row     = item.row()
+        fid     = item.data(ID_ROLE)
+        if fid is None:
+            return
+        naam_c  = self.filmcat_table.item(row, 0)
+        file_c  = self.filmcat_table.item(row, 1)
+        naam      = naam_c.text().strip() if naam_c else ''
+        icon_file = file_c.text().strip()  if file_c else ''
+        icon_path = _icon_path(icon_file)
+        if naam:
+            db.update_film_categorie_type(fid, naam, icon_path)
+            self._loading_filmcats = True
+            self._set_filmcat_icon_preview(row, icon_file)
+            self._loading_filmcats = False
+            self.lbl_filmcat_status.setText(f"Opgeslagen — '{naam}'")
+
+    def _add_filmcat(self):
+        naam = self._inp_filmcat.text().strip()
+        if not naam:
+            return
+        db.create_film_categorie_type(naam)
+        self._inp_filmcat.clear()
+        self._load_filmcats()
+
+    def _delete_filmcat(self):
+        rows = sorted({idx.row() for idx in self.filmcat_table.selectedIndexes()}, reverse=True)
+        if not rows:
+            return
+        for r in rows:
+            cell = self.filmcat_table.item(r, 0)
+            fid  = cell.data(ID_ROLE) if cell else None
+            if fid:
+                db.delete_film_categorie_type(fid)
+        self._load_filmcats()
+
+    # ── Kleuren ───────────────────────────────────
+
+    def _load_kleuren(self):
+        self._loading_kleuren = True
+        self.kleuren_table.blockSignals(True)
+        self.kleuren_table.setRowCount(0)
+        for k in db.get_actor_kleuren():
+            row = self.kleuren_table.rowCount()
+            self.kleuren_table.insertRow(row)
+            n = QTableWidgetItem(k['naam'])
+            n.setData(ID_ROLE, k['id'])
+            self.kleuren_table.setItem(row, 0, n)
+            h = QTableWidgetItem(k.get('hex', ''))
+            h.setData(ID_ROLE, k['id'])
+            self.kleuren_table.setItem(row, 1, h)
+        self.kleuren_table.blockSignals(False)
+        self._loading_kleuren = False
+
+    def _on_kleur_changed(self, item):
+        if self._loading_kleuren:
+            return
+        row   = item.row()
+        kid   = item.data(ID_ROLE)
+        if kid is None:
+            return
+        naam_c = self.kleuren_table.item(row, 0)
+        hex_c  = self.kleuren_table.item(row, 1)
+        naam   = naam_c.text().strip() if naam_c else ''
+        hex_v  = hex_c.text().strip()  if hex_c  else ''
+        if naam:
+            with db._db() as conn:
+                conn.execute(
+                    "UPDATE actor_kleuren SET naam=?, hex=? WHERE id=?",
+                    (naam, hex_v, kid)
+                )
+                conn.commit()
+
+    def _add_kleur(self):
+        naam = self._inp_kleur.text().strip()
+        hex_v = self._inp_kleur_hex.text().strip()
+        if not naam:
+            return
+        db.create_actor_kleur(naam, hex_v)
+        self._inp_kleur.clear()
+        self._inp_kleur_hex.clear()
+        self._load_kleuren()
+
+    def _delete_kleur(self):
+        rows = sorted({idx.row() for idx in self.kleuren_table.selectedIndexes()}, reverse=True)
+        if not rows:
+            return
+        for r in rows:
+            cell = self.kleuren_table.item(r, 0)
+            kid  = cell.data(ID_ROLE) if cell else None
+            if kid:
+                db.delete_actor_kleur(kid)
+        self._load_kleuren()
+
+    # ── Sneltoetsen ───────────────────────────────
+
+    def _build_shortcuts_widget(self):
+        w = QWidget()
+        v = QVBoxLayout(w)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(0)
+
+        # Header bar
+        bar = QFrame()
+        bar.setFixedHeight(44)
+        bar.setStyleSheet(
+            "QFrame { background: #0d0d0d; border-bottom: 1px solid #1e1e1e;"
+            "  border-top: 1px solid #1e1e1e; }"
+        )
+        b = QHBoxLayout(bar)
+        b.setContentsMargins(12, 0, 12, 0)
+        b.setSpacing(10)
+
+        lbl_hdr = QLabel("SNELTOETSEN")
+        lbl_hdr.setStyleSheet("color: #555; font-size: 10px; letter-spacing: 4px;")
+        b.addWidget(lbl_hdr)
+
+        hint = QLabel("Meerdere toetsen per actie: komma-gescheiden  (bijv. M,K)")
+        hint.setStyleSheet("color: #2a2a2a; font-size: 10px;")
+        b.addWidget(hint)
+
+        b.addStretch()
+
+        btn_reset = QPushButton("↺  Standaard")
+        btn_reset.setFixedHeight(28)
+        btn_reset.setStyleSheet(
+            "QPushButton { background: #111; border: 1px solid #252525; border-radius: 3px;"
+            "  color: #444; font-size: 10px; padding: 0 8px; }"
+            "QPushButton:hover { border-color: #888; color: #aaa; }"
+        )
+        btn_reset.clicked.connect(self._reset_shortcuts)
+        b.addWidget(btn_reset)
+
+        v.addWidget(bar)
+
+        # Scrollable grid of label + line-edit
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setStyleSheet(
+            "QScrollArea { border: none; background: #0e0e0e; }"
+            "QScrollBar:vertical { background: #0a0a0a; width: 8px; }"
+            "QScrollBar::handle:vertical { background: #2a2a2a; border-radius: 4px; }"
+        )
+
+        inner = QWidget()
+        inner.setStyleSheet("background: #0e0e0e;")
+        grid = QGridLayout(inner)
+        grid.setContentsMargins(12, 6, 12, 6)
+        grid.setHorizontalSpacing(10)
+        grid.setVerticalSpacing(3)
+        grid.setColumnStretch(0, 2)
+        grid.setColumnStretch(1, 1)
+
+        # Column headers
+        _HDR = "color: #333; font-size: 9px; letter-spacing: 3px; padding-bottom: 4px;"
+        for col_i, txt in enumerate(('ACTIE', 'TOETS(EN)')):
+            h = QLabel(txt)
+            h.setStyleSheet(_HDR)
+            grid.addWidget(h, 0, col_i)
+
+        _EDIT_SS = (
+            "QLineEdit { background: #111; border: 1px solid #1e1e1e; border-radius: 3px;"
+            "  color: #aaa; font-size: 11px; padding: 2px 5px; }"
+            "QLineEdit:focus { border-color: #e8b86d; color: #e8b86d; }"
+        )
+        _LBL_SS = "color: #555; font-size: 11px; padding: 1px 0;"
+
+        self._sc_edits: list = []   # (action, QLineEdit)
+
+        for row_i, (action, label, default) in enumerate(SHORTCUT_DEFS, start=1):
+            lbl = QLabel(label)
+            lbl.setStyleSheet(_LBL_SS)
+
+            current = db.get_setting(f'shortcut_{action}', default)
+            edit = QLineEdit(current)
+            edit.setStyleSheet(_EDIT_SS)
+            edit.setPlaceholderText(default)
+            edit.setToolTip(f"Standaard: {default}  •  meerdere toetsen: komma-gescheiden")
+            edit.setFixedHeight(24)
+            edit.editingFinished.connect(
+                lambda a=action, e=edit: self._save_shortcut(a, e)
+            )
+
+            grid.addWidget(lbl,  row_i, 0)
+            grid.addWidget(edit, row_i, 1)
+            self._sc_edits.append((action, edit))
+
+        scroll.setWidget(inner)
+        v.addWidget(scroll, stretch=1)
+        return w
+
+    def _save_shortcut(self, action: str, edit: QLineEdit):
+        """Sla één sneltoets op en signaleer herladen."""
+        db.set_setting(f'shortcut_{action}', edit.text().strip())
+        self.shortcuts_saved.emit()
+
+    def _reset_shortcuts(self):
+        """Herstel alle sneltoetsen naar standaard."""
+        for action, edit in self._sc_edits:
+            default = next(d for a, _, d in SHORTCUT_DEFS if a == action)
+            edit.blockSignals(True)
+            edit.setText(default)
+            edit.blockSignals(False)
+            db.set_setting(f'shortcut_{action}', default)
+        self.shortcuts_saved.emit()
