@@ -2999,7 +2999,7 @@ class CineMarker(QMainWindow):
         except Exception as e:
             self.status.showMessage(f"  Thumbnail mislukt: {e}")
 
-    def _quick_marker(self, actors: list, categories: list):
+    def _quick_marker(self, actors: list, categories: list, pos: float | None = None):
         """Create marker — actor + category both required."""
         if not self._video_path:
             return
@@ -3020,7 +3020,8 @@ class CineMarker(QMainWindow):
                 return          # user cancelled
             categories = [chosen]
 
-        pos = self._current_pos()
+        if pos is None:
+            pos = self._current_pos()
 
         cat_names   = [c['name'] for c in categories]
         actor_names = [a['name'] for a in actors]
@@ -3162,7 +3163,7 @@ class CineMarker(QMainWindow):
         dlg = _MarkerQuickDlg(self, actors, pos, frame_pix, cats)
         if dlg.exec() == QDialog.DialogCode.Accepted:
             chosen_actors, chosen_cat = dlg.get_result()
-            self._quick_marker(chosen_actors, [chosen_cat])
+            self._quick_marker(chosen_actors, [chosen_cat], pos=pos)
 
     def _shortcut_n(self):
         if self.main_tabs.currentWidget() is not self.sorter_panel:
