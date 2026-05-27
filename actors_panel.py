@@ -1582,6 +1582,7 @@ class ActorsPanel(QWidget):
         self._delegate = ActorCardDelegate()
         self.grid.setItemDelegate(self._delegate)
         self.grid.itemClicked.connect(self._on_item_clicked)
+        self.grid.itemActivated.connect(self._on_item_enter)
         self._delegate.detail_requested.connect(self._open_detail)
         v0.addWidget(self.grid)
 
@@ -1972,6 +1973,14 @@ class ActorsPanel(QWidget):
         full_name  = f"{voornaam} {achternaam}".strip() or data.get('stem', '')
         if full_name:
             QApplication.clipboard().setText(full_name)
+
+    def _on_item_enter(self, item):
+        """Enter op een acteur-kaart: open detailpagina (niet in buiten_db-modus)."""
+        if self._mode == 'buiten_db':
+            return
+        data = item.data(Qt.ItemDataRole.UserRole)
+        if data and data.get('in_db'):
+            self._open_detail(data)
 
     # ── Detail navigatie ─────────────────────────
 
