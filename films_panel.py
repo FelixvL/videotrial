@@ -511,6 +511,8 @@ class FilmsPanel(QWidget):
         self._flt_actors:     set  = set()   # actieve acteur-IDs
         self._actor_name_map: dict = {}      # display_name -> actor_id
         self._actor_chip_btns: dict = {}     # actor_id -> QPushButton chip
+        self._flt_marker_cats: set = set()   # actieve marker-categorie-IDs
+        self._marker_cat_btns: dict = {}     # cat_id -> QPushButton
         # Cache voor cross-entity DB-queries (None = niet actief)
         self._cross_film_ids: set | None = None
         # Weergavemodus
@@ -736,6 +738,19 @@ class FilmsPanel(QWidget):
         btn_zoom_in.clicked.connect(self._zoom_in)
         b.addWidget(btn_zoom_in)
 
+        # ── Presets ──────────────────────────────
+        self._btn_presets = QPushButton("⭐")
+        self._btn_presets.setFixedSize(28, 28)
+        self._btn_presets.setToolTip("Filterpresets opslaan / laden")
+        self._btn_presets.setStyleSheet(
+            "QPushButton{background:#1a1a1a;border:1px solid #2a2a2a;border-radius:4px;"
+            "color:#555;font-size:13px;padding:0;}"
+            "QPushButton:hover{border-color:#e8b86d;color:#e8b86d;}"
+            "QPushButton:pressed{background:#e8b86d;color:#000;}"
+        )
+        self._btn_presets.clicked.connect(self._show_presets_menu)
+        b.addWidget(self._btn_presets)
+
         # ── Marker-modus toggle ───────────────────
         self._btn_marker_mode = QPushButton("◉")
         self._btn_marker_mode.setFixedSize(28, 28)
@@ -873,6 +888,20 @@ class FilmsPanel(QWidget):
 
         b2.addSpacing(8)
 
+        # Marker-categoriefilter (dynamisch gevuld)
+        lbl_mc = QLabel("MCat:")
+        lbl_mc.setStyleSheet("color: #333; font-size: 9px; letter-spacing: 2px;")
+        b2.addWidget(lbl_mc)
+
+        self._marker_cat_container = QWidget()
+        self._marker_cat_container.setStyleSheet("background: transparent;")
+        _mcc = QHBoxLayout(self._marker_cat_container)
+        _mcc.setContentsMargins(0, 0, 0, 0)
+        _mcc.setSpacing(3)
+        b2.addWidget(self._marker_cat_container)
+
+        b2.addSpacing(8)
+
         # Acteurfilter — zoekbalk met autocomplete + chips voor gekozen acteurs
         lbl_act = QLabel("Acteur:")
         lbl_act.setStyleSheet("color: #333; font-size: 9px; letter-spacing: 2px;")
@@ -940,10 +969,44 @@ class FilmsPanel(QWidget):
     # ── Tweede balk: dynamische knoppen laden ────
 
     def reload_filter_bar2(self):
-        """Herlaad filmcategorieën, acteurkleuren en acteur-autocomplete uit de DB."""
+        """Herlaad filmcategorieën, acteurkleuren, marker-cats en acteur-autocomplete."""
         self._reload_film_cat_buttons()
         self._reload_actor_kleur_buttons()
+        self._reload_marker_cat_buttons()
         self._load_actor_autocomplete()
+
+    def _reload_marker_cat_buttons(self):
+        layout = self._marker_cat_container.layout()
+        while layout.count():
+            w = layout.takeAt(0).widget()
+            if w:
+                w.deleteLater()
+        self._marker_cat_btns.clear()
+
+        _mc_ss = (
+            "QPushButton{background:#111;border:1px solid #252525;border-radius:3px;"
+            "color:#444;font-size:9px;padding:0 5px;}"
+            "QPushButton:hover{color:#888;border-color:#444;}"
+            "QPushButton:checked{background:#180018;border-color:#500050;color:#c060c0;}"
+        )
+        for cat in db.get_all_categories():
+            cid  = cat['id']
+            name = cat.get('name', '') or ''
+            btn  = QPushButton(name)
+            btn.setCheckable(True)
+            btn.setChecked(cid in self._flt_marker_cats)
+            btn.setFixedHeight(22)
+            btn.setStyleSheet(_mc_ss)
+            btn.toggled.connect(lambda checked, c=cid: self._toggle_marker_cat(c, checked))
+            layout.addWidget(btn)
+            self._marker_cat_btns[cid] = btn
+
+    def _toggle_marker_cat(self, cat_id: int, checked: bool):
+        if checked:
+            self._flt_marker_cats.add(cat_id)
+        else:
+            self._flt_marker_cats.discard(cat_id)
+        self._apply_search_visibility()
 
     def _reload_film_cat_buttons(self):
         layout = self._film_cat_container.layout()
@@ -1182,6 +1245,197 @@ class FilmsPanel(QWidget):
         self._all_items = items
         self._apply_search_visibility()
 
+    # ── Filter presets ───────────────────────────
+
+    def _get_current_filter_state(self) -> dict:
+        """Zet de huidige filterstatus om naar een serieel woordenboek."""
+        return {
+            'search':            self.search_input.text(),
+            'dur_min':           self._dur_min_input.text(),
+            'dur_max':           self._dur_max_input.text(),
+            'sz_min':            self._sz_min_input.text(),
+            'sz_max':            self._sz_max_input.text(),
+            'ag_min':            self._actor_groo_min.text(),
+            'ag_max':            self._actor_groo_max.text(),
+            'flt_1thumb':        self._flt_1thumb,
+            'flt_multithumb':    self._flt_multithumb,
+            'flt_no_thumb':      self._flt_no_thumb,
+            'flt_with_markers':  self._flt_with_markers,
+            'flt_no_markers':    self._flt_no_markers,
+            'flt_film_cats':     list(self._flt_film_cats),
+            'flt_actor_kleur':   list(self._flt_actor_kleur),
+            'flt_actor_dec':     list(self._flt_actor_dec),
+            'flt_film_size':     list(self._flt_film_size),
+            'flt_marker_cats':   list(self._flt_marker_cats),
+            # Acteurs: ID + weergavenaam opslaan zodat chips te reconstrueren zijn
+            'flt_actors': [
+                {'id': aid, 'name': nm}
+                for nm, aid in self._actor_name_map.items()
+                if aid in self._flt_actors
+            ],
+        }
+
+    def _apply_filter_state(self, state: dict):
+        """Herstel een opgeslagen filterstatus — reset eerst, pas daarna toe."""
+        # Reset zonder _apply_search_visibility aan te roepen per stap
+        self._reset_all_filters()
+
+        # Tekstvelden
+        for widget, key in [
+            (self.search_input,    'search'),
+            (self._dur_min_input,  'dur_min'),
+            (self._dur_max_input,  'dur_max'),
+            (self._sz_min_input,   'sz_min'),
+            (self._sz_max_input,   'sz_max'),
+            (self._actor_groo_min, 'ag_min'),
+            (self._actor_groo_max, 'ag_max'),
+        ]:
+            val = state.get(key, '')
+            if val:
+                widget.blockSignals(True)
+                widget.setText(val)
+                widget.blockSignals(False)
+
+        # Simpele bool-toggles
+        for key, btn in [
+            ('flt_1thumb',       self._btn_flt_1thumb),
+            ('flt_multithumb',   self._btn_flt_multithumb),
+            ('flt_no_thumb',     self._btn_flt_no_thumb),
+            ('flt_with_markers', self._btn_flt_with_markers),
+            ('flt_no_markers',   self._btn_flt_no_markers),
+        ]:
+            if state.get(key):
+                setattr(self, f'_{key}', True)
+                btn.setStyleSheet(self._FILTER_BTN_ACTIVE)
+
+        # Set-gebaseerde toggles via button-dicts
+        for cid in state.get('flt_film_cats', []):
+            if cid in self._film_cat_btns:
+                b = self._film_cat_btns[cid]
+                b.blockSignals(True); b.setChecked(True); b.blockSignals(False)
+                self._flt_film_cats.add(cid)
+        for kid in state.get('flt_actor_kleur', []):
+            if kid in self._actor_kleur_btns:
+                b = self._actor_kleur_btns[kid]
+                b.blockSignals(True); b.setChecked(True); b.blockSignals(False)
+                self._flt_actor_kleur.add(kid)
+        for key in state.get('flt_actor_dec', []):
+            if key in self._actor_dec_btns:
+                b = self._actor_dec_btns[key]
+                b.blockSignals(True); b.setChecked(True); b.blockSignals(False)
+                self._flt_actor_dec.add(key)
+        for bk in state.get('flt_film_size', []):
+            if bk in self._film_size_btns:
+                b = self._film_size_btns[bk]
+                b.blockSignals(True); b.setChecked(True); b.blockSignals(False)
+                self._flt_film_size.add(bk)
+        for cid in state.get('flt_marker_cats', []):
+            if cid in self._marker_cat_btns:
+                b = self._marker_cat_btns[cid]
+                b.blockSignals(True); b.setChecked(True); b.blockSignals(False)
+                self._flt_marker_cats.add(cid)
+
+        # Acteur-chips
+        for a in state.get('flt_actors', []):
+            if a.get('name') in self._actor_name_map:
+                self._add_actor_filter_by_name(a['name'])
+
+        # Actor-grootte parse (handmatig want signal geblokkeerd)
+        def _pi(s):
+            try:
+                v = int(s.strip()); return v if 1 <= v <= 5 else None
+            except Exception:
+                return None
+        self._flt_actor_groo_min = _pi(state.get('ag_min', ''))
+        self._flt_actor_groo_max = _pi(state.get('ag_max', ''))
+
+        # Eén keer alles toepassen
+        self._update_cross_filter()
+
+    def _show_presets_menu(self):
+        menu = QMenu(self)
+        menu.setStyleSheet(
+            "QMenu{background:#1a1a1a;border:1px solid #333;color:#ccc;font-size:12px;}"
+            "QMenu::item{padding:6px 20px;}"
+            "QMenu::item:selected{background:#1a1400;color:#e8b86d;}"
+            "QMenu::separator{height:1px;background:#2a2a2a;margin:2px 0;}"
+        )
+
+        act_save = menu.addAction("💾  Opslaan als preset…")
+        act_save.triggered.connect(self._save_current_filter)
+
+        presets = db.get_all_film_filter_presets()
+        if presets:
+            menu.addSeparator()
+            for p in presets:
+                act = menu.addAction(f"▶  {p['name']}")
+                act.triggered.connect(
+                    lambda _, pid=p['id']: self._load_preset(pid))
+            menu.addSeparator()
+            act_del = menu.addAction("🗑  Preset verwijderen…")
+            act_del.triggered.connect(self._delete_preset_dialog)
+
+        btn_pos = self._btn_presets.mapToGlobal(
+            self._btn_presets.rect().bottomLeft())
+        menu.exec(btn_pos)
+
+    def _save_current_filter(self):
+        from PyQt6.QtWidgets import QInputDialog
+        name, ok = QInputDialog.getText(
+            self, "Preset opslaan", "Naam voor dit filter:",
+            text="")
+        if not ok or not name.strip():
+            return
+        state = self._get_current_filter_state()
+        db.save_film_filter_preset(name.strip(), state)
+
+    def _load_preset(self, preset_id: int):
+        state = db.load_film_filter_preset(preset_id)
+        if state:
+            self._apply_filter_state(state)
+
+    def _delete_preset_dialog(self):
+        from PyQt6.QtWidgets import QDialog, QVBoxLayout, QLabel, QCheckBox, QPushButton, QHBoxLayout
+        presets = db.get_all_film_filter_presets()
+        if not presets:
+            return
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Presets verwijderen")
+        dlg.setMinimumWidth(280)
+        dlg.setStyleSheet(
+            "QDialog{background:#141414;} QLabel{color:#ccc;font-size:12px;}"
+            "QCheckBox{color:#ccc;font-size:12px;spacing:8px;}"
+            "QCheckBox::indicator{width:14px;height:14px;background:#1e1e1e;"
+            "border:1px solid #444;border-radius:3px;}"
+            "QCheckBox::indicator:checked{background:#cc3333;border-color:#cc3333;}"
+            "QPushButton{background:#1e1e1e;border:1px solid #333;border-radius:4px;"
+            "padding:6px 18px;color:#ccc;font-size:12px;}"
+            "QPushButton:hover{border-color:#cc3333;color:#cc3333;}"
+        )
+        v = QVBoxLayout(dlg)
+        v.setContentsMargins(14, 14, 14, 14)
+        v.setSpacing(6)
+        v.addWidget(QLabel("Selecteer presets om te verwijderen:"))
+        checks = {}
+        for p in presets:
+            cb = QCheckBox(p['name'])
+            v.addWidget(cb)
+            checks[p['id']] = cb
+        bh = QHBoxLayout()
+        btn_cancel = QPushButton("Annuleren")
+        btn_del    = QPushButton("Verwijderen")
+        btn_cancel.clicked.connect(dlg.reject)
+        def _do_delete():
+            for pid, cb in checks.items():
+                if cb.isChecked():
+                    db.delete_film_filter_preset(pid)
+            dlg.accept()
+        btn_del.clicked.connect(_do_delete)
+        bh.addStretch(); bh.addWidget(btn_cancel); bh.addWidget(btn_del)
+        v.addLayout(bh)
+        dlg.exec()
+
     # ── Marker-modus ─────────────────────────────
 
     def _toggle_marker_mode(self, checked: bool):
@@ -1318,9 +1572,19 @@ class FilmsPanel(QWidget):
                 except OSError:
                     pass
 
-            # Marker-tellingen uit DB (geen JSON-read van SSD)
+            # Marker-tellingen + categorie-IDs uit de JSON (gecached in itemdata)
             markers     = db_film.get('marker_count',     0) or 0
             neg_markers = db_film.get('neg_marker_count', 0) or 0
+            marker_cat_ids: set = set()
+            mj = fp.parent / f".{fp.stem}_markers.json"
+            if mj.exists():
+                try:
+                    for m in json.loads(mj.read_text(encoding='utf-8')):
+                        if not m.get('negative'):
+                            for cid in (m.get('categories') or []):
+                                marker_cat_ids.add(cid)
+                except Exception:
+                    pass
             # Actor-count + foto-paden uit batch (geen DB-queries in paint())
             actor_count  = all_actor_counts.get(film_id, 0) if film_id else 0
             actor_photos = all_actor_photos.get(film_id, []) if film_id else []
@@ -1347,6 +1611,7 @@ class FilmsPanel(QWidget):
                 'afgeleide_rating': rating,
                 'cell_size':        QSize(cw, ch),
                 'thumb_phase':      random.uniform(0.0, 2.0),
+                'marker_cat_ids':   marker_cat_ids,
                 'marker_thumbs':    _mthumbs.get(fp.stem, []),
                 'marker_phase':     random.uniform(0.0, 10.0),
                 'marker_period':    random.uniform(2.0, 4.0),
@@ -1449,6 +1714,9 @@ class FilmsPanel(QWidget):
             btn.blockSignals(True); btn.setChecked(False); btn.blockSignals(False)
         for btn in self._film_size_btns.values():
             btn.blockSignals(True); btn.setChecked(False); btn.blockSignals(False)
+        self._flt_marker_cats.clear()
+        for btn in self._marker_cat_btns.values():
+            btn.blockSignals(True); btn.setChecked(False); btn.blockSignals(False)
         # Acteur-chips verwijderen
         for chip in list(self._actor_chip_btns.values()):
             self._actor_chips_layout.removeWidget(chip)
@@ -1506,6 +1774,12 @@ class FilmsPanel(QWidget):
                     item.setHidden(True); continue
                 if max_b > 0 and size_b > max_b:
                     item.setHidden(True); continue
+
+                # Marker-categorie filter — film moet minstens één matching marker hebben
+                if self._flt_marker_cats:
+                    mc = d.get('marker_cat_ids', set())
+                    if not (mc & self._flt_marker_cats):
+                        item.setHidden(True); continue
 
                 # Film-grootte bucket filter
                 if self._flt_film_size:

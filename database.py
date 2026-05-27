@@ -238,6 +238,15 @@ def init_db():
     except Exception:
         pass
 
+    # Migration: film filter presets
+    c.executescript("""
+        CREATE TABLE IF NOT EXISTS film_filter_presets (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            name        TEXT NOT NULL UNIQUE,
+            filter_json TEXT NOT NULL DEFAULT '{}'
+        );
+    """)
+
     conn.commit()
     conn.close()
 
@@ -946,6 +955,50 @@ def get_film_ids_by_actor_decennia(decennia_keys: list) -> set:
             f"SELECT DISTINCT film_id FROM actor_films WHERE actor_id IN ({ph})", matching
         ).fetchall()
         return {r['film_id'] for r in rows}
+
+
+# ── Film filter presets ───────────────────────
+
+def get_all_film_filter_presets() -> list:
+    with _db() as conn:
+        rows = conn.execute(
+            "SELECT id, name, filter_json FROM film_filter_presets ORDER BY name COLLATE NOCASE"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def save_film_filter_preset(name: str, filter_state: dict) -> int:
+    """Sla een preset op (INSERT OR REPLACE op naam). Geeft het nieuwe ID terug."""
+    js = json.dumps(filter_state, ensure_ascii=False)
+    with _db() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO film_filter_presets (name, filter_json) VALUES (?, ?)",
+            (name, js)
+        )
+        conn.commit()
+        row = conn.execute(
+            "SELECT id FROM film_filter_presets WHERE name=?", (name,)
+        ).fetchone()
+        return row['id'] if row else -1
+
+
+def delete_film_filter_preset(preset_id: int):
+    with _db() as conn:
+        conn.execute("DELETE FROM film_filter_presets WHERE id=?", (preset_id,))
+        conn.commit()
+
+
+def load_film_filter_preset(preset_id: int) -> dict:
+    with _db() as conn:
+        row = conn.execute(
+            "SELECT filter_json FROM film_filter_presets WHERE id=?", (preset_id,)
+        ).fetchone()
+        if row:
+            try:
+                return json.loads(row['filter_json'])
+            except Exception:
+                pass
+    return {}
 
 
 def get_film_ids_by_actors(actor_ids: list) -> set:
