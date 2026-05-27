@@ -365,10 +365,11 @@ def get_actor_photos_for_films_batch() -> dict:
     Gebruikt door de film-delegate zodat paint() geen DB-queries nodig heeft."""
     conn = get_connection()
     rows = conn.execute("""
-        SELECT af.film_id, ap.photo_path
+        SELECT af.film_id, MIN(ap.photo_path) AS photo_path
         FROM actor_films af
         JOIN actor_photos ap ON ap.actor_id = af.actor_id
-        ORDER BY af.film_id, ap.id
+        GROUP BY af.film_id, af.actor_id
+        ORDER BY af.film_id, MIN(ap.id)
     """).fetchall()
     conn.close()
     result: dict = {}

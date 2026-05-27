@@ -3425,16 +3425,11 @@ class CineMarker(QMainWindow):
         else:
             if 0 <= row < len(self._markers):
                 t = self._markers[row]['time']
-                # Fase 1: keyframe-seek — toont de dichtstbijzijnde keyframe vrijwel direct
+                # Directe exact-seek — geen twee fases, voorkomt flash van verkeerde keyframe
                 try:
-                    self.player.seek(t, 'absolute')
+                    self.player.seek(t, 'absolute+exact')
                 except Exception:
                     pass
-                # Fase 2: exact-seek 80ms later — landing op het precieze frame.
-                # Timer wordt herstart bij snel doorklikken (O/O/P/P), zodat de
-                # exacte seek alleen op de eindstop valt.
-                self._exact_seek_target = t
-                self._exact_seek_timer.start()
         # Panel is a separate top-level window; return keyboard focus to main window
         self.activateWindow()
         self.video_container.setFocus(Qt.FocusReason.OtherFocusReason)
