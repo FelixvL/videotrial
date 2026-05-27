@@ -3373,12 +3373,25 @@ class CineMarker(QMainWindow):
             self.toggle_play()
 
     def _shortcut_left(self):
+        # Als een lijstwidget focus heeft: navigeer daarin in plaats van te seekken
+        focused = QApplication.focusWidget()
+        if isinstance(focused, QListWidget):
+            row = focused.currentRow()
+            if row > 0:
+                focused.setCurrentRow(row - 1)
+            return
         if self.main_tabs.currentWidget() is self.sorter_panel:
             self.sorter_panel._prev()
         else:
             self.seek_relative(-5)
 
     def _shortcut_right(self):
+        focused = QApplication.focusWidget()
+        if isinstance(focused, QListWidget):
+            row = focused.currentRow()
+            if row < focused.count() - 1:
+                focused.setCurrentRow(row + 1)
+            return
         if self.main_tabs.currentWidget() is self.sorter_panel:
             self.sorter_panel._next()
         else:
@@ -3453,6 +3466,10 @@ class CineMarker(QMainWindow):
                     os.unlink(tmp_path)
                 except Exception:
                     pass
+            # Focus altijd teruggeven aan het hoofdvenster zodat shortcuts
+            # (bijv. V voor volgende film) direct werken na het sluiten van de popup
+            self.activateWindow()
+            self.setFocus()
 
     def _shortcut_n(self):
         if self.main_tabs.currentWidget() is not self.sorter_panel:

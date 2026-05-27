@@ -442,7 +442,7 @@ class MarkersPanel(QWidget):
 
         self._delegate = MarkerGridDelegate(self._grid)
         self._grid.setItemDelegate(self._delegate)
-        self._grid.itemDoubleClicked.connect(self._on_item_jump)
+        self._grid.itemActivated.connect(self._on_item_jump)
         self._grid.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._grid.customContextMenuRequested.connect(self._on_grid_context_menu)
         body.addWidget(self._grid)
