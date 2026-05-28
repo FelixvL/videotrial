@@ -1645,6 +1645,7 @@ class _MarkerQuickDlg(QDialog):
         self.setWindowFlags(
             Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint
         )
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self._actors           = list(actors)
         self._pos              = pos
         self._chosen_cat       = None
@@ -1674,7 +1675,7 @@ class _MarkerQuickDlg(QDialog):
 
     def _build(self, frame_pix, categories, show_delete: bool = False):
         self.setStyleSheet("""
-            QDialog   { background:#1a1a1a; border:1px solid #555; border-radius:8px; }
+            QDialog   { background: transparent; border: none; }
             QLabel    { color:#ccc; }
             QPushButton {
                 background:#252525; color:#ccc;
@@ -1688,7 +1689,19 @@ class _MarkerQuickDlg(QDialog):
             QPushButton#cancel:hover { color:#ccc; background:#2a2a2a; }
         """)
 
-        v = QVBoxLayout(self)
+        # Transparante buitenlaag + donker semi-transparant frame als container
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        _frame = QFrame()
+        _frame.setStyleSheet(
+            "QFrame { background: rgba(12,12,12,215); border: 1px solid #3a3a3a;"
+            "  border-radius: 10px; }"
+        )
+        outer.addWidget(_frame)
+
+        v = QVBoxLayout(_frame)
         v.setContentsMargins(16, 16, 16, 16)
         v.setSpacing(12)
 
@@ -1902,11 +1915,23 @@ class _MarkerQuickDlg(QDialog):
         return self._actors, self._chosen_cat, self._stars
 
     def _center_on_parent(self):
+        """Positioneer rechtsonder in het oudervenster (of scherm als fallback)."""
         self.adjustSize()
+        margin = 24
         parent = self.parent()
         if parent:
-            center = parent.frameGeometry().center()
-            self.move(center - self.rect().center())
+            # geometry() geeft de client-area in schermcoördinaten voor top-level vensters
+            pg = parent.geometry()
+            self.move(
+                pg.x() + pg.width()  - self.width()  - margin,
+                pg.y() + pg.height() - self.height() - margin,
+            )
+        else:
+            screen = QApplication.primaryScreen().availableGeometry()
+            self.move(
+                screen.x() + screen.width()  - self.width()  - margin,
+                screen.y() + screen.height() - self.height() - margin,
+            )
 
 
 
@@ -1914,6 +1939,74 @@ class _MarkerQuickDlg(QDialog):
 # ─────────────────────────────────────────────
 #  Main Window
 # ─────────────────────────────────────────────
+
+# ─────────────────────────────────────────────
+#  Video-only fullscreen window
+# ─────────────────────────────────────────────
+
+class _VideoFullscreenWindow(QWidget):
+    """Volledig-scherm venster dat uitsluitend de video toont.
+    Heeft een klein halftransparant ✕-knopje rechtsboven.
+    Routeert M / V / O / P naar de CineMarker-instantie."""
+
+    def __init__(self, cinemarker: 'CineMarker'):
+        super().__init__(
+            None,
+            Qt.WindowType.Window | Qt.WindowType.FramelessWindowHint,
+        )
+        self._cm = cinemarker
+        self.setStyleSheet("background: #000;")
+
+        # Video-oppervlak — mpv rendert hiernaartoe via wid
+        self._video = QWidget(self)
+        self._video.setStyleSheet("background: #000;")
+        self._video.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
+
+        # Klein sluitknopje — halftransparant, rechtsboven
+        self._btn_close = QPushButton("✕", self)
+        self._btn_close.setFixedSize(38, 38)
+        self._btn_close.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._btn_close.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._btn_close.setStyleSheet(
+            "QPushButton { background: rgba(10,10,10,130); border: 1px solid rgba(80,80,80,70);"
+            "  border-radius: 5px; color: rgba(170,170,170,150); font-size: 15px; }"
+            "QPushButton:hover { background: rgba(160,20,20,220); border-color: #e05555;"
+            "  color: #fff; }"
+        )
+        self._btn_close.clicked.connect(cinemarker._exit_video_fullscreen)
+
+        # Toetsconfiguratie ophalen (keer bij aanmaken)
+        self._key_m  = db.get_setting('shortcut_marker',        'M').split(',')[0].strip()
+        self._key_v  = db.get_setting('shortcut_volgende_film', 'V').split(',')[0].strip()
+        self._key_o  = db.get_setting('shortcut_marker_achter', 'O').split(',')[0].strip()
+        self._key_p  = db.get_setting('shortcut_marker_voor',   'P').split(',')[0].strip()
+        self._key_fs = db.get_setting('shortcut_fullscreen',    'F11').split(',')[0].strip()
+
+    # ── Layout ───────────────────────────────────
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._video.setGeometry(0, 0, self.width(), self.height())
+        self._btn_close.move(self.width() - 50, 12)
+        self._btn_close.raise_()
+
+    # ── Keyboard ─────────────────────────────────
+
+    def keyPressEvent(self, event):
+        seq = QKeySequence(event.keyCombination()).toString()
+        if seq == self._key_m:
+            self._cm._shortcut_m()
+        elif seq == self._key_v:
+            self._cm._next_film()
+        elif seq == self._key_o:
+            self._cm._shortcut_o()
+        elif seq == self._key_p:
+            self._cm._shortcut_p()
+        elif seq == self._key_fs or event.key() == Qt.Key.Key_Escape:
+            self._cm._exit_video_fullscreen()
+        else:
+            super().keyPressEvent(event)
+
 
 class CineMarker(QMainWindow):
     def __init__(self):
@@ -1941,6 +2034,7 @@ class CineMarker(QMainWindow):
         self._selection_entries: list = []   # cross-film afspeellijst vanuit markers-tab
         self._current_marker_row: int = -1  # blijft bewaard over list-rebuilds heen
         self._active_shortcuts: list = []   # QShortcut-objecten (voor herladen)
+        self._fs_win: _VideoFullscreenWindow | None = None  # video-only fullscreen
 
         # Persistente caches voor marker-lijst — worden niet bij elke rebuild gewist
         self._actor_pix_cache: dict = {}   # actor_id  -> QPixmap | None
@@ -2375,10 +2469,49 @@ class CineMarker(QMainWindow):
             self._panel.show()
 
     def _toggle_fullscreen(self):
-        if self.isFullScreen():
-            self.showNormal()
+        if self._fs_win and self._fs_win.isVisible():
+            self._exit_video_fullscreen()
         else:
-            self.showFullScreen()
+            self._enter_video_fullscreen()
+
+    def _enter_video_fullscreen(self):
+        """Schakel over naar video-only fullscreen: apart schermvullend venster."""
+        if self._fs_win is None:
+            self._fs_win = _VideoFullscreenWindow(self)
+        # Verberg overlays — ze drijven anders over het fullscreen-venster
+        self._panel.hide()
+        self._actors_overlay.hide()
+        self._film_edit_panel.hide()
+        self._fs_win.showFullScreen()
+        self._fs_win.raise_()
+        self._fs_win.activateWindow()
+        # Kleine vertraging zodat Qt de HWND aanmaakt vóór mpv koppeling
+        QTimer.singleShot(80, self._attach_mpv_to_fs)
+
+    def _attach_mpv_to_fs(self):
+        """Koppel mpv aan het fullscreen-videoscherm (na HWND-creatie)."""
+        if self._fs_win and self._fs_win.isVisible():
+            try:
+                self.player['wid'] = int(self._fs_win._video.winId())
+            except Exception:
+                pass
+
+    def _exit_video_fullscreen(self):
+        """Sluit video-only fullscreen en herstel normale weergave."""
+        if self._fs_win:
+            self._fs_win.hide()
+        # Mpv terug aan het originele videoscherm koppelen
+        try:
+            self.player['wid'] = int(self.video_container.winId())
+        except Exception:
+            pass
+        # Herstel overlays als we op het speler-tabblad zijn
+        player_idx = self.main_tabs.indexOf(self._player_widget)
+        if self.main_tabs.currentIndex() == player_idx:
+            self._panel.show()
+            if self._video_path:
+                self._actors_overlay.show()
+                self._actors_overlay.raise_()
 
     def _show_actor_overlay(self):
         if not self._video_path:
@@ -3451,7 +3584,12 @@ class CineMarker(QMainWindow):
             pass  # popup werkt ook zonder frame
 
         try:
-            dlg = _MarkerQuickDlg(self, actors, pos, frame_pix, cats)
+            _dlg_parent = (
+                self._fs_win
+                if (self._fs_win and self._fs_win.isVisible())
+                else self
+            )
+            dlg = _MarkerQuickDlg(_dlg_parent, actors, pos, frame_pix, cats)
             if dlg.exec() == QDialog.DialogCode.Accepted:
                 chosen_actors, chosen_cat, stars = dlg.get_result()
                 self._quick_marker(chosen_actors, [chosen_cat], pos=pos, stars=stars)

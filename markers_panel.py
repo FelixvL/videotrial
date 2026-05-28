@@ -684,12 +684,43 @@ class MarkersPanel(QWidget):
         self._apply_filters()
 
     def _update_markertype_dropdown(self):
-        """Zet Markertype-dropdown met categorieën die voorkomen in de geladen entries."""
-        used_ids = set()
+        """Zet Markertype-dropdown in hiërarchische volgorde: hoofdcat → subcategorieën.
+        Alleen categorieën die daadwerkelijk in de geladen entries voorkomen worden getoond."""
+        used_ids: set = set()
         for e in self._all_entries:
             used_ids.update(e['cat_ids'])
-        cats = [c for c in db.get_all_categories() if c['id'] in used_ids]
-        items = [(c['id'], c['name']) for c in cats]
+
+        all_cats = db.get_all_categories()   # alle categorieën voor de structuur
+
+        # Bouw parent→children map
+        by_parent: dict = {}
+        top_level: list = []
+        for c in all_cats:
+            pid = c.get('parent_id')
+            if pid is None:
+                top_level.append(c)
+            else:
+                by_parent.setdefault(pid, []).append(c)
+
+        # Loop door boom: hoofdcat (gesorteerd op naam) → subcategorieën
+        top_level.sort(key=lambda c: c['name'].lower())
+        items: list = []
+        for parent in top_level:
+            if parent['id'] in used_ids:
+                items.append((parent['id'], parent['name']))
+            children = sorted(by_parent.get(parent['id'], []),
+                               key=lambda c: c['name'].lower())
+            for child in children:
+                if child['id'] in used_ids:
+                    items.append((child['id'], f"  ↳  {child['name']}"))
+
+        # Eventuele wezen (parent bestaat niet meer in DB)
+        added = {i for i, _ in items}
+        for c in sorted([c for c in all_cats
+                         if c['id'] in used_ids and c['id'] not in added],
+                        key=lambda c: c['name'].lower()):
+            items.append((c['id'], c['name']))
+
         self._dd_markertype.set_items(items)
 
     # ── Gefilterde entries (gedeelde logica) ─────────────────────
