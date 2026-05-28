@@ -571,36 +571,37 @@ class _ClickFlash(QWidget):
 #  Fade overlay — voor automatische marker-overgangen
 # ─────────────────────────────────────────────
 
-class _FadeOverlay(QWidget):
+class _FadeOverlay(QLabel):
     """Crossfade-overlay voor automatische marker-overgangen.
 
-    Werkwijze:
-      1. Scherminhoud van het videogebied vastleggen (screenshot vóór de seek)
-      2. Screenshot direct op volledig-zichtbaar tonen
-      3. Callback uitvoeren (marker-sprong / film-switch) — nieuwe video speelt
-         al onder het bevroren frame
-      4. Bevroren frame weefaden → nieuwe video wordt zichtbaar (crossfade)
+    Aanpak:
+      1. Screenshot van het videogebied vastleggen (vóór de seek)
+      2. Screenshot als QLabel tonen op volle window-opacity (1.0)
+      3. Callback uitvoeren (sprong naar volgende marker)
+      4. setWindowOpacity geleidelijk naar 0.0 — de OS-compositor (DWM)
+         blended het bevroren frame weg terwijl de nieuwe video er onder speelt.
 
-    parent=None + WindowStaysOnTopHint zodat de overlay ook boven een
-    fullscreen-venster verschijnt.
+    Gebruik setWindowOpacity i.p.v. per-pixel alpha in paintEvent: dat is
+    hardware-versneld en geeft geen zwart tussenframe.
+    parent=None + WindowStaysOnTopHint = ook boven fullscreen zichtbaar.
     """
 
-    _STEPS = 22   # ~360 ms fade-out bij 16 ms interval
+    _STEPS = 28   # ~450 ms fade bij 16 ms interval
 
     def __init__(self, main_win, video_container):
         super().__init__(
-            None,   # geen parent → top-level; kan boven elk venster verschijnen
+            None,
             Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.Tool
             | Qt.WindowType.WindowTransparentForInput
             | Qt.WindowType.WindowStaysOnTopHint,
         )
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+        self.setScaledContents(True)
+        self.setStyleSheet("background: #000;")
         self._main_win = main_win
         self._vc       = video_container
         self._opacity  = 0.0
-        self._pix      = None   # bevroren frame
         self._phase    = 'idle'
         self._timer    = QTimer(self)
         self._timer.setInterval(16)
@@ -611,66 +612,62 @@ class _FadeOverlay(QWidget):
     # ── Public ───────────────────────────────────
 
     def trigger(self, callback, video_widget=None):
-        """Crossfade naar de volgende marker.
-        video_widget: het actieve video-oppervlak (wijkt af in fullscreen-modus).
-        """
+        """Crossfade: bevries huidig frame → spring direct → fade weg."""
         self._timer.stop()
         vc = video_widget or self._vc
 
-        # Stap 1: bevries het huidige frame via een schermopname (vóór de jump)
-        self._pix = None
+        # Schermopname vóór de jump; gebruik devicePixelRatio voor hi-DPI
+        pix  = None
+        geom = None
         try:
-            tl   = vc.mapToGlobal(vc.rect().topLeft())
-            full = QApplication.primaryScreen().grabWindow(0)
-            self._pix = full.copy(tl.x(), tl.y(), vc.width(), vc.height())
-            self.setGeometry(tl.x(), tl.y(), vc.width(), vc.height())
+            screen = QApplication.primaryScreen()
+            dpr    = screen.devicePixelRatio()
+            tl     = vc.mapToGlobal(vc.rect().topLeft())
+            full   = screen.grabWindow(0)
+            pix    = full.copy(
+                int(tl.x() * dpr), int(tl.y() * dpr),
+                int(vc.width() * dpr), int(vc.height() * dpr),
+            )
+            geom = (tl.x(), tl.y(), vc.width(), vc.height())
         except Exception:
-            self._pix = None
+            pix = None
 
-        if self._pix and not self._pix.isNull():
-            # Stap 2: toon bevroren frame direct op volle dekking
-            self._opacity = 1.0
-            self._phase   = 'out'
-            self.show()
-            self.raise_()
-            self.update()
+        if not pix or pix.isNull():
+            # Geen screenshot — direct springen zonder animatie
+            if callback:
+                callback()
+            return
 
-        # Stap 3: spring direct naar de volgende marker (nieuwe video speelt al)
+        self.setPixmap(pix)
+        self.setGeometry(*geom)
+        self._opacity = 1.0
+        self._phase   = 'out'
+        self.setWindowOpacity(1.0)
+        self.show()
+        self.raise_()
+
+        # Direct springen; nieuwe video speelt al onder het bevroren frame
         if callback:
             callback()
 
-        # Stap 4: start fade-out (bevroren frame weefaden)
-        if self._pix and not self._pix.isNull():
-            self._timer.start()
+        self._timer.start()
 
     def abort(self):
-        """Stop en verberg onmiddellijk (bijv. bij handmatige skip)."""
+        """Stop en verberg onmiddellijk (bijv. bij handmatige skip of pauze)."""
         self._timer.stop()
         self._opacity = 0.0
         self._phase   = 'idle'
-        self._pix     = None
         self.hide()
 
-    # ── Paint ────────────────────────────────────
-
-    def paintEvent(self, _event):
-        if self._opacity <= 0 or not self._pix or self._pix.isNull():
-            return
-        from PyQt6.QtGui import QPainter
-        p = QPainter(self)
-        p.setOpacity(self._opacity)
-        p.drawPixmap(self.rect(), self._pix)
-
-    # ── Animation tick ───────────────────────────
+    # ── Animatie ─────────────────────────────────
 
     def _tick(self):
         if self._phase == 'out':
             self._opacity = max(0.0, self._opacity - 1.0 / self._STEPS)
-            self.update()
+            self.setWindowOpacity(self._opacity)
             if self._opacity <= 0.0:
                 self._timer.stop()
                 self._phase = 'idle'
-                self._pix   = None
                 self.hide()
 
     # ── Positie volgen ───────────────────────────
