@@ -651,13 +651,11 @@ class _FadeOverlay(QLabel):
         self.setWindowOpacity(1.0)
         self.raise_()
 
-        # Wacht één vsync (~16 ms) voordat we springen.
-        # DWM composeert de overlay pas bij de éénde vsync ná setWindowOpacity(1.0).
-        # Als we direct springen decodeert mpv al het eerste nieuwe frame
-        # en DWM plaatst de overlay pas dáárna bovenop → 1-frame-flash van het
-        # vorige marker-frame. Door 16 ms te wachten heeft DWM al volledig
-        # gecomposeerd vóórdat mpv de seek-opdracht krijgt.
-        QTimer.singleShot(16, self._fire_deferred_cb)
+        # Wacht twee vsyncs (~32 ms) voordat we springen.
+        # DWM composeert de overlay bij de eerstvolgende vsync ná setWindowOpacity(1.0).
+        # 16 ms kan net vóór die vsync-grens vallen; 32 ms valt gegarandeerd ná
+        # de eerste vsync, zodat de overlay zeker volledig zichtbaar is vóór de seek.
+        QTimer.singleShot(32, self._fire_deferred_cb)
 
     def abort(self):
         """Stop en zet terug naar transparant (niet verbergen)."""
@@ -670,7 +668,7 @@ class _FadeOverlay(QLabel):
     # ── Intern ───────────────────────────────────
 
     def _fire_deferred_cb(self):
-        """Eén vsync later: DWM heeft de overlay nu gecomposeerd → veilig springen."""
+        """Twee vsyncs later: DWM heeft de overlay volledig gecomposeerd → seek uitvoeren."""
         if self._phase != 'out':
             # abort() werd aangeroepen in de tussentijd
             return
@@ -678,7 +676,16 @@ class _FadeOverlay(QLabel):
         self._pending_cb = None
         if cb:
             cb()
-        self._timer.start()   # start fade-out pas ná de jump
+        # Geef mpv ~100 ms om het eerste nieuwe frame te decoderen en op het
+        # scherm te renderen voordat we de overlay wegfaden.
+        # Zonder deze wachttijd begint de fade terwijl mpv nog decodeert:
+        # de overlay lost op maar onthult tijdelijk een zwart of oud frame.
+        QTimer.singleShot(100, self._start_fade)
+
+    def _start_fade(self):
+        """Start de fade-out zodra mpv klaar is met renderen van het nieuwe frame."""
+        if self._phase == 'out':
+            self._timer.start()
 
     # ── Animatie ─────────────────────────────────
 
