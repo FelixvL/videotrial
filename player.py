@@ -600,10 +600,11 @@ class _FadeOverlay(QLabel):
         self.setStyleSheet("background: #000;")
         self._main_win = main_win
         self._vc       = video_container
-        self._opacity    = 0.0
-        self._phase      = 'idle'
-        self._pending_cb = None
-        self._timer      = QTimer(self)
+        self._opacity         = 0.0
+        self._phase           = 'idle'
+        self._pending_cb      = None
+        self._resume_after_cb = False
+        self._timer           = QTimer(self)
         self._timer.setInterval(16)
         self._timer.timeout.connect(self._tick)
         main_win.installEventFilter(self)
@@ -621,7 +622,21 @@ class _FadeOverlay(QLabel):
         self._timer.stop()
         vc = video_widget or self._vc
 
-        # Schermopname vóór de jump; gebruik devicePixelRatio voor hi-DPI
+        # ── Stap 1: pauzeer mpv vóór de screenshot ──────────────────────────
+        # Kernprobleem: tussen setWindowOpacity(1.0) en de eerste vsync waarop
+        # DWM de overlay composeert (~16 ms) kan mpv één of meer nieuwe frames
+        # renderen. De gebruiker ziet die frames als een "flits" of "vreemd frame"
+        # vóór het bevroren oud-frame. Door mpv te pauzeren staat de video-surface
+        # stil en sluit de screenshot gegarandeerd aan op wat er zichtbaar is.
+        self._resume_after_cb = False
+        try:
+            if not self._main_win.player.pause:
+                self._main_win.player.pause = True
+                self._resume_after_cb = True
+        except Exception:
+            pass
+
+        # ── Stap 2: screenshot van huidig frame ─────────────────────────────
         pix  = None
         geom = None
         try:
@@ -638,48 +653,65 @@ class _FadeOverlay(QLabel):
             pix = None
 
         if not pix or pix.isNull():
+            # Screenshot mislukt — herstel pause-staat en spring direct
+            if self._resume_after_cb:
+                self._resume_after_cb = False
+                try:
+                    self._main_win.player.pause = False
+                except Exception:
+                    pass
             if callback:
                 callback()
             return
 
+        # ── Stap 3: toon overlay (mpv staat stil, dus geen race met DWM) ────
         self.setPixmap(pix)
         self.setGeometry(*geom)
         self._opacity    = 1.0
         self._phase      = 'out'
         self._pending_cb = callback
-        # Venster is al zichtbaar → opacity-wissel gaat onmiddellijk via DWM
         self.setWindowOpacity(1.0)
         self.raise_()
 
-        # Wacht twee vsyncs (~32 ms) voordat we springen.
-        # DWM composeert de overlay bij de eerstvolgende vsync ná setWindowOpacity(1.0).
-        # 16 ms kan net vóór die vsync-grens vallen; 32 ms valt gegarandeerd ná
-        # de eerste vsync, zodat de overlay zeker volledig zichtbaar is vóór de seek.
+        # 32 ms wachten (≥ 2 vsyncs bij 60 Hz) zodat DWM de overlay zeker
+        # heeft gecomposeerd vóórdat we de seek uitvoeren en mpv hervatten.
         QTimer.singleShot(32, self._fire_deferred_cb)
 
     def abort(self):
         """Stop en zet terug naar transparant (niet verbergen)."""
-        self._pending_cb = None   # annuleer deferred callback
+        self._pending_cb = None
         self._timer.stop()
         self._opacity = 0.0
         self._phase   = 'idle'
         self.setWindowOpacity(0.0)
+        # Als mpv werd gepauzeerd voor de screenshot, hervat hier
+        if self._resume_after_cb:
+            self._resume_after_cb = False
+            try:
+                self._main_win.player.pause = False
+            except Exception:
+                pass
 
     # ── Intern ───────────────────────────────────
 
     def _fire_deferred_cb(self):
-        """Twee vsyncs later: DWM heeft de overlay volledig gecomposeerd → seek uitvoeren."""
+        """≥2 vsyncs later: overlay is gecomposeerd → seek + hervat mpv."""
         if self._phase != 'out':
             # abort() werd aangeroepen in de tussentijd
             return
         cb = self._pending_cb
         self._pending_cb = None
         if cb:
-            cb()
-        # Geef mpv ~100 ms om het eerste nieuwe frame te decoderen en op het
-        # scherm te renderen voordat we de overlay wegfaden.
-        # Zonder deze wachttijd begint de fade terwijl mpv nog decodeert:
-        # de overlay lost op maar onthult tijdelijk een zwart of oud frame.
+            cb()   # voer seek / film-wisseling uit
+        # Hervat mpv na de seek (was gepauzeerd vóór de screenshot)
+        if self._resume_after_cb:
+            self._resume_after_cb = False
+            try:
+                self._main_win.player.pause = False
+            except Exception:
+                pass
+        # Geef mpv ~100 ms om het eerste nieuwe frame te renderen voordat
+        # we de overlay wegfaden — anders lost de overlay op over een zwart scherm.
         QTimer.singleShot(100, self._start_fade)
 
     def _start_fade(self):
