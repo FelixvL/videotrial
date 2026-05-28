@@ -572,99 +572,118 @@ class _ClickFlash(QWidget):
 # ─────────────────────────────────────────────
 
 class _FadeOverlay(QWidget):
-    """Zwart fade-overlay voor automatische marker-overgangen.
-    Fade-in → callback uitvoeren (bijv. laad volgende marker) → fade-out."""
+    """Crossfade-overlay voor automatische marker-overgangen.
 
-    _STEPS = 14   # ~230 ms fade-in / fade-out bij 16 ms timer-interval
+    Werkwijze:
+      1. Scherminhoud van het videogebied vastleggen (screenshot vóór de seek)
+      2. Screenshot direct op volledig-zichtbaar tonen
+      3. Callback uitvoeren (marker-sprong / film-switch) — nieuwe video speelt
+         al onder het bevroren frame
+      4. Bevroren frame weefaden → nieuwe video wordt zichtbaar (crossfade)
+
+    parent=None + WindowStaysOnTopHint zodat de overlay ook boven een
+    fullscreen-venster verschijnt.
+    """
+
+    _STEPS = 22   # ~360 ms fade-out bij 16 ms interval
 
     def __init__(self, main_win, video_container):
         super().__init__(
-            main_win,
+            None,   # geen parent → top-level; kan boven elk venster verschijnen
             Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.Tool
-            | Qt.WindowType.WindowTransparentForInput,
+            | Qt.WindowType.WindowTransparentForInput
+            | Qt.WindowType.WindowStaysOnTopHint,
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+        self._main_win = main_win
         self._vc       = video_container
         self._opacity  = 0.0
-        self._phase    = 'idle'   # 'idle' | 'in' | 'out'
-        self._callback = None
+        self._pix      = None   # bevroren frame
+        self._phase    = 'idle'
         self._timer    = QTimer(self)
-        self._timer.setInterval(16)   # ~60 fps
+        self._timer.setInterval(16)
         self._timer.timeout.connect(self._tick)
         main_win.installEventFilter(self)
         self.hide()
 
     # ── Public ───────────────────────────────────
 
-    def trigger(self, callback):
-        """Start een fade-in → roep callback aan op volledig-zwart → fade-out."""
+    def trigger(self, callback, video_widget=None):
+        """Crossfade naar de volgende marker.
+        video_widget: het actieve video-oppervlak (wijkt af in fullscreen-modus).
+        """
         self._timer.stop()
-        self._callback = callback
-        self._opacity  = 0.0
-        self._phase    = 'in'
-        self._reposition()
-        self.show()
-        self.raise_()
-        self.update()
-        self._timer.start()
+        vc = video_widget or self._vc
+
+        # Stap 1: bevries het huidige frame via een schermopname (vóór de jump)
+        self._pix = None
+        try:
+            tl   = vc.mapToGlobal(vc.rect().topLeft())
+            full = QApplication.primaryScreen().grabWindow(0)
+            self._pix = full.copy(tl.x(), tl.y(), vc.width(), vc.height())
+            self.setGeometry(tl.x(), tl.y(), vc.width(), vc.height())
+        except Exception:
+            self._pix = None
+
+        if self._pix and not self._pix.isNull():
+            # Stap 2: toon bevroren frame direct op volle dekking
+            self._opacity = 1.0
+            self._phase   = 'out'
+            self.show()
+            self.raise_()
+            self.update()
+
+        # Stap 3: spring direct naar de volgende marker (nieuwe video speelt al)
+        if callback:
+            callback()
+
+        # Stap 4: start fade-out (bevroren frame weefaden)
+        if self._pix and not self._pix.isNull():
+            self._timer.start()
 
     def abort(self):
         """Stop en verberg onmiddellijk (bijv. bij handmatige skip)."""
         self._timer.stop()
-        self._opacity  = 0.0
-        self._phase    = 'idle'
-        self._callback = None
+        self._opacity = 0.0
+        self._phase   = 'idle'
+        self._pix     = None
         self.hide()
 
     # ── Paint ────────────────────────────────────
 
     def paintEvent(self, _event):
-        if self._opacity <= 0:
+        if self._opacity <= 0 or not self._pix or self._pix.isNull():
             return
         from PyQt6.QtGui import QPainter
         p = QPainter(self)
-        p.fillRect(self.rect(), QColor(0, 0, 0, int(self._opacity * 255)))
+        p.setOpacity(self._opacity)
+        p.drawPixmap(self.rect(), self._pix)
 
     # ── Animation tick ───────────────────────────
 
     def _tick(self):
-        step = 1.0 / self._STEPS
-        if self._phase == 'in':
-            self._opacity = min(1.0, self._opacity + step)
-            self.update()
-            if self._opacity >= 1.0:
-                # Volledig zwart — voer de actie uit, dan fade-out
-                self._phase = 'out'
-                if self._callback:
-                    cb = self._callback
-                    self._callback = None
-                    cb()
-        elif self._phase == 'out':
-            self._opacity = max(0.0, self._opacity - step)
+        if self._phase == 'out':
+            self._opacity = max(0.0, self._opacity - 1.0 / self._STEPS)
             self.update()
             if self._opacity <= 0.0:
                 self._timer.stop()
                 self._phase = 'idle'
+                self._pix   = None
                 self.hide()
 
     # ── Positie volgen ───────────────────────────
 
-    def _reposition(self):
-        vc = self._vc
-        if not vc.isVisible():
-            return
-        tl = vc.mapToGlobal(vc.rect().topLeft())
-        self.setGeometry(tl.x(), tl.y(), vc.width(), vc.height())
-
     def eventFilter(self, obj, event):
-        if event.type() in (
+        if self._phase != 'idle' and event.type() in (
             QEvent.Type.Resize, QEvent.Type.Move,
             QEvent.Type.Show, QEvent.Type.WindowStateChange,
         ):
-            if self._phase != 'idle':
-                self._reposition()
+            vc = self._vc
+            if vc.isVisible():
+                tl = vc.mapToGlobal(vc.rect().topLeft())
+                self.setGeometry(tl.x(), tl.y(), vc.width(), vc.height())
         return False
 
 
@@ -3065,6 +3084,10 @@ class CineMarker(QMainWindow):
             return first in filename_words
 
         matches = [a for a in db.get_all_actors() if _first_name_matches(a)]
+        # Nooit het paneel tonen als fullscreen actief is (activeert anders het
+        # hoofd-QMainWindow op Windows via het Tool-venster).
+        if self._fs_win and self._fs_win.isVisible():
+            return
         if matches:
             self._panel._search_page.update_results(matches)
             self._panel.show_search(True)
@@ -3271,7 +3294,7 @@ class CineMarker(QMainWindow):
             self._auto_advance_timer.start(self._auto_advance_sec * 1000)
 
     def _do_auto_advance(self):
-        """Wordt aangeroepen door de timer: fade naar zwart → volgende marker → fade uit."""
+        """Wordt aangeroepen door de timer: crossfade naar de volgende marker."""
         n = self.marker_list.count()
         if n == 0 or not self._selection_entries:
             return
@@ -3281,12 +3304,18 @@ class CineMarker(QMainWindow):
             self._current_marker_row = next_row
             self.marker_list.setCurrentRow(next_row)
             self._on_marker_jump()
-            # Herstart timer NADAT de jump klaar is (fade-out loopt nog, maar
-            # de marker speelt al — timer loopt dus pas na volledige N seconden)
+            # Herstart timer nadat de jump klaar is; de crossfade-fadeout loopt
+            # ondertussen door maar de nieuwe marker is al gestart.
             self._restart_auto_advance()
 
         if hasattr(self, '_fade_overlay'):
-            self._fade_overlay.trigger(_jump)
+            # In fullscreen rendert mpv naar _fs_win._video, niet naar video_container
+            active_vc = (
+                self._fs_win._video
+                if (self._fs_win and self._fs_win.isVisible())
+                else self.video_container
+            )
+            self._fade_overlay.trigger(_jump, video_widget=active_vc)
         else:
             _jump()
 
@@ -3313,7 +3342,16 @@ class CineMarker(QMainWindow):
             else:
                 self._reverse_timer.start()
             return
-        self.player.pause = not self.player.pause
+        now_paused = not self.player.pause   # dit is de nieuwe staat na de toggle
+        self.player.pause = now_paused
+        # Auto-advance: stoppen bij pauzeren, hervatten bij afspelen
+        if self._auto_advance_sec > 0 and self._selection_entries:
+            if now_paused:
+                self._auto_advance_timer.stop()
+                if hasattr(self, '_fade_overlay'):
+                    self._fade_overlay.abort()
+            else:
+                self._restart_auto_advance()
 
     def seek_relative(self, seconds):
         if not self._video_path:
@@ -3849,9 +3887,12 @@ class CineMarker(QMainWindow):
         n = self.marker_list.count()
         if n == 0:
             return
-        if not self._panel.isVisible():
-            self._panel.show()
-        self._panel.show_search(False)
+        # Paneel alleen tonen als we NIET in fullscreen zijn — anders activeert
+        # het tonen van het Tool-venster het hoofd-QMainWindow op Windows.
+        if not (self._fs_win and self._fs_win.isVisible()):
+            if not self._panel.isVisible():
+                self._panel.show()
+            self._panel.show_search(False)
         # Breek een lopende auto-advance fade af (handmatige skip heeft voorrang)
         self._auto_advance_timer.stop()
         if hasattr(self, '_fade_overlay'):
@@ -3872,9 +3913,12 @@ class CineMarker(QMainWindow):
         n = self.marker_list.count()
         if n == 0:
             return
-        if not self._panel.isVisible():
-            self._panel.show()
-        self._panel.show_search(False)
+        # Paneel alleen tonen als we NIET in fullscreen zijn — anders activeert
+        # het tonen van het Tool-venster het hoofd-QMainWindow op Windows.
+        if not (self._fs_win and self._fs_win.isVisible()):
+            if not self._panel.isVisible():
+                self._panel.show()
+            self._panel.show_search(False)
         # Breek een lopende auto-advance fade af (handmatige skip heeft voorrang)
         self._auto_advance_timer.stop()
         if hasattr(self, '_fade_overlay'):
@@ -4235,10 +4279,15 @@ class CineMarker(QMainWindow):
                     self.player.seek(t, 'absolute+exact')
                 except Exception:
                     pass
-        # Focus teruggeven — aan fullscreen als die actief is, anders aan hoofdvenster
+        # Focus teruggeven — aan fullscreen als die actief is, anders aan hoofdvenster.
+        # Gebruik singleShot(0) zodat de re-raise na alle synchrone Qt-events plaatsvindt
+        # en niet verliest van een latere activatie van het hoofd-QMainWindow.
         if self._fs_win and self._fs_win.isVisible():
-            self._fs_win.activateWindow()
-            self._fs_win.setFocus()
+            def _refocus():
+                if self._fs_win and self._fs_win.isVisible():
+                    self._fs_win.raise_()
+                    self._fs_win.activateWindow()
+            QTimer.singleShot(0, _refocus)
         else:
             self.activateWindow()
             self.video_container.setFocus(Qt.FocusReason.OtherFocusReason)
