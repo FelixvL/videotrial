@@ -3351,30 +3351,34 @@ class CineMarker(QMainWindow):
             self._auto_advance_timer.start(self._auto_advance_sec * 1000)
 
     def _do_auto_advance(self):
-        """Wordt aangeroepen door de timer: crossfade naar de volgende marker."""
+        """Wordt aangeroepen door de timer: spring naar de volgende marker."""
         n = self.marker_list.count()
         if n == 0 or not self._selection_entries:
             return
         next_row = (self._current_marker_row + 1) % n
 
+        # Crossfade tijdelijk uitgeschakeld — harde snede.
+        # De _FadeOverlay-klasse en broncode zijn bewaard voor later gebruik.
+        # Om crossfade te heractiverenː vervang de twee regels hieronder door
+        # het blok in het commentaar:
+        #
+        #   if hasattr(self, '_fade_overlay'):
+        #       active_vc = (
+        #           self._fs_win._video
+        #           if (self._fs_win and self._fs_win.isVisible())
+        #           else self.video_container
+        #       )
+        #       self._fade_overlay.trigger(_jump, video_widget=active_vc)
+        #   else:
+        #       _jump()
+        #
         def _jump():
             self._current_marker_row = next_row
             self.marker_list.setCurrentRow(next_row)
             self._on_marker_jump()
-            # Herstart timer nadat de jump klaar is; de crossfade-fadeout loopt
-            # ondertussen door maar de nieuwe marker is al gestart.
             self._restart_auto_advance()
 
-        if hasattr(self, '_fade_overlay'):
-            # In fullscreen rendert mpv naar _fs_win._video, niet naar video_container
-            active_vc = (
-                self._fs_win._video
-                if (self._fs_win and self._fs_win.isVisible())
-                else self.video_container
-            )
-            self._fade_overlay.trigger(_jump, video_widget=active_vc)
-        else:
-            _jump()
+        _jump()
 
     def _seek_when_ready(self, target: float, attempts: int = 60):
         """Seek to target once mpv has finished loading (duration > 0).
