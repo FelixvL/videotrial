@@ -706,12 +706,8 @@ class MarkersPanel(QWidget):
 
     def _update_markertype_dropdown(self):
         """Zet Markertype-dropdown in hiërarchische volgorde: hoofdcat → subcategorieën.
-        Alleen categorieën die daadwerkelijk in de geladen entries voorkomen worden getoond."""
-        used_ids: set = set()
-        for e in self._all_entries:
-            used_ids.update(e['cat_ids'])
-
-        all_cats = db.get_all_categories()   # alle categorieën voor de structuur
+        Toont alle categorieën uit de database (ook die nog geen markers hebben)."""
+        all_cats = db.get_all_categories()
 
         # Bouw parent→children map
         by_parent: dict = {}
@@ -726,19 +722,18 @@ class MarkersPanel(QWidget):
         # Loop door boom: hoofdcat (gesorteerd op naam) → subcategorieën
         top_level.sort(key=lambda c: c['name'].lower())
         items: list = []
+        placed: set = set()
         for parent in top_level:
-            if parent['id'] in used_ids:
-                items.append((parent['id'], parent['name']))
+            items.append((parent['id'], parent['name']))
+            placed.add(parent['id'])
             children = sorted(by_parent.get(parent['id'], []),
                                key=lambda c: c['name'].lower())
             for child in children:
-                if child['id'] in used_ids:
-                    items.append((child['id'], f"  ↳  {child['name']}"))
+                items.append((child['id'], f"  ↳  {child['name']}"))
+                placed.add(child['id'])
 
         # Eventuele wezen (parent bestaat niet meer in DB)
-        added = {i for i, _ in items}
-        for c in sorted([c for c in all_cats
-                         if c['id'] in used_ids and c['id'] not in added],
+        for c in sorted([c for c in all_cats if c['id'] not in placed],
                         key=lambda c: c['name'].lower()):
             items.append((c['id'], c['name']))
 
