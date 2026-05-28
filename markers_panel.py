@@ -12,7 +12,7 @@ from pathlib import Path
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel,
     QListWidget, QListWidgetItem, QSplitter, QFrame, QMenu,
-    QLineEdit,
+    QLineEdit, QSpinBox,
 )
 from PyQt6.QtCore import Qt, QSize, QTimer, pyqtSignal, QPoint
 from PyQt6.QtGui import QPixmap, QColor, QIcon
@@ -199,7 +199,7 @@ CELL_H  = THUMB_H + 4
 
 class MarkersPanel(QWidget):
     scene_jump_requested    = pyqtSignal(str, float)   # film_path, time_sec
-    play_selection_requested = pyqtSignal(list)         # list of filtered entries
+    play_selection_requested = pyqtSignal(list, int)     # list of filtered entries, interval_sec
     edit_marker_requested   = pyqtSignal(dict, str)    # marker dict, film_path
 
     _SS_SORT_OFF = (
@@ -313,6 +313,27 @@ class MarkersPanel(QWidget):
         )
         btn_reset.clicked.connect(self._reset_filters)
         th.addWidget(btn_reset)
+
+        # Interval-invoerveld: 0 = handmatig, N = automatisch N seconden per marker
+        self._interval_input = QSpinBox()
+        self._interval_input.setRange(0, 99)
+        self._interval_input.setValue(0)
+        self._interval_input.setFixedHeight(28)
+        self._interval_input.setFixedWidth(52)
+        self._interval_input.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
+        self._interval_input.setToolTip("0 = handmatig\n>0 = automatisch na N seconden naar volgende marker")
+        self._interval_input.setStyleSheet(
+            "QSpinBox { background:#1a1a1a; border:1px solid #2a2a2a; border-radius:4px;"
+            "  padding:0 4px; color:#bbb; font-size:11px; }"
+            "QSpinBox:focus { border-color:#555; }"
+            "QSpinBox::up-button, QSpinBox::down-button { width:14px; background:#252525;"
+            "  border:none; }"
+        )
+        th.addWidget(self._interval_input)
+
+        lbl_s = QLabel("s")
+        lbl_s.setStyleSheet("color: #444; font-size: 11px;")
+        th.addWidget(lbl_s)
 
         self._btn_play = QPushButton("▶  Afspelen")
         self._btn_play.setFixedHeight(28)
@@ -989,7 +1010,7 @@ class MarkersPanel(QWidget):
         """Stuur de gefilterde entries naar de speler als afspeellijst."""
         entries = self._filtered_entries()
         if entries:
-            self.play_selection_requested.emit(entries)
+            self.play_selection_requested.emit(entries, self._interval_input.value())
 
     def _on_item_jump(self, item: QListWidgetItem):
         d = item.data(Qt.ItemDataRole.UserRole)

@@ -568,6 +568,107 @@ class _ClickFlash(QWidget):
 
 
 # ─────────────────────────────────────────────
+#  Fade overlay — voor automatische marker-overgangen
+# ─────────────────────────────────────────────
+
+class _FadeOverlay(QWidget):
+    """Zwart fade-overlay voor automatische marker-overgangen.
+    Fade-in → callback uitvoeren (bijv. laad volgende marker) → fade-out."""
+
+    _STEPS = 14   # ~230 ms fade-in / fade-out bij 16 ms timer-interval
+
+    def __init__(self, main_win, video_container):
+        super().__init__(
+            main_win,
+            Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.Tool
+            | Qt.WindowType.WindowTransparentForInput,
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+        self._vc       = video_container
+        self._opacity  = 0.0
+        self._phase    = 'idle'   # 'idle' | 'in' | 'out'
+        self._callback = None
+        self._timer    = QTimer(self)
+        self._timer.setInterval(16)   # ~60 fps
+        self._timer.timeout.connect(self._tick)
+        main_win.installEventFilter(self)
+        self.hide()
+
+    # ── Public ───────────────────────────────────
+
+    def trigger(self, callback):
+        """Start een fade-in → roep callback aan op volledig-zwart → fade-out."""
+        self._timer.stop()
+        self._callback = callback
+        self._opacity  = 0.0
+        self._phase    = 'in'
+        self._reposition()
+        self.show()
+        self.raise_()
+        self.update()
+        self._timer.start()
+
+    def abort(self):
+        """Stop en verberg onmiddellijk (bijv. bij handmatige skip)."""
+        self._timer.stop()
+        self._opacity  = 0.0
+        self._phase    = 'idle'
+        self._callback = None
+        self.hide()
+
+    # ── Paint ────────────────────────────────────
+
+    def paintEvent(self, _event):
+        if self._opacity <= 0:
+            return
+        from PyQt6.QtGui import QPainter
+        p = QPainter(self)
+        p.fillRect(self.rect(), QColor(0, 0, 0, int(self._opacity * 255)))
+
+    # ── Animation tick ───────────────────────────
+
+    def _tick(self):
+        step = 1.0 / self._STEPS
+        if self._phase == 'in':
+            self._opacity = min(1.0, self._opacity + step)
+            self.update()
+            if self._opacity >= 1.0:
+                # Volledig zwart — voer de actie uit, dan fade-out
+                self._phase = 'out'
+                if self._callback:
+                    cb = self._callback
+                    self._callback = None
+                    cb()
+        elif self._phase == 'out':
+            self._opacity = max(0.0, self._opacity - step)
+            self.update()
+            if self._opacity <= 0.0:
+                self._timer.stop()
+                self._phase = 'idle'
+                self.hide()
+
+    # ── Positie volgen ───────────────────────────
+
+    def _reposition(self):
+        vc = self._vc
+        if not vc.isVisible():
+            return
+        tl = vc.mapToGlobal(vc.rect().topLeft())
+        self.setGeometry(tl.x(), tl.y(), vc.width(), vc.height())
+
+    def eventFilter(self, obj, event):
+        if event.type() in (
+            QEvent.Type.Resize, QEvent.Type.Move,
+            QEvent.Type.Show, QEvent.Type.WindowStateChange,
+        ):
+            if self._phase != 'idle':
+                self._reposition()
+        return False
+
+
+# ─────────────────────────────────────────────
 #  Actor Link Overlay  (floating over player)
 # ─────────────────────────────────────────────
 
@@ -1639,7 +1740,10 @@ class _MarkerQuickDlg(QDialog):
 
     def __init__(self, parent, actors: list, pos: float, frame_pix, categories: list,
                  initial_stars: int = 0, show_delete: bool = False,
-                 initial_cat_id: int | None = None):
+                 initial_cat_id: int | None = None,
+                 film_id: int | None = None,
+                 film_cat_types: list | None = None,
+                 initial_film_cat_ids: set | None = None):
         super().__init__(parent)
         self.setModal(True)
         self.setWindowFlags(
@@ -1654,6 +1758,9 @@ class _MarkerQuickDlg(QDialog):
         self._actor_btns       = {}
         self._initial_cat_id   = initial_cat_id
         self._wants_thumbnail  = False
+        self._film_id          = film_id
+        self._film_cat_types   = film_cat_types or []
+        self._film_cat_sel: set = set(initial_film_cat_ids or set())
         # Pre-populate _chosen_cat from the existing category if editing
         if initial_cat_id is not None:
             for c in categories:
@@ -1676,7 +1783,7 @@ class _MarkerQuickDlg(QDialog):
     def _build(self, frame_pix, categories, show_delete: bool = False):
         self.setStyleSheet("""
             QDialog   { background: transparent; border: none; }
-            QLabel    { color:#ccc; }
+            QLabel    { color:#ccc; background: transparent; }
             QPushButton {
                 background:#252525; color:#ccc;
                 border:1px solid #444; border-radius:4px;
@@ -1689,15 +1796,13 @@ class _MarkerQuickDlg(QDialog):
             QPushButton#cancel:hover { color:#ccc; background:#2a2a2a; }
         """)
 
-        # Transparante buitenlaag + donker semi-transparant frame als container
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
 
         _frame = QFrame()
         _frame.setStyleSheet(
-            "QFrame { background: rgba(12,12,12,215); border: 1px solid #3a3a3a;"
-            "  border-radius: 10px; }"
+            "QFrame { background: transparent; border: none; }"
         )
         outer.addWidget(_frame)
 
@@ -1839,6 +1944,55 @@ class _MarkerQuickDlg(QDialog):
 
         v.addWidget(cat_container)
 
+        # ── Filmcategorie (multi-select, geldt voor de hele film) ──
+        if self._film_cat_types:
+            sep2 = QFrame()
+            sep2.setFrameShape(QFrame.Shape.HLine)
+            sep2.setStyleSheet("background: #333; max-height: 1px;")
+            v.addWidget(sep2)
+
+            lbl_fc = QLabel("Filmcategorie:")
+            lbl_fc.setStyleSheet("color:#888; font-size:11px;")
+            v.addWidget(lbl_fc)
+
+            FC_OFF = (
+                "QPushButton { background:#141414; border:1px solid #2a2a2a; border-radius:4px;"
+                "  padding:4px 10px; color:#555; font-size:11px; }"
+                "QPushButton:hover { border-color:#555; color:#888; }"
+            )
+            FC_ON = (
+                "QPushButton { background:#1a1500; border:1px solid #e8b86d; border-radius:4px;"
+                "  padding:4px 10px; color:#e8b86d; font-size:11px; font-weight:bold; }"
+                "QPushButton:hover { background:#2a2200; }"
+            )
+
+            self._fc_btns: dict = {}
+            fc_h = QHBoxLayout()
+            fc_h.setSpacing(6)
+
+            def _make_fc_toggle(fid, b, on_ss, off_ss):
+                def _h(checked):
+                    if checked:
+                        self._film_cat_sel.add(fid)
+                        b.setStyleSheet(on_ss)
+                    else:
+                        self._film_cat_sel.discard(fid)
+                        b.setStyleSheet(off_ss)
+                return _h
+
+            for fc in self._film_cat_types:
+                btn_fc = QPushButton(fc['naam'])
+                btn_fc.setCheckable(True)
+                is_on = fc['id'] in self._film_cat_sel
+                btn_fc.setChecked(is_on)
+                btn_fc.setStyleSheet(FC_ON if is_on else FC_OFF)
+                btn_fc.toggled.connect(_make_fc_toggle(fc['id'], btn_fc, FC_ON, FC_OFF))
+                self._fc_btns[fc['id']] = btn_fc
+                fc_h.addWidget(btn_fc)
+
+            fc_h.addStretch()
+            v.addLayout(fc_h)
+
         # ── Onderste balk: optioneel verwijder + opslaan + annuleren ──
         bottom_h = QHBoxLayout()
         bottom_h.setSpacing(8)
@@ -1913,6 +2067,18 @@ class _MarkerQuickDlg(QDialog):
 
     def get_result(self):
         return self._actors, self._chosen_cat, self._stars
+
+    def accept(self):
+        """Sla filmcategorieën op bij elke acceptatie (nieuw + bewerk)."""
+        self._save_film_cats()
+        super().accept()
+
+    def _save_film_cats(self):
+        if self._film_id is not None:
+            try:
+                db.set_film_categories(self._film_id, list(self._film_cat_sel))
+            except Exception:
+                pass
 
     def _center_on_parent(self):
         """Positioneer rechtsonder in het oudervenster (of scherm als fallback)."""
@@ -2035,6 +2201,12 @@ class CineMarker(QMainWindow):
         self._current_marker_row: int = -1  # blijft bewaard over list-rebuilds heen
         self._active_shortcuts: list = []   # QShortcut-objecten (voor herladen)
         self._fs_win: _VideoFullscreenWindow | None = None  # video-only fullscreen
+
+        # Auto-advance (markers afspeellijst)
+        self._auto_advance_sec: int = 0    # 0 = uitgeschakeld
+        self._auto_advance_timer = QTimer(self)
+        self._auto_advance_timer.setSingleShot(True)
+        self._auto_advance_timer.timeout.connect(self._do_auto_advance)
 
         # Persistente caches voor marker-lijst — worden niet bij elke rebuild gewist
         self._actor_pix_cache: dict = {}   # actor_id  -> QPixmap | None
@@ -2360,6 +2532,9 @@ class CineMarker(QMainWindow):
 
         # Click-flash ✓ overlay — centre of video, fades after ~370 ms
         self._click_flash = _ClickFlash(self, self.video_container)
+
+        # Fade overlay — zwart scherm bij automatische marker-overgangen
+        self._fade_overlay = _FadeOverlay(self, self.video_container)
 
         # Floating actor-link overlay (child of player_widget)
         self._actor_overlay = _ActorLinkOverlay(player_widget)
@@ -2902,6 +3077,10 @@ class CineMarker(QMainWindow):
         """Load video and switch to player tab"""
         self._selection_entries.clear()
         self._current_marker_row = -1
+        self._auto_advance_sec = 0
+        self._auto_advance_timer.stop()
+        if hasattr(self, '_fade_overlay'):
+            self._fade_overlay.abort()
         self._load_video(path)
         self.main_tabs.setCurrentIndex(0)
 
@@ -2909,6 +3088,10 @@ class CineMarker(QMainWindow):
         """Load the next film in the films panel list."""
         self._selection_entries.clear()
         self._current_marker_row = -1
+        self._auto_advance_sec = 0
+        self._auto_advance_timer.stop()
+        if hasattr(self, '_fade_overlay'):
+            self._fade_overlay.abort()
         film_list = self.films_panel.film_list
         n = film_list.count()
         if n == 0:
@@ -2985,10 +3168,9 @@ class CineMarker(QMainWindow):
 
     # ── Selectie-afspeellijst (vanuit markers-tab) ────────────────
 
-    def _load_selection(self, entries: list):
+    def _load_selection(self, entries: list, interval_sec: int = 0):
         """Laad een cross-film afspeellijst vanuit het markers-tabblad.
-        De marker-list in het rechter paneel toont alle entries; dubbelklikken
-        laadt de juiste film en springt naar de scène."""
+        interval_sec > 0 schakelt auto-advance in: na N seconden fade naar volgende marker."""
         if not entries:
             return
         # Sorteer op film + tijd zodat je per film afspeelt
@@ -2996,9 +3178,16 @@ class CineMarker(QMainWindow):
             entries,
             key=lambda e: (e['film_path'], e['marker'].get('time', 0))
         )
-        first     = self._selection_entries[0]
+        self._auto_advance_sec = max(0, interval_sec)
+        self._auto_advance_timer.stop()
+        if hasattr(self, '_fade_overlay'):
+            self._fade_overlay.abort()
+
+        first      = self._selection_entries[0]
         first_path = first['film_path']
         first_time = first['marker'].get('time', 0)
+
+        self._current_marker_row = 0   # start bij eerste marker
 
         self.main_tabs.setCurrentIndex(0)   # naar speler-tab
         if not self._panel.isVisible():
@@ -3010,6 +3199,8 @@ class CineMarker(QMainWindow):
         else:
             self._refresh_marker_list()     # selectie-modus activeren
             self.player.seek(first_time, 'absolute+exact')
+        if self._auto_advance_sec > 0:
+            self._restart_auto_advance()
 
     def _refresh_selection_markers(self):
         """Bouw de marker-list op uit self._selection_entries (meerdere films)."""
@@ -3071,6 +3262,33 @@ class CineMarker(QMainWindow):
         # Herstel de selectie na de rebuild
         if 0 <= self._current_marker_row < self.marker_list.count():
             self.marker_list.setCurrentRow(self._current_marker_row)
+
+    # ── Auto-advance ─────────────────────────────────────────────
+
+    def _restart_auto_advance(self):
+        """(Her)start de auto-advance timer voor N seconden."""
+        if self._auto_advance_sec > 0 and self._selection_entries:
+            self._auto_advance_timer.start(self._auto_advance_sec * 1000)
+
+    def _do_auto_advance(self):
+        """Wordt aangeroepen door de timer: fade naar zwart → volgende marker → fade uit."""
+        n = self.marker_list.count()
+        if n == 0 or not self._selection_entries:
+            return
+        next_row = (self._current_marker_row + 1) % n
+
+        def _jump():
+            self._current_marker_row = next_row
+            self.marker_list.setCurrentRow(next_row)
+            self._on_marker_jump()
+            # Herstart timer NADAT de jump klaar is (fade-out loopt nog, maar
+            # de marker speelt al — timer loopt dus pas na volledige N seconden)
+            self._restart_auto_advance()
+
+        if hasattr(self, '_fade_overlay'):
+            self._fade_overlay.trigger(_jump)
+        else:
+            _jump()
 
     def _seek_when_ready(self, target: float, attempts: int = 60):
         """Seek to target once mpv has finished loading (duration > 0).
@@ -3589,7 +3807,13 @@ class CineMarker(QMainWindow):
                 if (self._fs_win and self._fs_win.isVisible())
                 else self
             )
-            dlg = _MarkerQuickDlg(_dlg_parent, actors, pos, frame_pix, cats)
+            _film_obj  = db.get_or_create_film(self._video_path) if self._video_path else None
+            _film_id   = _film_obj['id'] if _film_obj else None
+            _fc_types  = db.get_film_categorie_types()
+            _fc_cur    = db.get_film_category_ids(_film_id) if _film_id else set()
+            dlg = _MarkerQuickDlg(_dlg_parent, actors, pos, frame_pix, cats,
+                                  film_id=_film_id, film_cat_types=_fc_types,
+                                  initial_film_cat_ids=_fc_cur)
             if dlg.exec() == QDialog.DialogCode.Accepted:
                 chosen_actors, chosen_cat, stars = dlg.get_result()
                 self._quick_marker(chosen_actors, [chosen_cat], pos=pos, stars=stars)
@@ -3604,10 +3828,13 @@ class CineMarker(QMainWindow):
                     os.unlink(tmp_path)
                 except Exception:
                     pass
-            # Focus altijd teruggeven aan het hoofdvenster zodat shortcuts
-            # (bijv. V voor volgende film) direct werken na het sluiten van de popup
-            self.activateWindow()
-            self.setFocus()
+            # Focus teruggeven — aan fullscreen als die actief is, anders aan hoofdvenster
+            if self._fs_win and self._fs_win.isVisible():
+                self._fs_win.activateWindow()
+                self._fs_win.setFocus()
+            else:
+                self.activateWindow()
+                self.setFocus()
 
     def _shortcut_n(self):
         if self.main_tabs.currentWidget() is not self.sorter_panel:
@@ -3625,10 +3852,16 @@ class CineMarker(QMainWindow):
         if not self._panel.isVisible():
             self._panel.show()
         self._panel.show_search(False)
+        # Breek een lopende auto-advance fade af (handmatige skip heeft voorrang)
+        self._auto_advance_timer.stop()
+        if hasattr(self, '_fade_overlay'):
+            self._fade_overlay.abort()
         next_row = (self._current_marker_row + 1) % n
         self._current_marker_row = next_row
         self.marker_list.setCurrentRow(next_row)
         self._on_marker_jump()
+        # Herstart timer zodat de teller opnieuw begint na een handmatige skip
+        self._restart_auto_advance()
 
     def _shortcut_o(self):
         """Ga naar de vorige marker in de lijst (wraps rond)."""
@@ -3642,10 +3875,16 @@ class CineMarker(QMainWindow):
         if not self._panel.isVisible():
             self._panel.show()
         self._panel.show_search(False)
+        # Breek een lopende auto-advance fade af (handmatige skip heeft voorrang)
+        self._auto_advance_timer.stop()
+        if hasattr(self, '_fade_overlay'):
+            self._fade_overlay.abort()
         prev_row = (self._current_marker_row - 1) % n
         self._current_marker_row = prev_row
         self.marker_list.setCurrentRow(prev_row)
         self._on_marker_jump()
+        # Herstart timer zodat de teller opnieuw begint na een handmatige skip
+        self._restart_auto_advance()
 
     def _shortcut_plus(self):
         self._zoom_in_video()
@@ -3895,9 +4134,15 @@ class CineMarker(QMainWindow):
             return
         stars      = int(m.get('stars') or 0)
         cur_cat_id = (m.get('categories') or [None])[0]
+        _film_obj_e  = db.get_or_create_film(self._video_path) if self._video_path else None
+        _film_id_e   = _film_obj_e['id'] if _film_obj_e else None
+        _fc_types_e  = db.get_film_categorie_types()
+        _fc_cur_e    = db.get_film_category_ids(_film_id_e) if _film_id_e else set()
         dlg = _MarkerQuickDlg(self, actors, m.get('time', 0), None, cats,
                               initial_stars=stars, show_delete=True,
-                              initial_cat_id=cur_cat_id)
+                              initial_cat_id=cur_cat_id,
+                              film_id=_film_id_e, film_cat_types=_fc_types_e,
+                              initial_film_cat_ids=_fc_cur_e)
         if dlg.exec() == QDialog.DialogCode.Accepted:
             if dlg.was_deleted():
                 self._delete_marker_by_index(idx)
@@ -3922,9 +4167,15 @@ class CineMarker(QMainWindow):
             return
         stars      = int(marker.get('stars') or 0)
         cur_cat_id = (marker.get('categories') or [None])[0]
+        _film_obj_p  = db.get_or_create_film(film_path) if film_path else None
+        _film_id_p   = _film_obj_p['id'] if _film_obj_p else None
+        _fc_types_p  = db.get_film_categorie_types()
+        _fc_cur_p    = db.get_film_category_ids(_film_id_p) if _film_id_p else set()
         dlg = _MarkerQuickDlg(self, actors, marker.get('time', 0), None, cats,
                               initial_stars=stars, show_delete=True,
-                              initial_cat_id=cur_cat_id)
+                              initial_cat_id=cur_cat_id,
+                              film_id=_film_id_p, film_cat_types=_fc_types_p,
+                              initial_film_cat_ids=_fc_cur_p)
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
         p  = _Path(film_path)
@@ -3984,9 +4235,13 @@ class CineMarker(QMainWindow):
                     self.player.seek(t, 'absolute+exact')
                 except Exception:
                     pass
-        # Panel is a separate top-level window; return keyboard focus to main window
-        self.activateWindow()
-        self.video_container.setFocus(Qt.FocusReason.OtherFocusReason)
+        # Focus teruggeven — aan fullscreen als die actief is, anders aan hoofdvenster
+        if self._fs_win and self._fs_win.isVisible():
+            self._fs_win.activateWindow()
+            self._fs_win.setFocus()
+        else:
+            self.activateWindow()
+            self.video_container.setFocus(Qt.FocusReason.OtherFocusReason)
 
     def _do_exact_seek(self):
         """Fase 2 van de marker-jump: land op het precieze frame."""
