@@ -600,9 +600,10 @@ class _FadeOverlay(QLabel):
         self.setStyleSheet("background: #000;")
         self._main_win = main_win
         self._vc       = video_container
-        self._opacity  = 0.0
-        self._phase    = 'idle'
-        self._timer    = QTimer(self)
+        self._opacity    = 0.0
+        self._phase      = 'idle'
+        self._pending_cb = None
+        self._timer      = QTimer(self)
         self._timer.setInterval(16)
         self._timer.timeout.connect(self._tick)
         main_win.installEventFilter(self)
@@ -643,24 +644,41 @@ class _FadeOverlay(QLabel):
 
         self.setPixmap(pix)
         self.setGeometry(*geom)
-        self._opacity = 1.0
-        self._phase   = 'out'
+        self._opacity    = 1.0
+        self._phase      = 'out'
+        self._pending_cb = callback
         # Venster is al zichtbaar → opacity-wissel gaat onmiddellijk via DWM
         self.setWindowOpacity(1.0)
         self.raise_()
 
-        # Direct springen; bevroren frame dekt de video terwijl mpv al decodeert
-        if callback:
-            callback()
-
-        self._timer.start()
+        # Wacht één vsync (~16 ms) voordat we springen.
+        # DWM composeert de overlay pas bij de éénde vsync ná setWindowOpacity(1.0).
+        # Als we direct springen decodeert mpv al het eerste nieuwe frame
+        # en DWM plaatst de overlay pas dáárna bovenop → 1-frame-flash van het
+        # vorige marker-frame. Door 16 ms te wachten heeft DWM al volledig
+        # gecomposeerd vóórdat mpv de seek-opdracht krijgt.
+        QTimer.singleShot(16, self._fire_deferred_cb)
 
     def abort(self):
         """Stop en zet terug naar transparant (niet verbergen)."""
+        self._pending_cb = None   # annuleer deferred callback
         self._timer.stop()
         self._opacity = 0.0
         self._phase   = 'idle'
         self.setWindowOpacity(0.0)
+
+    # ── Intern ───────────────────────────────────
+
+    def _fire_deferred_cb(self):
+        """Eén vsync later: DWM heeft de overlay nu gecomposeerd → veilig springen."""
+        if self._phase != 'out':
+            # abort() werd aangeroepen in de tussentijd
+            return
+        cb = self._pending_cb
+        self._pending_cb = None
+        if cb:
+            cb()
+        self._timer.start()   # start fade-out pas ná de jump
 
     # ── Animatie ─────────────────────────────────
 
