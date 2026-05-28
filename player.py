@@ -575,15 +575,14 @@ class _FadeOverlay(QLabel):
     """Crossfade-overlay voor automatische marker-overgangen.
 
     Aanpak:
-      1. Screenshot van het videogebied vastleggen (vóór de seek)
-      2. Screenshot als QLabel tonen op volle window-opacity (1.0)
+      1. Screenshot vastleggen (vóór de seek)
+      2. setWindowOpacity(1.0) — DWM-laag was al actief, geen initialisatietijd
       3. Callback uitvoeren (sprong naar volgende marker)
-      4. setWindowOpacity geleidelijk naar 0.0 — de OS-compositor (DWM)
-         blended het bevroren frame weg terwijl de nieuwe video er onder speelt.
+      4. setWindowOpacity geleidelijk naar 0.0 — hardware crossfade
 
-    Gebruik setWindowOpacity i.p.v. per-pixel alpha in paintEvent: dat is
-    hardware-versneld en geeft geen zwart tussenframe.
-    parent=None + WindowStaysOnTopHint = ook boven fullscreen zichtbaar.
+    Cruciaal: het venster is ALTIJD zichtbaar maar op opacity 0.0 (idle).
+    Zo heeft DWM de compositor-laag al gereserveerd; setWindowOpacity(1.0)
+    is daardoor onmiddellijk — geen 'lost frame' meer door DWM-initialisatie.
     """
 
     _STEPS = 28   # ~450 ms fade bij 16 ms interval
@@ -607,7 +606,12 @@ class _FadeOverlay(QLabel):
         self._timer.setInterval(16)
         self._timer.timeout.connect(self._tick)
         main_win.installEventFilter(self)
-        self.hide()
+
+        # Altijd in de DWM-laagstapel houden, volledig transparant in rust.
+        # show() + opacity 0 = geen visueel effect maar wel actieve compositor-laag.
+        self.setGeometry(0, 0, 1, 1)
+        self.setWindowOpacity(0.0)
+        self.show()
 
     # ── Public ───────────────────────────────────
 
@@ -633,7 +637,6 @@ class _FadeOverlay(QLabel):
             pix = None
 
         if not pix or pix.isNull():
-            # Geen screenshot — direct springen zonder animatie
             if callback:
                 callback()
             return
@@ -642,22 +645,22 @@ class _FadeOverlay(QLabel):
         self.setGeometry(*geom)
         self._opacity = 1.0
         self._phase   = 'out'
+        # Venster is al zichtbaar → opacity-wissel gaat onmiddellijk via DWM
         self.setWindowOpacity(1.0)
-        self.show()
         self.raise_()
 
-        # Direct springen; nieuwe video speelt al onder het bevroren frame
+        # Direct springen; bevroren frame dekt de video terwijl mpv al decodeert
         if callback:
             callback()
 
         self._timer.start()
 
     def abort(self):
-        """Stop en verberg onmiddellijk (bijv. bij handmatige skip of pauze)."""
+        """Stop en zet terug naar transparant (niet verbergen)."""
         self._timer.stop()
         self._opacity = 0.0
         self._phase   = 'idle'
-        self.hide()
+        self.setWindowOpacity(0.0)
 
     # ── Animatie ─────────────────────────────────
 
@@ -668,7 +671,7 @@ class _FadeOverlay(QLabel):
             if self._opacity <= 0.0:
                 self._timer.stop()
                 self._phase = 'idle'
-                self.hide()
+                self.setWindowOpacity(0.0)
 
     # ── Positie volgen ───────────────────────────
 
