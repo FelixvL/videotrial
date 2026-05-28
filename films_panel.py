@@ -452,6 +452,116 @@ class FilmGridDelegate(QStyledItemDelegate):
 
 
 # ─────────────────────────────────────────────
+#  Multi-select dropdown helper
+# ─────────────────────────────────────────────
+
+class _MultiSelectDropdown(QPushButton):
+    """Compacte multi-select knop — klik om een aanvink-menu te openen.
+
+    Gebruik:
+        drop = _MultiSelectDropdown("Cat")
+        drop.populate([(1, "Drama"), (2, "Actie")], callback=self._toggle_film_cat)
+        # callback(id, checked) wordt aangeroepen bij elke toggle
+        drop.clear_all()              # alles uitvinken
+        drop.set_selection({1, 2})    # programmatisch instellen
+        drop.active_ids               # geeft huidige set terug
+    """
+
+    _SS_OFF = (
+        "QPushButton{background:#111;border:1px solid #252525;border-radius:3px;"
+        "color:#444;font-size:9px;padding:0 7px;text-align:left;}"
+        "QPushButton:hover{color:#888;border-color:#444;}"
+        "QPushButton::menu-indicator{width:0;}"
+    )
+    _SS_ON = (
+        "QPushButton{background:#001818;border:1px solid #004040;border-radius:3px;"
+        "color:#4db8b8;font-size:9px;padding:0 7px;text-align:left;}"
+        "QPushButton:hover{border-color:#4db8b8;}"
+        "QPushButton::menu-indicator{width:0;}"
+    )
+    _MENU_SS = (
+        "QMenu{background:#1a1a1a;border:1px solid #333;color:#ccc;font-size:11px;}"
+        "QMenu::item{padding:5px 28px 5px 8px;}"
+        "QMenu::item:selected{background:#1a1400;color:#e8b86d;}"
+        "QMenu::indicator:checked{width:10px;height:10px;"
+        "background:#4db8b8;border-radius:2px;}"
+        "QMenu::indicator:unchecked{width:10px;height:10px;"
+        "background:#111;border:1px solid #333;border-radius:2px;}"
+    )
+
+    def __init__(self, base_label: str, color_on: str = '#4db8b8',
+                 bg_on: str = '#001818', border_on: str = '#004040',
+                 parent=None):
+        super().__init__(base_label, parent)
+        self._base   = base_label
+        self._active: set = set()
+        self._cb     = None
+
+        # Kleur-varianten voor bijv. paarse marker-cats of amber acteur-dec
+        ss_on = (
+            f"QPushButton{{background:{bg_on};border:1px solid {border_on};border-radius:3px;"
+            f"color:{color_on};font-size:9px;padding:0 7px;text-align:left;}}"
+            "QPushButton:hover{border-color:#888;}"
+            "QPushButton::menu-indicator{width:0;}"
+        )
+        self._SS_ON = ss_on
+
+        self._menu = QMenu(self)
+        self._menu.setStyleSheet(self._MENU_SS)
+        self.setMenu(self._menu)
+        self.setFixedHeight(22)
+        self.setStyleSheet(self._SS_OFF)
+
+    def populate(self, items: list, callback):
+        """items = [(id, label), ...].  Herlaad het menu maar behoud de selectie."""
+        self._cb = callback
+        self._menu.clear()
+        for iid, name in items:
+            act = self._menu.addAction(name)
+            act.setCheckable(True)
+            act.setData(iid)
+            act.setChecked(iid in self._active)
+            act.toggled.connect(lambda checked, i=iid: self._on_toggle(i, checked))
+        self._sync_label()
+
+    def _on_toggle(self, iid, checked):
+        if checked:
+            self._active.add(iid)
+        else:
+            self._active.discard(iid)
+        self._sync_label()
+        if self._cb:
+            self._cb(iid, checked)
+
+    def _sync_label(self):
+        n = len(self._active)
+        self.setText(f"{self._base} ({n}) ▾" if n else f"{self._base} ▾")
+        self.setStyleSheet(self._SS_ON if n else self._SS_OFF)
+
+    def clear_all(self):
+        """Wis selectie zonder callbacks aan te roepen."""
+        self._active.clear()
+        for act in self._menu.actions():
+            act.blockSignals(True)
+            act.setChecked(False)
+            act.blockSignals(False)
+        self._sync_label()
+
+    def set_selection(self, ids: set):
+        """Zet selectie programmatisch in (gebruikt bij preset laden)."""
+        self._active = set(ids)
+        for act in self._menu.actions():
+            act.blockSignals(True)
+            act.setChecked(act.data() in self._active)
+            act.blockSignals(False)
+        self._sync_label()
+
+    @property
+    def active_ids(self) -> set:
+        return set(self._active)
+
+
+# ─────────────────────────────────────────────
 #  Panel
 # ─────────────────────────────────────────────
 
@@ -504,8 +614,7 @@ class FilmsPanel(QWidget):
         # Cross-entity filter state
         self._flt_film_cats:    set  = set()   # actieve filmcategorie-IDs
         self._flt_actor_kleur:  set  = set()   # actieve acteurkleur-IDs
-        self._flt_actor_groo_min: int | None = None
-        self._flt_actor_groo_max: int | None = None
+        self._flt_actor_groo_vals: set = set()   # exacte grootte-waarden (5..9)
         self._flt_actor_dec:  set  = set()   # actieve decennia-toetsen  ('7','8','9','0','1')
         self._flt_film_size:  set  = set()   # actieve grootte-buckets  ('S','M','L','XL')
         self._flt_actors:     set  = set()   # actieve acteur-IDs
@@ -778,127 +887,62 @@ class FilmsPanel(QWidget):
         b2.setContentsMargins(10, 3, 10, 3)
         b2.setSpacing(6)
 
-        # Label filmcategorieën
-        lbl_fc = QLabel("Cat:")
-        lbl_fc.setStyleSheet("color: #333; font-size: 9px; letter-spacing: 2px;")
-        b2.addWidget(lbl_fc)
+        # ── Multi-select dropdowns ────────────────
+        # Acteur grootte (5–9)
+        self._drop_actor_groo = _MultiSelectDropdown(
+            "Act.gr", color_on='#b89060', bg_on='#181000', border_on='#504020')
+        self._drop_actor_groo.setToolTip("Filter op acteurgrootte (5–9)")
+        self._drop_actor_groo.populate(
+            [(str(i), str(i)) for i in range(5, 10)],
+            callback=self._toggle_actor_groo)
+        b2.addWidget(self._drop_actor_groo)
 
-        # Container voor filmcategorie-toggles (dynamisch gevuld)
-        self._film_cat_btns: dict = {}   # cat_id -> QPushButton
-        self._film_cat_container = QWidget()
-        self._film_cat_container.setStyleSheet("background: transparent;")
-        _fcc = QHBoxLayout(self._film_cat_container)
-        _fcc.setContentsMargins(0, 0, 0, 0)
-        _fcc.setSpacing(3)
-        b2.addWidget(self._film_cat_container)
+        b2.addSpacing(4)
 
-        b2.addSpacing(8)
+        # Film categorieën
+        self._drop_film_cats = _MultiSelectDropdown(
+            "Filmcat", color_on='#4db8b8', bg_on='#001818', border_on='#004040')
+        self._drop_film_cats.setToolTip("Filter op filmcategorie")
+        b2.addWidget(self._drop_film_cats)
 
-        # Label acteurkleuren
-        lbl_ak = QLabel("Kleur:")
-        lbl_ak.setStyleSheet("color: #333; font-size: 9px; letter-spacing: 2px;")
-        b2.addWidget(lbl_ak)
+        b2.addSpacing(4)
 
-        # Container voor kleurtoggle-knoppen (dynamisch gevuld)
-        self._actor_kleur_btns: dict = {}   # kleur_id -> QPushButton
-        self._actor_kleur_container = QWidget()
-        self._actor_kleur_container.setStyleSheet("background: transparent;")
-        _akc = QHBoxLayout(self._actor_kleur_container)
-        _akc.setContentsMargins(0, 0, 0, 0)
-        _akc.setSpacing(3)
-        b2.addWidget(self._actor_kleur_container)
+        # Acteur kleuren
+        self._drop_actor_kleur = _MultiSelectDropdown(
+            "Kleur", color_on='#aaaaaa', bg_on='#181818', border_on='#444444')
+        self._drop_actor_kleur.setToolTip("Filter op acteurkleur")
+        b2.addWidget(self._drop_actor_kleur)
 
-        b2.addSpacing(8)
+        b2.addSpacing(4)
 
-        # Acteur grootte filter (1–5)
-        lbl_ag = QLabel("Grootte:")
-        lbl_ag.setStyleSheet("color: #333; font-size: 9px; letter-spacing: 2px;")
-        b2.addWidget(lbl_ag)
+        # Acteur decennia (statisch)
+        self._drop_actor_dec = _MultiSelectDropdown(
+            "Decennia", color_on='#4db8e8', bg_on='#001828', border_on='#005070')
+        self._drop_actor_dec.setToolTip("Filter op acteur-decennium")
+        self._drop_actor_dec.populate(
+            [('7','70s'),('8','80s'),('9','90s'),('0','00s'),('1','10s')],
+            callback=self._toggle_actor_dec)
+        b2.addWidget(self._drop_actor_dec)
 
-        _ag_style = (
-            "QLineEdit{background:#111;border:1px solid #252525;border-radius:3px;"
-            "color:#b89060;font-size:10px;padding:1px 4px;}"
-            "QLineEdit:focus{border-color:#b89060;}"
-        )
-        self._actor_groo_min = QLineEdit()
-        self._actor_groo_min.setPlaceholderText("min")
-        self._actor_groo_min.setFixedSize(36, 22)
-        self._actor_groo_min.setToolTip("Minimale acteurgrootte (1-5)")
-        self._actor_groo_min.setStyleSheet(_ag_style)
-        self._actor_groo_min.textChanged.connect(self._on_actor_groo_changed)
-        b2.addWidget(self._actor_groo_min)
+        b2.addSpacing(4)
 
-        _ag_dash = QLabel("–")
-        _ag_dash.setStyleSheet("color:#333;")
-        b2.addWidget(_ag_dash)
+        # Film grootte (statisch)
+        self._drop_film_size = _MultiSelectDropdown(
+            "Grootte", color_on='#b89060', bg_on='#181000', border_on='#504020')
+        self._drop_film_size.setToolTip("Filter op bestandsgrootte (S/M/L/XL)")
+        self._drop_film_size.populate(
+            [('S','S — < 0.5 GB'),('M','M — 0.5–2 GB'),
+             ('L','L — 2–5 GB'),('XL','XL — > 5 GB')],
+            callback=self._toggle_film_size)
+        b2.addWidget(self._drop_film_size)
 
-        self._actor_groo_max = QLineEdit()
-        self._actor_groo_max.setPlaceholderText("max")
-        self._actor_groo_max.setFixedSize(36, 22)
-        self._actor_groo_max.setToolTip("Maximale acteurgrootte (1-5)")
-        self._actor_groo_max.setStyleSheet(_ag_style)
-        self._actor_groo_max.textChanged.connect(self._on_actor_groo_changed)
-        b2.addWidget(self._actor_groo_max)
+        b2.addSpacing(4)
 
-        b2.addSpacing(8)
-
-        # Acteur decennia filter
-        lbl_dec = QLabel("Dec:")
-        lbl_dec.setStyleSheet("color: #333; font-size: 9px; letter-spacing: 2px;")
-        b2.addWidget(lbl_dec)
-
-        _dec_ss = (
-            "QPushButton{background:#111;border:1px solid #252525;border-radius:3px;"
-            "color:#444;font-size:9px;padding:0 5px;}"
-            "QPushButton:hover{color:#888;border-color:#444;}"
-            "QPushButton:checked{background:#001828;border-color:#005070;color:#4db8e8;}"
-        )
-        self._actor_dec_btns: dict = {}   # key -> QPushButton
-        for _key, _label in [('7','70s'),('8','80s'),('9','90s'),('0','00s'),('1','10s')]:
-            _btn = QPushButton(_label)
-            _btn.setCheckable(True)
-            _btn.setFixedHeight(22)
-            _btn.setStyleSheet(_dec_ss)
-            _btn.toggled.connect(lambda checked, k=_key: self._toggle_actor_dec(k, checked))
-            b2.addWidget(_btn)
-            self._actor_dec_btns[_key] = _btn
-
-        b2.addSpacing(8)
-
-        # Film-grootte bucket filter (S/M/L/XL)
-        lbl_fgb = QLabel("Gr:")
-        lbl_fgb.setStyleSheet("color: #333; font-size: 9px; letter-spacing: 2px;")
-        b2.addWidget(lbl_fgb)
-
-        _fgb_ss = (
-            "QPushButton{background:#111;border:1px solid #252525;border-radius:3px;"
-            "color:#444;font-size:9px;padding:0 5px;}"
-            "QPushButton:hover{color:#888;border-color:#444;}"
-            "QPushButton:checked{background:#181000;border-color:#504020;color:#b89060;}"
-        )
-        self._film_size_btns: dict = {}   # bucket -> QPushButton
-        for _bucket in ['S', 'M', 'L', 'XL']:
-            _btn = QPushButton(_bucket)
-            _btn.setCheckable(True)
-            _btn.setFixedHeight(22)
-            _btn.setStyleSheet(_fgb_ss)
-            _btn.toggled.connect(lambda checked, bk=_bucket: self._toggle_film_size(bk, checked))
-            b2.addWidget(_btn)
-            self._film_size_btns[_bucket] = _btn
-
-        b2.addSpacing(8)
-
-        # Marker-categoriefilter (dynamisch gevuld)
-        lbl_mc = QLabel("MCat:")
-        lbl_mc.setStyleSheet("color: #333; font-size: 9px; letter-spacing: 2px;")
-        b2.addWidget(lbl_mc)
-
-        self._marker_cat_container = QWidget()
-        self._marker_cat_container.setStyleSheet("background: transparent;")
-        _mcc = QHBoxLayout(self._marker_cat_container)
-        _mcc.setContentsMargins(0, 0, 0, 0)
-        _mcc.setSpacing(3)
-        b2.addWidget(self._marker_cat_container)
+        # Marker categorieën (dynamisch)
+        self._drop_marker_cats = _MultiSelectDropdown(
+            "Markertype", color_on='#c060c0', bg_on='#180018', border_on='#500050')
+        self._drop_marker_cats.setToolTip("Filter op marker-categorie")
+        b2.addWidget(self._drop_marker_cats)
 
         b2.addSpacing(8)
 
@@ -976,30 +1020,8 @@ class FilmsPanel(QWidget):
         self._load_actor_autocomplete()
 
     def _reload_marker_cat_buttons(self):
-        layout = self._marker_cat_container.layout()
-        while layout.count():
-            w = layout.takeAt(0).widget()
-            if w:
-                w.deleteLater()
-        self._marker_cat_btns.clear()
-
-        _mc_ss = (
-            "QPushButton{background:#111;border:1px solid #252525;border-radius:3px;"
-            "color:#444;font-size:9px;padding:0 5px;}"
-            "QPushButton:hover{color:#888;border-color:#444;}"
-            "QPushButton:checked{background:#180018;border-color:#500050;color:#c060c0;}"
-        )
-        for cat in db.get_all_categories():
-            cid  = cat['id']
-            name = cat.get('name', '') or ''
-            btn  = QPushButton(name)
-            btn.setCheckable(True)
-            btn.setChecked(cid in self._flt_marker_cats)
-            btn.setFixedHeight(22)
-            btn.setStyleSheet(_mc_ss)
-            btn.toggled.connect(lambda checked, c=cid: self._toggle_marker_cat(c, checked))
-            layout.addWidget(btn)
-            self._marker_cat_btns[cid] = btn
+        items = [(c['id'], c.get('name', '') or '') for c in db.get_all_categories()]
+        self._drop_marker_cats.populate(items, callback=self._toggle_marker_cat)
 
     def _toggle_marker_cat(self, cat_id: int, checked: bool):
         if checked:
@@ -1009,54 +1031,12 @@ class FilmsPanel(QWidget):
         self._apply_search_visibility()
 
     def _reload_film_cat_buttons(self):
-        layout = self._film_cat_container.layout()
-        while layout.count():
-            w = layout.takeAt(0).widget()
-            if w:
-                w.deleteLater()
-        self._film_cat_btns.clear()
-
-        for cat in db.get_film_categorie_types():
-            cid = cat['id']
-            btn = QPushButton(cat['naam'])
-            btn.setCheckable(True)
-            btn.setChecked(cid in self._flt_film_cats)
-            btn.setFixedHeight(22)
-            btn.setStyleSheet(
-                "QPushButton{background:#111;border:1px solid #252525;border-radius:3px;"
-                "color:#444;font-size:9px;padding:0 5px;}"
-                "QPushButton:hover{color:#888;border-color:#444;}"
-                "QPushButton:checked{background:#001818;border-color:#004040;color:#4db8b8;}"
-            )
-            btn.toggled.connect(lambda checked, c=cid: self._toggle_film_cat(c, checked))
-            layout.addWidget(btn)
-            self._film_cat_btns[cid] = btn
+        items = [(c['id'], c['naam']) for c in db.get_film_categorie_types()]
+        self._drop_film_cats.populate(items, callback=self._toggle_film_cat)
 
     def _reload_actor_kleur_buttons(self):
-        layout = self._actor_kleur_container.layout()
-        while layout.count():
-            w = layout.takeAt(0).widget()
-            if w:
-                w.deleteLater()
-        self._actor_kleur_btns.clear()
-
-        for k in db.get_actor_kleuren():
-            kid = k['id']
-            btn = QPushButton(k['naam'])
-            btn.setCheckable(True)
-            btn.setChecked(kid in self._flt_actor_kleur)
-            btn.setFixedHeight(22)
-            hex_col = k.get('hex', '')
-            btn.setStyleSheet(
-                f"QPushButton{{background:#111;border:1px solid #252525;border-radius:3px;"
-                f"color:#444;font-size:9px;padding:0 5px;}}"
-                f"QPushButton:hover{{color:#888;border-color:#444;}}"
-                f"QPushButton:checked{{background:#111;border-color:{hex_col or '#555'};"
-                f"color:{hex_col or '#aaa'};}}"
-            )
-            btn.toggled.connect(lambda checked, k=kid: self._toggle_actor_kleur(k, checked))
-            layout.addWidget(btn)
-            self._actor_kleur_btns[kid] = btn
+        items = [(k['id'], k['naam']) for k in db.get_actor_kleuren()]
+        self._drop_actor_kleur.populate(items, callback=self._toggle_actor_kleur)
 
     def _load_actor_autocomplete(self):
         """Herlaad acteursnamen voor de autocomplete in de filterbar."""
@@ -1137,15 +1117,11 @@ class FilmsPanel(QWidget):
             self._flt_actor_kleur.discard(kleur_id)
         self._update_cross_filter()
 
-    def _on_actor_groo_changed(self):
-        def _parse(s):
-            try:
-                v = int(s.strip())
-                return v if 1 <= v <= 5 else None
-            except (ValueError, TypeError):
-                return None
-        self._flt_actor_groo_min = _parse(self._actor_groo_min.text())
-        self._flt_actor_groo_max = _parse(self._actor_groo_max.text())
+    def _toggle_actor_groo(self, val: str, checked: bool):
+        if checked:
+            self._flt_actor_groo_vals.add(val)
+        else:
+            self._flt_actor_groo_vals.discard(val)
         self._update_cross_filter()
 
     def _toggle_actor_dec(self, key: str, checked: bool):
@@ -1174,10 +1150,8 @@ class FilmsPanel(QWidget):
             ak_ids = db.get_film_ids_by_actor_kleuren(list(self._flt_actor_kleur))
             ids = ak_ids if ids is None else ids & ak_ids
 
-        if self._flt_actor_groo_min is not None or self._flt_actor_groo_max is not None:
-            ag_ids = db.get_film_ids_by_actor_grootte(
-                self._flt_actor_groo_min, self._flt_actor_groo_max
-            )
+        if self._flt_actor_groo_vals:
+            ag_ids = db.get_film_ids_by_actor_grootte_exact(self._flt_actor_groo_vals)
             ids = ag_ids if ids is None else ids & ag_ids
 
         if self._flt_actor_dec:
@@ -1255,8 +1229,7 @@ class FilmsPanel(QWidget):
             'dur_max':           self._dur_max_input.text(),
             'sz_min':            self._sz_min_input.text(),
             'sz_max':            self._sz_max_input.text(),
-            'ag_min':            self._actor_groo_min.text(),
-            'ag_max':            self._actor_groo_max.text(),
+            'flt_actor_groo':    list(self._flt_actor_groo_vals),
             'flt_1thumb':        self._flt_1thumb,
             'flt_multithumb':    self._flt_multithumb,
             'flt_no_thumb':      self._flt_no_thumb,
@@ -1282,13 +1255,11 @@ class FilmsPanel(QWidget):
 
         # Tekstvelden
         for widget, key in [
-            (self.search_input,    'search'),
-            (self._dur_min_input,  'dur_min'),
-            (self._dur_max_input,  'dur_max'),
-            (self._sz_min_input,   'sz_min'),
-            (self._sz_max_input,   'sz_max'),
-            (self._actor_groo_min, 'ag_min'),
-            (self._actor_groo_max, 'ag_max'),
+            (self.search_input,   'search'),
+            (self._dur_min_input, 'dur_min'),
+            (self._dur_max_input, 'dur_max'),
+            (self._sz_min_input,  'sz_min'),
+            (self._sz_max_input,  'sz_max'),
         ]:
             val = state.get(key, '')
             if val:
@@ -1308,32 +1279,19 @@ class FilmsPanel(QWidget):
                 setattr(self, f'_{key}', True)
                 btn.setStyleSheet(self._FILTER_BTN_ACTIVE)
 
-        # Set-gebaseerde toggles via button-dicts
-        for cid in state.get('flt_film_cats', []):
-            if cid in self._film_cat_btns:
-                b = self._film_cat_btns[cid]
-                b.blockSignals(True); b.setChecked(True); b.blockSignals(False)
-                self._flt_film_cats.add(cid)
-        for kid in state.get('flt_actor_kleur', []):
-            if kid in self._actor_kleur_btns:
-                b = self._actor_kleur_btns[kid]
-                b.blockSignals(True); b.setChecked(True); b.blockSignals(False)
-                self._flt_actor_kleur.add(kid)
-        for key in state.get('flt_actor_dec', []):
-            if key in self._actor_dec_btns:
-                b = self._actor_dec_btns[key]
-                b.blockSignals(True); b.setChecked(True); b.blockSignals(False)
-                self._flt_actor_dec.add(key)
-        for bk in state.get('flt_film_size', []):
-            if bk in self._film_size_btns:
-                b = self._film_size_btns[bk]
-                b.blockSignals(True); b.setChecked(True); b.blockSignals(False)
-                self._flt_film_size.add(bk)
-        for cid in state.get('flt_marker_cats', []):
-            if cid in self._marker_cat_btns:
-                b = self._marker_cat_btns[cid]
-                b.blockSignals(True); b.setChecked(True); b.blockSignals(False)
-                self._flt_marker_cats.add(cid)
+        # Set-gebaseerde toggles via dropdowns
+        fc = set(state.get('flt_film_cats',   []))
+        ak = set(state.get('flt_actor_kleur',  []))
+        ad = set(state.get('flt_actor_dec',    []))
+        ag = set(state.get('flt_actor_groo',   []))
+        fs = set(state.get('flt_film_size',    []))
+        mc = set(state.get('flt_marker_cats',  []))
+        self._drop_film_cats.set_selection(fc);    self._flt_film_cats       = fc
+        self._drop_actor_kleur.set_selection(ak);  self._flt_actor_kleur     = ak
+        self._drop_actor_dec.set_selection(ad);    self._flt_actor_dec       = ad
+        self._drop_actor_groo.set_selection(ag);   self._flt_actor_groo_vals = ag
+        self._drop_film_size.set_selection(fs);    self._flt_film_size       = fs
+        self._drop_marker_cats.set_selection(mc);  self._flt_marker_cats     = mc
 
         # Acteur-chips
         for a in state.get('flt_actors', []):
@@ -1696,27 +1654,21 @@ class FilmsPanel(QWidget):
         self._flt_actor_kleur.clear()
         self._flt_actor_dec.clear()
         self._flt_film_size.clear()
-        self._flt_actor_groo_min = None
-        self._flt_actor_groo_max = None
-        self._cross_film_ids     = None
+        self._flt_actor_groo_vals.clear()
+        self._cross_film_ids = None
         for w in (self._dur_min_input, self._dur_max_input,
-                  self._sz_min_input,  self._sz_max_input,
-                  self._actor_groo_min, self._actor_groo_max):
+                  self._sz_min_input,  self._sz_max_input):
             w.blockSignals(True)
             w.clear()
             w.blockSignals(False)
-        # Deselect tweede-balk knoppen
-        for btn in self._film_cat_btns.values():
-            btn.blockSignals(True); btn.setChecked(False); btn.blockSignals(False)
-        for btn in self._actor_kleur_btns.values():
-            btn.blockSignals(True); btn.setChecked(False); btn.blockSignals(False)
-        for btn in self._actor_dec_btns.values():
-            btn.blockSignals(True); btn.setChecked(False); btn.blockSignals(False)
-        for btn in self._film_size_btns.values():
-            btn.blockSignals(True); btn.setChecked(False); btn.blockSignals(False)
+        self._drop_actor_groo.clear_all()
+        # Deselect dropdown-knoppen
+        self._drop_film_cats.clear_all()
+        self._drop_actor_kleur.clear_all()
+        self._drop_actor_dec.clear_all()
+        self._drop_film_size.clear_all()
         self._flt_marker_cats.clear()
-        for btn in self._marker_cat_btns.values():
-            btn.blockSignals(True); btn.setChecked(False); btn.blockSignals(False)
+        self._drop_marker_cats.clear_all()
         # Acteur-chips verwijderen
         for chip in list(self._actor_chip_btns.values()):
             self._actor_chips_layout.removeWidget(chip)

@@ -11,7 +11,7 @@ from pathlib import Path
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel,
-    QListWidget, QListWidgetItem, QSplitter, QScrollArea, QFrame, QMenu,
+    QListWidget, QListWidgetItem, QSplitter, QFrame, QMenu,
     QLineEdit,
 )
 from PyQt6.QtCore import Qt, QSize, QTimer, pyqtSignal, QPoint
@@ -42,19 +42,12 @@ def _load_cat_pix(cat: dict, size: int) -> QPixmap | None:
     return None
 
 
-# ─────────────────────────────────────────────
-#  Helpers
-# ─────────────────────────────────────────────
-
 def _film_size_bucket(size_bytes: int) -> str:
     """Categoriseer bestandsgrootte in S/M/L/XL."""
-    gb = size_bytes / 1_073_741_824   # 1 GB in bytes
-    if gb < 0.5:
-        return 'S'
-    if gb < 2.0:
-        return 'M'
-    if gb < 5.0:
-        return 'L'
+    gb = size_bytes / 1_073_741_824
+    if gb < 0.5:  return 'S'
+    if gb < 2.0:  return 'M'
+    if gb < 5.0:  return 'L'
     return 'XL'
 
 
@@ -209,20 +202,44 @@ class MarkersPanel(QWidget):
     play_selection_requested = pyqtSignal(list)         # list of filtered entries
     edit_marker_requested   = pyqtSignal(dict, str)    # marker dict, film_path
 
+    _SS_SORT_OFF = (
+        "QPushButton { background:#111; border:1px solid #252525; border-radius:4px;"
+        "  padding:3px 10px; color:#555; font-size:11px; }"
+        "QPushButton:hover { border-color:#444; color:#888; }"
+    )
+    _SS_SORT_ON = (
+        "QPushButton { background:#1a1500; border:1px solid #e8b86d; border-radius:4px;"
+        "  padding:3px 10px; color:#e8b86d; font-size:11px; }"
+        "QPushButton:hover { background:#2a2200; }"
+    )
+
     def __init__(self, mpv_player=None):
         super().__init__()
         self._player      = mpv_player
         self._all_entries: list = []    # alle geladen markers (dicts)
-        self._cat_filter:  set  = set() # marker categorie-id's (leeg = alle)
+
         # Actor three-state: 0=neutral, 1=include, 2=exclude  {actor_id: int}
         self._actor_states: dict = {}
-        self._trait_filter:       set = set()   # trait-id's (leeg = alle)
-        self._film_cat_filter:    set = set()   # film-cat-id's (leeg = alle)
-        self._kleur_filter:       set = set()   # kleur-id strings (leeg = alle)
-        self._grootte_filter:     set = set()   # grootte strings 1-5 (leeg = alle)
-        self._decennia_filter:    set = set()   # decennia strings (leeg = alle)
-        self._filmgrootte_filter: set = set()   # size buckets: 'S','M','L','XL' (leeg = alle)
-        self._all_items:   list = []    # QListWidgetItems in volgorde van grid
+
+        # Filter sets (leeg = alle)
+        self._markertype_filter:  set = set()   # marker categorie-id's
+        self._trait_filter:       set = set()   # trait-id's
+        self._film_cat_filter:    set = set()   # film-cat-id's
+        self._kleur_filter:       set = set()   # kleur-id strings
+        self._grootte_filter:     set = set()   # grootte strings 5-9
+        self._decennia_filter:    set = set()   # decennia strings
+        self._filmgrootte_filter: set = set()   # size buckets: 'S','M','L','XL'
+        self._stars_filter:       set = set()   # sterren strings '1'-'5'
+
+        # Sort state
+        self._sort_field: str = ''   # '' = bestandsvolgorde, 'film', 'tijd', 'sterren'
+        self._sort_asc:   bool = True
+
+        # Text search
+        self._search_text: str = ''
+
+        # Internals
+        self._all_items:   list = []
         self._worker: FrameExtractWorker | None = None
         # Batch lookup maps — filled in refresh()
         self._actor_trait_map:  dict = {}   # {actor_id: set(trait_id)}
@@ -231,6 +248,7 @@ class MarkersPanel(QWidget):
         self._film_path_to_id:  dict = {}   # {file_path: film_id}
         self._film_size_map:    dict = {}   # {file_path: file_size_bytes}
         self._actor_search: str = ''
+        self._sort_btns: dict = {}          # {field: QPushButton}
         self._build_ui()
 
     # ── UI ──────────────────────────────────────────────────────
@@ -246,7 +264,7 @@ class MarkersPanel(QWidget):
         top.setStyleSheet("background: #111; border-bottom: 1px solid #1e1e1e;")
         th = QHBoxLayout(top)
         th.setContentsMargins(12, 0, 10, 0)
-        th.setSpacing(10)
+        th.setSpacing(8)
 
         lbl_title = QLabel("ALLE MARKERS")
         lbl_title.setStyleSheet(
@@ -259,6 +277,42 @@ class MarkersPanel(QWidget):
         th.addWidget(self._lbl_count)
 
         th.addStretch()
+
+        # Zoekbalk
+        self._search_input = QLineEdit()
+        self._search_input.setPlaceholderText("Zoek film of acteur…")
+        self._search_input.setFixedHeight(28)
+        self._search_input.setFixedWidth(200)
+        self._search_input.setStyleSheet(
+            "QLineEdit { background:#1a1a1a; border:1px solid #2a2a2a; border-radius:4px;"
+            "  padding:0 8px; color:#bbb; font-size:11px; }"
+            "QLineEdit:focus { border-color:#555; }"
+        )
+        self._search_input.textChanged.connect(self._on_search_changed)
+        th.addWidget(self._search_input)
+
+        # Sorteerknopen
+        for field, label in [('film', 'Film'), ('tijd', 'Tijd'), ('sterren', 'Sterren')]:
+            btn = QPushButton(label)
+            btn.setFixedHeight(28)
+            btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            btn.setStyleSheet(self._SS_SORT_OFF)
+            btn.clicked.connect(lambda checked, f=field: self._on_sort_click(f))
+            self._sort_btns[field] = btn
+            th.addWidget(btn)
+
+        # Reset knop
+        btn_reset = QPushButton("⊘")
+        btn_reset.setFixedSize(28, 28)
+        btn_reset.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        btn_reset.setToolTip("Reset alle filters")
+        btn_reset.setStyleSheet(
+            "QPushButton { background:transparent; border:1px solid #2a2a2a;"
+            "  border-radius:4px; color:#555; font-size:13px; }"
+            "QPushButton:hover { border-color:#c04040; color:#c04040; }"
+        )
+        btn_reset.clicked.connect(self._reset_filters)
+        th.addWidget(btn_reset)
 
         self._btn_play = QPushButton("▶  Afspelen")
         self._btn_play.setFixedHeight(28)
@@ -292,73 +346,70 @@ class MarkersPanel(QWidget):
 
         root.addWidget(top)
 
-        # ── Categorie-filter ─────────────────────────────────────
-        self._cat_scroll = QScrollArea()
-        self._cat_scroll.setFixedHeight(36)
-        self._cat_scroll.setWidgetResizable(True)
-        self._cat_scroll.setHorizontalScrollBarPolicy(
-            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self._cat_scroll.setVerticalScrollBarPolicy(
-            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self._cat_scroll.setStyleSheet(
-            "QScrollArea { border: none; background: #0d0d0d;"
-            "  border-bottom: 1px solid #1a1a1a; }"
-        )
+        # ── Filterbalk ───────────────────────────────────────────
+        filt = QWidget()
+        filt.setFixedHeight(38)
+        filt.setStyleSheet("background: #0a0a0a; border-bottom: 1px solid #1a1a1a;")
+        fh = QHBoxLayout(filt)
+        fh.setContentsMargins(8, 0, 8, 0)
+        fh.setSpacing(6)
 
-        self._cat_bar = QWidget()
-        self._cat_bar.setStyleSheet("background: #0d0d0d;")
-        self._cat_layout = QHBoxLayout(self._cat_bar)
-        self._cat_layout.setContentsMargins(8, 4, 8, 4)
-        self._cat_layout.setSpacing(5)
-        self._cat_layout.addStretch()
-        self._cat_scroll.setWidget(self._cat_bar)
-        root.addWidget(self._cat_scroll)
+        _GROOTTE_ITEMS  = [(str(i), str(i)) for i in range(5, 10)]
+        _DECENNIA_ITEMS = [('7','70s'), ('8','80s'), ('9','90s'), ('0','00s'), ('1','10s')]
+        _FILMGR_ITEMS   = [('S','< 500 MB'), ('M','500 MB – 2 GB'),
+                           ('L','2 – 5 GB'),  ('XL','> 5 GB')]
+        _STARS_ITEMS    = [('1','★'), ('2','★★'), ('3','★★★'), ('4','★★★★'), ('5','★★★★★')]
 
-        # ── Tweede filterbalk: dropdowns voor film-cat & acteur-eigenschap ──
-        filt2 = QWidget()
-        filt2.setFixedHeight(38)
-        filt2.setStyleSheet("background: #0a0a0a; border-bottom: 1px solid #1a1a1a;")
-        f2h = QHBoxLayout(filt2)
-        f2h.setContentsMargins(8, 0, 8, 0)
-        f2h.setSpacing(6)
-
-        _GROOTTE_ITEMS   = [(str(i), str(i)) for i in range(1, 6)]
-        _DECENNIA_ITEMS  = [('7','70s'), ('8','80s'), ('9','90s'), ('0','00s')]
-        _FILMGR_ITEMS    = [('S','< 500 MB'), ('M','500 MB – 2 GB'),
-                            ('L','2 – 5 GB'),  ('XL','> 5 GB')]
+        # Markertype (vervangt de oude categorie-scrollbalk)
+        self._dd_markertype = _MultiDropdown("Markertype", [])
+        self._dd_markertype.setFixedHeight(26)
+        self._dd_markertype.filter_changed.connect(self._on_markertype_filter)
+        fh.addWidget(self._dd_markertype)
 
         self._dd_filmcat = _MultiDropdown("Filmcat.", [])
         self._dd_filmcat.setFixedHeight(26)
-        self._dd_filmcat.filter_changed.connect(self._on_filmcat_filter)
-        f2h.addWidget(self._dd_filmcat)
+        self._dd_filmcat.filter_changed.connect(
+            lambda s: self._set_filter('film_cat', s))
+        fh.addWidget(self._dd_filmcat)
 
         self._dd_trait = _MultiDropdown("Eigenschap", [])
         self._dd_trait.setFixedHeight(26)
-        self._dd_trait.filter_changed.connect(self._on_trait_filter)
-        f2h.addWidget(self._dd_trait)
+        self._dd_trait.filter_changed.connect(
+            lambda s: self._set_filter('trait', s))
+        fh.addWidget(self._dd_trait)
 
-        self._dd_kleur = _MultiDropdown("Kleur", [])   # items filled in refresh()
+        self._dd_kleur = _MultiDropdown("Kleur", [])
         self._dd_kleur.setFixedHeight(26)
-        self._dd_kleur.filter_changed.connect(lambda s: self._set_filter('kleur', s))
-        f2h.addWidget(self._dd_kleur)
+        self._dd_kleur.filter_changed.connect(
+            lambda s: self._set_filter('kleur', s))
+        fh.addWidget(self._dd_kleur)
 
         self._dd_grootte = _MultiDropdown("Grootte", _GROOTTE_ITEMS)
         self._dd_grootte.setFixedHeight(26)
-        self._dd_grootte.filter_changed.connect(lambda s: self._set_filter('grootte', s))
-        f2h.addWidget(self._dd_grootte)
+        self._dd_grootte.filter_changed.connect(
+            lambda s: self._set_filter('grootte', s))
+        fh.addWidget(self._dd_grootte)
 
         self._dd_dec = _MultiDropdown("Decennia", _DECENNIA_ITEMS)
         self._dd_dec.setFixedHeight(26)
-        self._dd_dec.filter_changed.connect(lambda s: self._set_filter('decennia', s))
-        f2h.addWidget(self._dd_dec)
+        self._dd_dec.filter_changed.connect(
+            lambda s: self._set_filter('decennia', s))
+        fh.addWidget(self._dd_dec)
 
         self._dd_filmgr = _MultiDropdown("Film gr.", _FILMGR_ITEMS)
         self._dd_filmgr.setFixedHeight(26)
-        self._dd_filmgr.filter_changed.connect(lambda s: self._set_filter('filmgrootte', s))
-        f2h.addWidget(self._dd_filmgr)
+        self._dd_filmgr.filter_changed.connect(
+            lambda s: self._set_filter('filmgrootte', s))
+        fh.addWidget(self._dd_filmgr)
 
-        f2h.addStretch()
-        root.addWidget(filt2)
+        self._dd_stars = _MultiDropdown("Sterren", _STARS_ITEMS)
+        self._dd_stars.setFixedHeight(26)
+        self._dd_stars.filter_changed.connect(
+            lambda s: self._set_filter('stars', s))
+        fh.addWidget(self._dd_stars)
+
+        fh.addStretch()
+        root.addWidget(filt)
 
         # ── Body: acteurlijst | markersgrid ──────────────────────
         body = QSplitter(Qt.Orientation.Horizontal)
@@ -452,37 +503,145 @@ class MarkersPanel(QWidget):
         body.setSizes([180, 9999])
         root.addWidget(body, stretch=1)
 
+    # ── Sorteren ─────────────────────────────────────────────────
+
+    def _on_sort_click(self, field: str):
+        if self._sort_field == field:
+            if self._sort_asc:
+                self._sort_asc = False
+            else:
+                # Derde klik: zet sortering uit
+                self._sort_field = ''
+                self._sort_asc = True
+        else:
+            self._sort_field = field
+            self._sort_asc = True
+        self._update_sort_buttons()
+        self._apply_filters()
+
+    def _update_sort_buttons(self):
+        labels = {'film': 'Film', 'tijd': 'Tijd', 'sterren': 'Sterren'}
+        for f, btn in self._sort_btns.items():
+            if f == self._sort_field:
+                btn.setText(labels[f] + (' ↑' if self._sort_asc else ' ↓'))
+                btn.setStyleSheet(self._SS_SORT_ON)
+            else:
+                btn.setText(labels[f])
+                btn.setStyleSheet(self._SS_SORT_OFF)
+
+    # ── Reset ────────────────────────────────────────────────────
+
+    def _reset_filters(self):
+        """Reset alle filters, sortering en zoektekst."""
+        self._actor_states.clear()
+        # Zoekbalk
+        self._search_input.blockSignals(True)
+        self._search_input.clear()
+        self._search_input.blockSignals(False)
+        self._search_text = ''
+        # Acteur-zoekvak
+        self._actor_search_box.blockSignals(True)
+        self._actor_search_box.clear()
+        self._actor_search_box.blockSignals(False)
+        self._actor_search = ''
+        # Sortering
+        self._sort_field = ''
+        self._sort_asc = True
+        self._update_sort_buttons()
+        # Dropdowns (UI)
+        for dd in (self._dd_markertype, self._dd_filmcat, self._dd_trait,
+                   self._dd_kleur, self._dd_grootte, self._dd_dec,
+                   self._dd_filmgr, self._dd_stars):
+            dd.clear_selection()
+        # Filtersets (staat)
+        self._markertype_filter.clear()
+        self._film_cat_filter.clear()
+        self._trait_filter.clear()
+        self._kleur_filter.clear()
+        self._grootte_filter.clear()
+        self._decennia_filter.clear()
+        self._filmgrootte_filter.clear()
+        self._stars_filter.clear()
+        self._rebuild_actor_list()
+        self._apply_filters()
+
+    # ── Zoeken ───────────────────────────────────────────────────
+
+    def _on_search_changed(self, text: str):
+        self._search_text = text.strip()
+        self._apply_filters()
+
+    # ── Filter helpers ───────────────────────────────────────────
+
+    def _on_markertype_filter(self, sel: set):
+        """Markertype-filter past ook de acteurlijst aan."""
+        self._markertype_filter = sel
+        self._rebuild_actor_list()
+        self._apply_filters()
+
+    def _set_filter(self, name: str, sel: set):
+        """Generieke handler voor set-filters."""
+        _attr = {
+            'film_cat':    '_film_cat_filter',
+            'trait':       '_trait_filter',
+            'kleur':       '_kleur_filter',
+            'grootte':     '_grootte_filter',
+            'decennia':    '_decennia_filter',
+            'filmgrootte': '_filmgrootte_filter',
+            'stars':       '_stars_filter',
+        }
+        setattr(self, _attr[name], sel)
+        self._apply_filters()
+
     # ── Data laden ───────────────────────────────────────────────
 
     def refresh(self):
         """Laad alle markers van alle films opnieuw."""
-        # Stop lopende worker
         self._stop_worker()
-
         self._all_entries.clear()
-        self._cat_filter.clear()
+
+        # Reset alle filterstate
         self._actor_states.clear()
+        self._markertype_filter.clear()
         self._trait_filter.clear()
         self._film_cat_filter.clear()
         self._kleur_filter.clear()
         self._grootte_filter.clear()
         self._decennia_filter.clear()
         self._filmgrootte_filter.clear()
+        self._stars_filter.clear()
+        self._search_text = ''
+        self._sort_field = ''
+        self._sort_asc = True
+
+        # Reset UI
+        self._search_input.blockSignals(True)
+        self._search_input.clear()
+        self._search_input.blockSignals(False)
+        self._actor_search_box.blockSignals(True)
+        self._actor_search_box.clear()
+        self._actor_search_box.blockSignals(False)
+        self._actor_search = ''
+        self._update_sort_buttons()
+        for dd in (self._dd_filmcat, self._dd_trait, self._dd_kleur,
+                   self._dd_grootte, self._dd_dec, self._dd_filmgr, self._dd_stars):
+            dd.clear_selection()
+        # _dd_markertype wordt hersteld door _update_markertype_dropdown()
 
         actors_dict = {a['id']: a for a in db.get_all_actors()}
         cats_dict   = {c['id']: c for c in db.get_all_categories()}
 
         # ── Batch maps ───────────────────────────────────────────
-        self._actor_trait_map = db.get_actor_trait_ids_batch()    # {actor_id: set}
-        self._actor_meta_map  = db.get_actor_metadata_batch()     # {actor_id: {kleur,grootte,dec}}
-        self._film_cat_map    = db.get_film_category_ids_batch()  # {film_id: set}
+        self._actor_trait_map = db.get_actor_trait_ids_batch()
+        self._actor_meta_map  = db.get_actor_metadata_batch()
+        self._film_cat_map    = db.get_film_category_ids_batch()
         all_films             = db.get_all_films()
         self._film_path_to_id = {f['file_path']: f['id']
                                  for f in all_films if f.get('file_path')}
         self._film_size_map   = {f['file_path']: (f.get('file_size') or 0)
                                  for f in all_films if f.get('file_path')}
 
-        # ── Populate dropdowns ───────────────────────────────────
+        # ── Populate dynamische dropdowns ────────────────────────
         trait_items   = [(t['id'], t['naam'])  for t in db.get_actor_trait_types()]
         filmcat_items = [(c['id'], c['naam'])  for c in db.get_film_categorie_types()]
         kleur_items   = [(str(k['id']), k['naam']) for k in db.get_actor_kleuren()]
@@ -520,64 +679,111 @@ class MarkersPanel(QWidget):
                     'cat_objs':   [cats_dict[c] for c in cat_ids if c in cats_dict],
                 })
 
-        self._rebuild_cat_buttons()
+        self._update_markertype_dropdown()
         self._rebuild_actor_list()
         self._apply_filters()
 
-    # ── Categorie-filter ─────────────────────────────────────────
-
-    def _rebuild_cat_buttons(self):
-        lay = self._cat_layout
-        while lay.count():
-            w = lay.takeAt(0).widget()
-            if w:
-                w.deleteLater()
-
+    def _update_markertype_dropdown(self):
+        """Zet Markertype-dropdown met categorieën die voorkomen in de geladen entries."""
         used_ids = set()
         for e in self._all_entries:
             used_ids.update(e['cat_ids'])
-
         cats = [c for c in db.get_all_categories() if c['id'] in used_ids]
-        for cat in cats:
-            btn = QPushButton(cat['name'])
-            btn.setCheckable(True)
-            btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-            ip = cat.get('icon_path', '')
-            if ip and os.path.exists(ip):
-                btn.setIcon(QIcon(ip))
-                btn.setIconSize(QSize(16, 16))
-            btn.setStyleSheet(
-                "QPushButton {"
-                "  background: #161616; border: 1px solid #2a2a2a;"
-                "  border-radius: 4px; padding: 2px 10px;"
-                "  color: #666; font-size: 11px; }"
-                "QPushButton:checked {"
-                "  border-color: #e8b86d; color: #e8b86d; background: #1a1500; }"
-                "QPushButton:hover { color: #aaa; border-color: #444; }"
-            )
-            btn.toggled.connect(
-                lambda checked, cid=cat['id']: self._toggle_cat(cid, checked)
-            )
-            lay.addWidget(btn)
+        items = [(c['id'], c['name']) for c in cats]
+        self._dd_markertype.set_items(items)
 
-        lay.addStretch()
+    # ── Gefilterde entries (gedeelde logica) ─────────────────────
 
-    def _toggle_cat(self, cat_id: int, checked: bool):
-        if checked:
-            self._cat_filter.add(cat_id)
-        else:
-            self._cat_filter.discard(cat_id)
-        self._rebuild_actor_list()
-        self._apply_filters()
+    def _filtered_entries(self) -> list:
+        """Pas alle actieve filters toe en geef de overeenkomende entries terug,
+        gesorteerd volgens de actieve sorteerinstelling."""
+        include_actors = {aid for aid, s in self._actor_states.items() if s == 1}
+        exclude_actors = {aid for aid, s in self._actor_states.items() if s == 2}
+
+        entries = self._all_entries
+
+        if self._markertype_filter:
+            entries = [e for e in entries
+                       if self._markertype_filter & set(e['cat_ids'])]
+        if include_actors:
+            entries = [e for e in entries
+                       if include_actors & set(e['actor_ids'])]
+        if exclude_actors:
+            entries = [e for e in entries
+                       if not (exclude_actors & set(e['actor_ids']))]
+        if self._trait_filter:
+            entries = [e for e in entries
+                       if any(self._trait_filter &
+                              self._actor_trait_map.get(aid, set())
+                              for aid in e['actor_ids'])]
+        if self._film_cat_filter:
+            entries = [e for e in entries
+                       if self._film_cat_filter &
+                          self._film_cat_map.get(
+                              self._film_path_to_id.get(e['film_path'], -1), set()
+                          )]
+        if self._kleur_filter:
+            entries = [e for e in entries
+                       if any(self._actor_meta_map.get(aid, {}).get('kleur', '')
+                              in self._kleur_filter
+                              for aid in e['actor_ids'])]
+        if self._grootte_filter:
+            entries = [e for e in entries
+                       if any(str(self._actor_meta_map.get(aid, {}).get('grootte', ''))
+                              in self._grootte_filter
+                              for aid in e['actor_ids'])]
+        if self._decennia_filter:
+            entries = [e for e in entries
+                       if any(self._actor_meta_map.get(aid, {}).get('decennia', '')
+                              in self._decennia_filter
+                              for aid in e['actor_ids'])]
+        if self._filmgrootte_filter:
+            entries = [e for e in entries
+                       if _film_size_bucket(
+                              self._film_size_map.get(e['film_path'], 0)
+                          ) in self._filmgrootte_filter]
+        if self._stars_filter:
+            entries = [e for e in entries
+                       if str(int(e['marker'].get('stars') or 0))
+                          in self._stars_filter]
+        if self._search_text:
+            q = self._search_text.lower()
+            entries = [e for e in entries
+                       if q in e['film_name'].lower() or
+                          any(q in a.get('name', '').lower()
+                              for a in e['actor_objs'])]
+
+        # Sortering
+        if self._sort_field == 'film':
+            entries = sorted(
+                entries,
+                key=lambda e: (e['film_name'].lower(), e['marker'].get('time', 0.0)),
+                reverse=not self._sort_asc,
+            )
+        elif self._sort_field == 'tijd':
+            entries = sorted(
+                entries,
+                key=lambda e: e['marker'].get('time', 0.0),
+                reverse=not self._sort_asc,
+            )
+        elif self._sort_field == 'sterren':
+            entries = sorted(
+                entries,
+                key=lambda e: int(e['marker'].get('stars') or 0),
+                reverse=not self._sort_asc,
+            )
+        # Geen sorteerveld → behoud bestandsvolgorde
+
+        return entries
 
     # ── Acteur-filter ────────────────────────────────────────────
 
     def _rebuild_actor_list(self):
         """Bouw de acteurlijst opnieuw — alleen acteurs die markers hebben
-        na de actieve categorie-filter. Houdt drie-state kleuren bij."""
-        if self._cat_filter:
+        na de actieve markertype-filter. Houdt drie-state kleuren bij."""
+        if self._markertype_filter:
             visible = [e for e in self._all_entries
-                       if self._cat_filter & set(e['cat_ids'])]
+                       if self._markertype_filter & set(e['cat_ids'])]
         else:
             visible = self._all_entries
 
@@ -599,7 +805,7 @@ class MarkersPanel(QWidget):
         actors_dict = {a['id']: a for a in db.get_all_actors()}
         for aid, cnt in sorted(
             actor_counts.items(),
-            key=lambda x: actors_dict.get(x[0], {}).get('name', '').lower()
+            key=lambda x: (-x[1], actors_dict.get(x[0], {}).get('name', '').lower())
         ):
             actor = actors_dict.get(aid)
             if not actor:
@@ -650,19 +856,6 @@ class MarkersPanel(QWidget):
         self._rebuild_actor_list()
         self._apply_filters()
 
-    def _on_filmcat_filter(self, sel: set):
-        self._film_cat_filter = sel
-        self._apply_filters()
-
-    def _on_trait_filter(self, sel: set):
-        self._trait_filter = sel
-        self._apply_filters()
-
-    def _set_filter(self, name: str, sel: set):
-        """Generieke handler voor eenvoudige set-filters."""
-        setattr(self, f'_{name}_filter', sel)
-        self._apply_filters()
-
     # ── Markersgrid ──────────────────────────────────────────────
 
     def _apply_filters(self):
@@ -672,50 +865,7 @@ class MarkersPanel(QWidget):
         self._grid.clear()
         self._all_items.clear()
 
-        include_actors = {aid for aid, s in self._actor_states.items() if s == 1}
-        exclude_actors = {aid for aid, s in self._actor_states.items() if s == 2}
-
-        entries = self._all_entries
-        if self._cat_filter:
-            entries = [e for e in entries
-                       if self._cat_filter & set(e['cat_ids'])]
-        if include_actors:
-            entries = [e for e in entries
-                       if include_actors & set(e['actor_ids'])]
-        if exclude_actors:
-            entries = [e for e in entries
-                       if not (exclude_actors & set(e['actor_ids']))]
-        if self._trait_filter:
-            entries = [e for e in entries
-                       if any(self._trait_filter &
-                              self._actor_trait_map.get(aid, set())
-                              for aid in e['actor_ids'])]
-        if self._film_cat_filter:
-            entries = [e for e in entries
-                       if self._film_cat_filter &
-                          self._film_cat_map.get(
-                              self._film_path_to_id.get(e['film_path'], -1), set()
-                          )]
-        if self._kleur_filter:
-            entries = [e for e in entries
-                       if any(self._actor_meta_map.get(aid, {}).get('kleur', '')
-                              in self._kleur_filter
-                              for aid in e['actor_ids'])]
-        if self._grootte_filter:
-            entries = [e for e in entries
-                       if any(self._actor_meta_map.get(aid, {}).get('grootte', '')
-                              in self._grootte_filter
-                              for aid in e['actor_ids'])]
-        if self._decennia_filter:
-            entries = [e for e in entries
-                       if any(self._actor_meta_map.get(aid, {}).get('decennia', '')
-                              in self._decennia_filter
-                              for aid in e['actor_ids'])]
-        if self._filmgrootte_filter:
-            entries = [e for e in entries
-                       if _film_size_bucket(
-                              self._film_size_map.get(e['film_path'], 0)
-                          ) in self._filmgrootte_filter]
+        entries = self._filtered_entries()
 
         cache_dir = MARKER_THUMBS_DIR
         cache_dir.mkdir(parents=True, exist_ok=True)
@@ -800,56 +950,13 @@ class MarkersPanel(QWidget):
             if d:
                 d['cache_path'] = cache_path
                 item.setData(Qt.ItemDataRole.UserRole, d)
-                # Geen invalidate_cache() — het nieuwe pad zat nog nooit in de
-                # delegate-cache (bestand bestond nog niet), dus het laadt vanzelf
-                # vers op de volgende paint van dit ene item.
                 self._grid.update(self._grid.model().index(row_idx, 0))
         except RuntimeError:
             pass  # item al verwijderd door nieuwe filter
 
     def _emit_play_selection(self):
-        """Stuur de gefilterde entries naar de speler als afspeellijst.
-        Gebruikt dezelfde filter-logica als _apply_filters()."""
-        include_actors = {aid for aid, s in self._actor_states.items() if s == 1}
-        exclude_actors = {aid for aid, s in self._actor_states.items() if s == 2}
-        entries = self._all_entries
-        if self._cat_filter:
-            entries = [e for e in entries if self._cat_filter & set(e['cat_ids'])]
-        if include_actors:
-            entries = [e for e in entries if include_actors & set(e['actor_ids'])]
-        if exclude_actors:
-            entries = [e for e in entries if not (exclude_actors & set(e['actor_ids']))]
-        if self._trait_filter:
-            entries = [e for e in entries
-                       if any(self._trait_filter &
-                              self._actor_trait_map.get(aid, set())
-                              for aid in e['actor_ids'])]
-        if self._film_cat_filter:
-            entries = [e for e in entries
-                       if self._film_cat_filter &
-                          self._film_cat_map.get(
-                              self._film_path_to_id.get(e['film_path'], -1), set()
-                          )]
-        if self._kleur_filter:
-            entries = [e for e in entries
-                       if any(self._actor_meta_map.get(aid, {}).get('kleur', '')
-                              in self._kleur_filter
-                              for aid in e['actor_ids'])]
-        if self._grootte_filter:
-            entries = [e for e in entries
-                       if any(self._actor_meta_map.get(aid, {}).get('grootte', '')
-                              in self._grootte_filter
-                              for aid in e['actor_ids'])]
-        if self._decennia_filter:
-            entries = [e for e in entries
-                       if any(self._actor_meta_map.get(aid, {}).get('decennia', '')
-                              in self._decennia_filter
-                              for aid in e['actor_ids'])]
-        if self._filmgrootte_filter:
-            entries = [e for e in entries
-                       if _film_size_bucket(
-                              self._film_size_map.get(e['film_path'], 0)
-                          ) in self._filmgrootte_filter]
+        """Stuur de gefilterde entries naar de speler als afspeellijst."""
+        entries = self._filtered_entries()
         if entries:
             self.play_selection_requested.emit(entries)
 

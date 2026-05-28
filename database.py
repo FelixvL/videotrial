@@ -888,6 +888,30 @@ def get_film_ids_by_actor_kleuren(kleur_ids: list) -> set:
         return {r['film_id'] for r in rows}
 
 
+def get_film_ids_by_actor_grootte_exact(values: set) -> set:
+    """Film-IDs waar minstens één acteur een grootte heeft die in `values` zit."""
+    if not values:
+        return set()
+    str_vals = {str(v) for v in values}
+    with _db() as conn:
+        actors = conn.execute("SELECT id, notes FROM actors").fetchall()
+        matching = []
+        for a in actors:
+            try:
+                meta = json.loads(a['notes'] or '{}')
+                if str(meta.get('grootte', '') or '') in str_vals:
+                    matching.append(a['id'])
+            except Exception:
+                pass
+        if not matching:
+            return set()
+        ph = ','.join('?' for _ in matching)
+        rows = conn.execute(
+            f"SELECT DISTINCT film_id FROM actor_films WHERE actor_id IN ({ph})", matching
+        ).fetchall()
+        return {r['film_id'] for r in rows}
+
+
 def get_film_ids_by_actor_grootte(min_g: int | None, max_g: int | None) -> set:
     """Film-IDs waar minstens één acteur grootte binnen het gegeven bereik heeft."""
     if min_g is None and max_g is None:
