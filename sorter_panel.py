@@ -179,7 +179,7 @@ class SorterPanel(QWidget):
         foot.setStyleSheet("QFrame { background: #080808; border-top: 1px solid #141414; }")
         fh = QHBoxLayout(foot)
         fh.setContentsMargins(12, 0, 12, 0)
-        hint = QLabel("← →  bladeren     Spatie → map p     M → map m")
+        hint = QLabel("← →  bladeren     P / Spatie → map p     M → map m")
         hint.setStyleSheet("color: #2a2a2a; font-size: 10px;")
         fh.addWidget(hint)
         fh.addStretch()

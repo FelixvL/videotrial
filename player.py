@@ -1819,7 +1819,9 @@ class _MarkerQuickDlg(QDialog):
                  initial_cat_id: int | None = None,
                  film_id: int | None = None,
                  film_cat_types: list | None = None,
-                 initial_film_cat_ids: set | None = None):
+                 initial_film_cat_ids: set | None = None,
+                 pos_fn=None,
+                 frame_fn=None):
         super().__init__(parent)
         self.setModal(True)
         self.setWindowFlags(
@@ -1828,6 +1830,8 @@ class _MarkerQuickDlg(QDialog):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self._actors           = list(actors)
         self._pos              = pos
+        self._pos_fn           = pos_fn       # callable() → huidige spelerpositie
+        self._frame_fn         = frame_fn     # callable() → QPixmap van huidig frame
         self._chosen_cat       = None
         self._stars            = 0
         self._deleted          = False
@@ -1890,8 +1894,10 @@ class _MarkerQuickDlg(QDialog):
         lbl_time = QLabel(format_time(self._pos))
         lbl_time.setStyleSheet("color:#e8b86d; font-size:14px; font-weight:bold;")
         v.addWidget(lbl_time, alignment=Qt.AlignmentFlag.AlignCenter)
+        self._lbl_pos = lbl_time   # bewaren voor live-update via M-toets
 
         # ── Gefixeerd frame ──
+        self._lbl_frame = None
         if frame_pix and not frame_pix.isNull():
             lbl_frame = QLabel()
             scaled = frame_pix.scaledToWidth(
@@ -1900,6 +1906,7 @@ class _MarkerQuickDlg(QDialog):
             lbl_frame.setPixmap(scaled)
             lbl_frame.setAlignment(Qt.AlignmentFlag.AlignCenter)
             v.addWidget(lbl_frame)
+            self._lbl_frame = lbl_frame   # bewaren voor live-update via M-toets
 
             # Thumbnail-toggle knop onder het frame
             btn_thumb = QPushButton("📷  Als thumbnail opslaan")
@@ -1915,11 +1922,12 @@ class _MarkerQuickDlg(QDialog):
             def _toggle_thumb(checked, _btn=btn_thumb):
                 self._wants_thumbnail = checked
             btn_thumb.toggled.connect(_toggle_thumb)
-            v.addWidget(btn_thumb, alignment=Qt.AlignmentFlag.AlignLeft)
+            v.addWidget(btn_thumb, alignment=Qt.AlignmentFlag.AlignRight)
 
         # ── Acteurs (deselecteerbaar) ──
         actors_h = QHBoxLayout()
         actors_h.setSpacing(6)
+        actors_h.addStretch()
         for a in self._actors:
             btn = QPushButton(f"✕  {a['name']}")
             btn.setCheckable(True)
@@ -1928,12 +1936,12 @@ class _MarkerQuickDlg(QDialog):
             btn.clicked.connect(lambda _, aid=a['id']: self._toggle_actor(aid))
             self._actor_btns[a['id']] = btn
             actors_h.addWidget(btn)
-        actors_h.addStretch()
         v.addLayout(actors_h)
 
         # ── Sterren (0-5, optioneel) ──
         stars_h = QHBoxLayout()
         stars_h.setSpacing(4)
+        stars_h.addStretch()
         lbl_stars = QLabel("Score:")
         lbl_stars.setStyleSheet("color:#666; font-size:10px;")
         stars_h.addWidget(lbl_stars)
@@ -1950,7 +1958,6 @@ class _MarkerQuickDlg(QDialog):
             sb.clicked.connect(lambda _, num=n: self._set_stars(num))
             stars_h.addWidget(sb)
             self._star_btns.append(sb)
-        stars_h.addStretch()
         v.addLayout(stars_h)
 
         # ── Scheidingslijn ──
@@ -1972,6 +1979,7 @@ class _MarkerQuickDlg(QDialog):
                 subs[pid].append(c)
 
         cat_container = QWidget()
+        cat_container.setStyleSheet("background: transparent;")
         cat_v = QVBoxLayout(cat_container)
         cat_v.setContentsMargins(0, 0, 0, 0)
         cat_v.setSpacing(6)
@@ -2009,16 +2017,36 @@ class _MarkerQuickDlg(QDialog):
         for root in roots:
             row_h = QHBoxLayout()
             row_h.setSpacing(6)
+            row_h.addStretch()
             row_h.addWidget(_cat_btn(root))
             for sub in subs.get(root['id'], []):
                 sb = _cat_btn(sub)
                 if sub['id'] != self._initial_cat_id:
                     sb.setStyleSheet(SUB_SS)
                 row_h.addWidget(sb)
-            row_h.addStretch()
             cat_v.addLayout(row_h)
 
         v.addWidget(cat_container)
+
+        # ── Toetsenbordnavigatie setup ────────────────────────────────────
+        # Sla de 'rust'-stijl per knop op zodat _nav_highlight die kan herstellen.
+        self._cat_default_ss: dict = {}
+        for r in roots:
+            self._cat_default_ss[r['id']] = (
+                ACTIVE_SS if r['id'] == self._initial_cat_id else ""
+            )
+            for s in subs.get(r['id'], []):
+                self._cat_default_ss[s['id']] = (
+                    ACTIVE_SS if s['id'] == self._initial_cat_id else SUB_SS
+                )
+        self._nav_roots = roots                 # geordende lijst van hoofdcategorieën
+        self._nav_subs  = subs                  # root_id → [sub_dict, ...]
+        self._nav_row   = -1                    # -1 = nog niets geselecteerd
+        self._nav_col   = -1                    # -1 = hoofdcategorie-knop zelf
+        # Verwijder Qt-focus van alle cat-knoppen zodat het dialog
+        # zelf de pijltoetsen afhandelt zonder verrassende sprongen.
+        for btn in self._cat_btns.values():
+            btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
 
         # ── Filmcategorie (multi-select, geldt voor de hele film) ──
         if self._film_cat_types:
@@ -2045,6 +2073,7 @@ class _MarkerQuickDlg(QDialog):
             self._fc_btns: dict = {}
             fc_h = QHBoxLayout()
             fc_h.setSpacing(6)
+            fc_h.addStretch()
 
             def _make_fc_toggle(fid, b, on_ss, off_ss):
                 def _h(checked):
@@ -2066,12 +2095,12 @@ class _MarkerQuickDlg(QDialog):
                 self._fc_btns[fc['id']] = btn_fc
                 fc_h.addWidget(btn_fc)
 
-            fc_h.addStretch()
             v.addLayout(fc_h)
 
         # ── Onderste balk: optioneel verwijder + opslaan + annuleren ──
         bottom_h = QHBoxLayout()
         bottom_h.setSpacing(8)
+        bottom_h.addStretch()
 
         if show_delete:
             btn_del_marker = QPushButton("✕  Verwijder marker")
@@ -2086,8 +2115,6 @@ class _MarkerQuickDlg(QDialog):
                 self.accept()
             btn_del_marker.clicked.connect(_do_delete)
             bottom_h.addWidget(btn_del_marker)
-
-        bottom_h.addStretch()
         btn_cancel = QPushButton("Annuleren")
         btn_cancel.setObjectName("cancel")
         btn_cancel.clicked.connect(self.reject)
@@ -2113,6 +2140,18 @@ class _MarkerQuickDlg(QDialog):
             bottom_h.addWidget(btn_save)
 
         v.addLayout(bottom_h)
+
+        # ── Focus-setup ───────────────────────────────────────────────────
+        # QAbstractButton vangt pijltoetsen op en verplaatst focus naar de
+        # volgende knop — de event komt dan nooit bij keyPressEvent van de
+        # dialog aan. Oplossing: alle knoppen NoFocus, dialog zelf StrongFocus.
+        for btn in self.findChildren(QPushButton):
+            btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.setFocus(Qt.FocusReason.OtherFocusReason)
 
     # ── Acties ───────────────────────────────────
 
@@ -2155,6 +2194,121 @@ class _MarkerQuickDlg(QDialog):
                 db.set_film_categories(self._film_id, list(self._film_cat_sel))
             except Exception:
                 pass
+
+    # ── Toetsenbordnavigatie ──────────────────────
+
+    # Stijl voor de toetsenbord-gefocuste knop (afwijkend van hover/geselecteerd)
+    _FOCUSED_SS = (
+        "QPushButton { background:#002a2a; color:#44dddd; "
+        "  border:2px solid #44dddd; border-radius:4px; "
+        "  padding:5px 10px; font-size:12px; }"
+        "QPushButton:hover   { background:#003a3a; }"
+        "QPushButton:pressed { background:#44dddd; color:#000; }"
+    )
+
+    def keyPressEvent(self, event):
+        k = event.key()
+        if k == Qt.Key.Key_Down:
+            self._nav_down()
+        elif k == Qt.Key.Key_Up:
+            self._nav_up()
+        elif k == Qt.Key.Key_Right:
+            self._nav_right()
+        elif k == Qt.Key.Key_Left:
+            self._nav_left()
+        elif k in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            self._nav_activate()
+        elif k == Qt.Key.Key_M:
+            self._update_pos()
+        else:
+            super().keyPressEvent(event)
+
+    def _update_pos(self):
+        """M opnieuw ingedrukt terwijl popup open is → werk tijdstip en frame bij."""
+        if self._pos_fn is None:
+            return
+        try:
+            new_pos = self._pos_fn()
+        except Exception:
+            return
+        if new_pos is None:
+            return
+        self._pos = new_pos
+        self._lbl_pos.setText(format_time(new_pos))
+        # Frame verversen als er een capture-callback is én een label om in te tonen
+        if self._frame_fn is not None and self._lbl_frame is not None:
+            try:
+                new_pix = self._frame_fn()
+                if new_pix and not new_pix.isNull():
+                    scaled = new_pix.scaledToWidth(
+                        400, Qt.TransformationMode.SmoothTransformation
+                    )
+                    self._lbl_frame.setPixmap(scaled)
+            except Exception:
+                pass
+
+    def get_pos(self) -> float:
+        """Geeft het (eventueel bijgewerkte) tijdstip terug."""
+        return self._pos
+
+    def _nav_down(self):
+        if not hasattr(self, '_nav_roots'):
+            return
+        if self._nav_row < len(self._nav_roots) - 1:
+            self._nav_row += 1
+            self._nav_col = -1
+            self._nav_highlight()
+
+    def _nav_up(self):
+        if not hasattr(self, '_nav_roots'):
+            return
+        if self._nav_row > 0:
+            self._nav_row -= 1
+            self._nav_col = -1
+            self._nav_highlight()
+
+    def _nav_right(self):
+        if not hasattr(self, '_nav_roots') or self._nav_row < 0:
+            return
+        root     = self._nav_roots[self._nav_row]
+        sub_list = self._nav_subs.get(root['id'], [])
+        if self._nav_col < len(sub_list) - 1:
+            self._nav_col += 1
+            self._nav_highlight()
+
+    def _nav_left(self):
+        if not hasattr(self, '_nav_roots') or self._nav_row < 0:
+            return
+        if self._nav_col > -1:
+            self._nav_col -= 1
+            self._nav_highlight()
+
+    def _nav_activate(self):
+        if not hasattr(self, '_nav_roots') or self._nav_row < 0:
+            return
+        root = self._nav_roots[self._nav_row]
+        if self._nav_col == -1:
+            self._choose(root)
+        else:
+            sub_list = self._nav_subs.get(root['id'], [])
+            if 0 <= self._nav_col < len(sub_list):
+                self._choose(sub_list[self._nav_col])
+
+    def _nav_highlight(self):
+        """Herstel alle cat-knoppen naar hun standaardstijl, markeer de actieve knop."""
+        for cid, btn in self._cat_btns.items():
+            btn.setStyleSheet(self._cat_default_ss.get(cid, ""))
+        if self._nav_row < 0:
+            return
+        root = self._nav_roots[self._nav_row]
+        if self._nav_col == -1:
+            cat_id = root['id']
+        else:
+            sub_list = self._nav_subs.get(root['id'], [])
+            if not (0 <= self._nav_col < len(sub_list)):
+                return
+            cat_id = sub_list[self._nav_col]['id']
+        self._cat_btns[cat_id].setStyleSheet(self._FOCUSED_SS)
 
     def _center_on_parent(self):
         """Positioneer rechtsonder in het oudervenster (of scherm als fallback)."""
@@ -3857,28 +4011,11 @@ class CineMarker(QMainWindow):
         elif self._video_path:
             self._open_marker_quick_popup()
 
-    def _open_marker_quick_popup(self):
-        """M-toets: gefixeerd frame + acteurs + categoriekeuze → marker."""
-        actors = self._actors_overlay.selected_actors()
-        if not actors:
-            self.status.showMessage("  Selecteer eerst een acteur (linksonder)")
-            return
-
-        cats = db.get_all_categories()
-        if not cats:
-            self.status.showMessage("  Maak eerst een categorie aan in het database-tabblad")
-            return
-
-        pos = self._current_pos()
-
-        # Frame opvangen via mpv screenshot naar tijdelijk bestand
-        # 'window' mode respecteert zoom/pan — zelfde als _capture_thumbnail.
-        frame_pix = None
-        tmp_path: str | None = None
+    def _capture_marker_frame(self) -> 'QPixmap | None':
+        """Leg het huidige mpv-frame vast en geef een QPixmap terug (of None bij fout)."""
+        import tempfile
+        tmp_path = tempfile.mktemp(suffix='.jpg')
         try:
-            import tempfile
-            tmp_path = tempfile.mktemp(suffix='.jpg')
-            # OSD tijdelijk uitzetten zodat het tijdstip niet in het frame gebakken zit
             try:
                 _old_osd = self.player.osd_level
                 self.player.osd_level = 0
@@ -3893,13 +4030,39 @@ class CineMarker(QMainWindow):
                     except Exception:
                         pass
             if os.path.exists(tmp_path):
-                frame_pix = QPixmap(tmp_path)
-            else:
-                tmp_path = None
+                pix = QPixmap(tmp_path)
+                return pix if not pix.isNull() else None
         except Exception:
-            tmp_path = None
-            pass  # popup werkt ook zonder frame
+            pass
+        finally:
+            try:
+                if os.path.exists(tmp_path):
+                    os.unlink(tmp_path)
+            except Exception:
+                pass
+        return None
 
+    def _open_marker_quick_popup(self):
+        """M-toets: gefixeerd frame + acteurs + categoriekeuze → marker."""
+        actors = self._actors_overlay.selected_actors()
+        if not actors:
+            self.status.showMessage("  Selecteer eerst een acteur (linksonder)")
+            return
+
+        cats = db.get_all_categories()
+        if not cats:
+            self.status.showMessage("  Maak eerst een categorie aan in het database-tabblad")
+            return
+
+        pos = self._current_pos()
+        frame_pix = self._capture_marker_frame()
+        tmp_path = None  # tijdelijk bestand al opgeruimd door _capture_marker_frame
+
+        # Schakel alle hoofdvenster-shortcuts uit terwijl de popup open is.
+        # QShortcut met WindowShortcut-context kan anders M/pijltoetsen
+        # onderscheppen vóór ze de dialog's keyPressEvent bereiken.
+        for sc in self._active_shortcuts:
+            sc.setEnabled(False)
         try:
             _dlg_parent = (
                 self._fs_win
@@ -3912,21 +4075,37 @@ class CineMarker(QMainWindow):
             _fc_cur    = db.get_film_category_ids(_film_id) if _film_id else set()
             dlg = _MarkerQuickDlg(_dlg_parent, actors, pos, frame_pix, cats,
                                   film_id=_film_id, film_cat_types=_fc_types,
-                                  initial_film_cat_ids=_fc_cur)
+                                  initial_film_cat_ids=_fc_cur,
+                                  pos_fn=self._current_pos,
+                                  frame_fn=self._capture_marker_frame)
             if dlg.exec() == QDialog.DialogCode.Accepted:
                 chosen_actors, chosen_cat, stars = dlg.get_result()
-                self._quick_marker(chosen_actors, [chosen_cat], pos=pos, stars=stars)
+                # Gebruik dlg.get_pos(): de gebruiker kan via M het tijdstip
+                # hebben bijgewerkt naar een later moment in de video.
+                final_pos = dlg.get_pos()
+                self._quick_marker(chosen_actors, [chosen_cat], pos=final_pos, stars=stars)
 
                 # Thumbnail opslaan als de gebruiker dat gevraagd heeft
-                if dlg.wants_thumbnail() and tmp_path and os.path.exists(tmp_path):
-                    self._save_thumbnail_from_file(tmp_path)
+                # (frame_pix kan zijn bijgewerkt via M; leg dan opnieuw een frame vast)
+                if dlg.wants_thumbnail():
+                    import tempfile
+                    _tp = tempfile.mktemp(suffix='.jpg')
+                    try:
+                        self.player.command('screenshot-to-file', _tp, 'window')
+                        if os.path.exists(_tp):
+                            self._save_thumbnail_from_file(_tp)
+                    except Exception:
+                        pass
+                    finally:
+                        try:
+                            if os.path.exists(_tp):
+                                os.unlink(_tp)
+                        except Exception:
+                            pass
         finally:
-            # Tijdelijk bestand altijd opruimen
-            if tmp_path and os.path.exists(tmp_path):
-                try:
-                    os.unlink(tmp_path)
-                except Exception:
-                    pass
+            # Shortcuts altijd herstellen
+            for sc in self._active_shortcuts:
+                sc.setEnabled(True)
             # Focus teruggeven — aan fullscreen als die actief is, anders aan hoofdvenster
             if self._fs_win and self._fs_win.isVisible():
                 self._fs_win.activateWindow()
@@ -3942,6 +4121,7 @@ class CineMarker(QMainWindow):
     def _shortcut_p(self):
         """Ga naar de volgende marker in de lijst (wraps rond)."""
         if self.main_tabs.currentWidget() is self.sorter_panel:
+            self.sorter_panel._move_p()
             return
         if not self._video_path:
             return
