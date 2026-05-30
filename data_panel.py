@@ -281,6 +281,11 @@ class DataPanel(QWidget):
         self._build_ui()
         self._refresh()
 
+    def showEvent(self, event):
+        """Ververs de lijst elke keer dat dit tabblad zichtbaar wordt."""
+        super().showEvent(event)
+        self._refresh()
+
     # ── UI build ─────────────────────────────────────────────────────────
 
     def _build_ui(self):
@@ -421,10 +426,22 @@ class DataPanel(QWidget):
                 li.setForeground(QColor(70, 70, 70))
             self._list.addItem(li)
 
-            # ── Card ──────────────────────────────
+            # ── Thumbnail: bigfile-specific, anders film-thumbnail als fallback ──
+            display_rec = dict(rec)
+            bf_thumb = rec.get('thumbnail_path') or ''
+            if not bf_thumb or not Path(bf_thumb).exists():
+                film_thumb = db.get_best_film_thumbnail(rec['full_path'])
+                if film_thumb:
+                    display_rec['thumbnail_path'] = film_thumb
+
+            # ── Acteurs: bigfile-acteurs, anders film-acteurs als fallback ──────
             actor_ids   = db.get_bigfile_actor_ids(rec['id'])
             actor_names = [self._actor_map[aid] for aid in actor_ids if aid in self._actor_map]
-            card = _BigFileCard(rec, actor_names)
+            if not actor_names:
+                actor_names = db.get_actor_names_for_film_path(rec['full_path'])
+
+            # ── Card ──────────────────────────────
+            card = _BigFileCard(display_rec, actor_names)
             card.play_requested.connect(self._on_play)
             card.actors_changed.connect(self._on_actors_changed)
             card.thumb_requested.connect(self._on_thumb_requested)

@@ -3821,6 +3821,8 @@ class CineMarker(QMainWindow):
             db.add_film_thumbnail(film['id'], dest)
             db.set_film_thumbnail(film['id'], dest)
             self._actors_overlay.load_thumbnails(film['id'])
+            # Ook bigfile thumbnail bijwerken als dit bestand ook in de data-tab staat
+            self._sync_bigfile_thumbnail(self._video_path, dest)
             folder = db.get_setting('film_folder', '')
             if folder:
                 self.films_panel._scan_folder(folder)
@@ -3858,6 +3860,8 @@ class CineMarker(QMainWindow):
             db.set_film_thumbnail(film['id'], path)   # keep backward-compat primary
             # Reload overlay with full thumbnail list so it starts cycling
             self._actors_overlay.load_thumbnails(film['id'])
+            # Ook bigfile thumbnail bijwerken als dit bestand ook in de data-tab staat
+            self._sync_bigfile_thumbnail(self._video_path, path)
             folder = db.get_setting('film_folder', '')
             if folder:
                 self.films_panel._scan_folder(folder)
@@ -3873,6 +3877,23 @@ class CineMarker(QMainWindow):
             self._fade_overlay.abort()
         self._load_video(path)
         self.main_tabs.setCurrentIndex(0)
+
+    def _sync_bigfile_thumbnail(self, video_path: str, thumb_path: str):
+        """Als video_path ook in de bigfiles-tabel staat, kopieer dan thumb_path erheen.
+
+        Wordt aangeroepen vanuit _capture_thumbnail en _save_thumbnail_from_file zodat
+        een snapshot gemaakt in de speler automatisch in de DATA-tab kaart verschijnt.
+        """
+        try:
+            rec = db.get_bigfile_by_path(video_path)
+            if rec:
+                db.set_bigfile_thumbnail(rec['id'], thumb_path)
+                # Card direct bijwerken als die in geheugen staat
+                card = self.data_panel._cards.get(rec['id'])
+                if card:
+                    card.update_thumbnail(thumb_path)
+        except Exception:
+            pass
 
     def _capture_bigfile_thumbnail(self, bigfile_id: int):
         """Sla huidig spelerframe op als thumbnail voor een bigfile."""

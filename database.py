@@ -1200,4 +1200,54 @@ def set_bigfile_actors(bigfile_id: int, actor_ids: list):
             )
         conn.commit()
 
+
+def get_best_film_thumbnail(file_path: str) -> str | None:
+    """Return the best available thumbnail path for a film by file path, or None.
+
+    Checks film_thumbnails first (most recent), then films.thumbnail as fallback.
+    Returns None when neither exists on disk.
+    """
+    with _db() as conn:
+        film = conn.execute(
+            "SELECT id, thumbnail FROM films WHERE file_path=?", (file_path,)
+        ).fetchone()
+        if not film:
+            return None
+        row = conn.execute(
+            "SELECT path FROM film_thumbnails WHERE film_id=? ORDER BY id DESC LIMIT 1",
+            (film['id'],)
+        ).fetchone()
+        if row and row['path'] and Path(row['path']).exists():
+            return row['path']
+        if film['thumbnail'] and Path(str(film['thumbnail'])).exists():
+            return str(film['thumbnail'])
+        return None
+
+
+def get_actor_names_for_film_path(file_path: str) -> list:
+    """Return list of actor names linked to a film by file path (regular films system)."""
+    with _db() as conn:
+        film = conn.execute(
+            "SELECT id FROM films WHERE file_path=?", (file_path,)
+        ).fetchone()
+        if not film:
+            return []
+        rows = conn.execute(
+            "SELECT a.name FROM actors a "
+            "JOIN actor_films af ON af.actor_id = a.id "
+            "WHERE af.film_id = ? ORDER BY a.name COLLATE NOCASE",
+            (film['id'],)
+        ).fetchall()
+        return [r['name'] for r in rows]
+
+
+def get_bigfile_by_path(full_path: str) -> dict | None:
+    """Return a bigfile record by its full path, or None if not found."""
+    with _db() as conn:
+        row = conn.execute(
+            "SELECT * FROM bigfiles WHERE full_path=?", (full_path,)
+        ).fetchone()
+        return dict(row) if row else None
+
+
 auto_link_actor_photos()
