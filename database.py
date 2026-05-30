@@ -1251,12 +1251,20 @@ def get_bigfile_by_path(full_path: str) -> dict | None:
 
 
 def get_bigfiles_for_actor(actor_id: int) -> list:
-    """Return all bigfiles that have this actor linked (via bigfiles_acteurs)."""
+    """Return all bigfiles linked to this actor via the regular film system.
+
+    A bigfile appears here when its full_path matches a film that the actor
+    is linked to via actor_films.  This is intentional: thumbnail capture and
+    actor-linking both happen in the regular player, so bigfiles inherit their
+    actor connections through that path rather than through the (now-unused)
+    bigfiles_acteurs table.
+    """
     with _db() as conn:
         rows = conn.execute(
-            "SELECT b.* FROM bigfiles b "
-            "JOIN bigfiles_acteurs ba ON ba.bigfile_id = b.id "
-            "WHERE ba.acteur_id = ? "
+            "SELECT DISTINCT b.* FROM bigfiles b "
+            "JOIN films f ON f.file_path = b.full_path "
+            "JOIN actor_films af ON af.film_id = f.id "
+            "WHERE af.actor_id = ? "
             "ORDER BY b.created_at DESC",
             (actor_id,)
         ).fetchall()
