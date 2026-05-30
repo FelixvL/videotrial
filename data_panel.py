@@ -1,24 +1,22 @@
 #!/usr/bin/env python3
 """
 CineMarker — Data tabblad
-Beheer van grote/zelden-beschikbare bestanden met thumbnails en acteurskoppelingen.
+Overzicht van grote/zelden-beschikbare bestanden.
+Thumbnail en acteurskoppeling verlopen via de gewone speler — niet hier.
 """
 
-import os
 from pathlib import Path
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel,
-    QFileDialog, QFrame, QSizePolicy, QScrollArea, QListWidget,
-    QListWidgetItem, QDialog, QDialogButtonBox, QCheckBox,
-    QLineEdit, QSplitter, QGridLayout, QSpacerItem,
+    QFileDialog, QFrame, QScrollArea, QListWidget,
+    QListWidgetItem, QSplitter, QGridLayout,
     QMessageBox
 )
-from PyQt6.QtCore import Qt, pyqtSignal, QSize
+from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QPixmap, QColor, QPainter, QFont
 
 import database as db
-from paths import BIGFILES_DIR
 
 VIDEO_EXTS = {
     '.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv',
@@ -30,94 +28,24 @@ CARD_THUMB_H = 130
 GRID_COLS    = 4
 
 
-# ── Actor picker dialog ──────────────────────────────────────────────────────
-
-class _ActorPickerDlg(QDialog):
-    """Dialoogvenster om acteurs aan een bigfile te koppelen."""
-
-    def __init__(self, parent, current_ids: list):
-        super().__init__(parent)
-        self.setWindowTitle("Acteurs koppelen")
-        self.setModal(True)
-        self.resize(320, 480)
-        self.setStyleSheet("""
-            QDialog      { background:#111; color:#ccc; }
-            QScrollArea  { border:none; }
-            QWidget#inner{ background:#111; }
-        """)
-
-        v = QVBoxLayout(self)
-        v.setSpacing(8)
-        v.setContentsMargins(12, 12, 12, 12)
-
-        # Search box
-        self._search = QLineEdit()
-        self._search.setPlaceholderText("Zoek acteur…")
-        self._search.setStyleSheet(
-            "background:#1a1a1a; border:1px solid #333; border-radius:4px;"
-            "padding:5px 8px; color:#ccc;"
-        )
-        self._search.textChanged.connect(self._filter)
-        v.addWidget(self._search)
-
-        # Scroll area with checkboxes
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        inner = QWidget()
-        inner.setObjectName("inner")
-        self._cb_layout = QVBoxLayout(inner)
-        self._cb_layout.setContentsMargins(4, 4, 4, 4)
-        self._cb_layout.setSpacing(2)
-        scroll.setWidget(inner)
-        v.addWidget(scroll, stretch=1)
-
-        # OK / Cancel
-        bb = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
-        )
-        bb.accepted.connect(self.accept)
-        bb.rejected.connect(self.reject)
-        bb.setStyleSheet("color:#ccc;")
-        v.addWidget(bb)
-
-        # Populate checkboxes
-        self._checkboxes: list[tuple[int, QCheckBox]] = []
-        for a in db.get_all_actors():
-            cb = QCheckBox(a['name'])
-            cb.setStyleSheet("color:#ccc; padding:3px 6px;")
-            cb.setChecked(a['id'] in current_ids)
-            self._checkboxes.append((a['id'], cb))
-            self._cb_layout.addWidget(cb)
-        self._cb_layout.addStretch()
-
-    def _filter(self, text: str):
-        text = text.lower()
-        for _aid, cb in self._checkboxes:
-            cb.setVisible(not text or text in cb.text().lower())
-
-    def get_selected_ids(self) -> list:
-        return [aid for aid, cb in self._checkboxes if cb.isChecked()]
-
-
-# ── BigFile card ─────────────────────────────────────────────────────────────
+# ── BigFile card (actieve sectie — alleen play-knop) ─────────────────────────
 
 class _BigFileCard(QFrame):
-    """Kaart met thumbnail, bestandsnaam, acteurs en knoppen."""
+    """Kaart voor bestanden die NU op schijf staan.
 
-    play_requested  = pyqtSignal(str)   # full_path
-    actors_changed  = pyqtSignal(int)   # bigfile_id
-    thumb_requested = pyqtSignal(int)   # bigfile_id
+    Alleen thumbnail tonen + naam + acteurs (read-only) + ▶ afspelen.
+    Thumbnail en acteurs worden beheerd via de gewone speler, niet hier.
+    """
+
+    play_requested = pyqtSignal(str)   # full_path
 
     def __init__(self, record: dict, actor_names: list):
         super().__init__()
         self._record      = record
         self._actor_names = actor_names
-        self._available   = Path(record['full_path']).exists()
+        self._thumb_lbl: QLabel | None = None
+        self._lbl_actors: QLabel | None = None
         self._build()
-
-    @property
-    def bigfile_id(self) -> int:
-        return self._record['id']
 
     # ── Build ────────────────────────────────────────────────────────────
 
@@ -147,13 +75,11 @@ class _BigFileCard(QFrame):
         lbl_name = QLabel(name)
         lbl_name.setWordWrap(True)
         lbl_name.setFixedWidth(CARD_W - 12)
-        lbl_name.setStyleSheet(
-            f"color:{'#bbb' if self._available else '#444'}; font-size:10px; border:none;"
-        )
+        lbl_name.setStyleSheet("color:#bbb; font-size:10px; border:none;")
         lbl_name.setToolTip(self._record['full_path'])
         v.addWidget(lbl_name)
 
-        # Actors
+        # Actors (read-only)
         self._lbl_actors = QLabel(
             ", ".join(self._actor_names) if self._actor_names else "—"
         )
@@ -162,68 +88,24 @@ class _BigFileCard(QFrame):
         self._lbl_actors.setStyleSheet("color:#555; font-size:9px; border:none;")
         v.addWidget(self._lbl_actors)
 
-        # Availability badge
-        if not self._available:
-            badge = QLabel("niet beschikbaar")
-            badge.setStyleSheet(
-                "color:#6b3a1f; font-size:9px; background:#1a0d06;"
-                " border:1px solid #4a2a10; border-radius:3px; padding:1px 5px;"
-            )
-            v.addWidget(badge)
-
-        # Buttons
-        bh = QHBoxLayout()
-        bh.setContentsMargins(0, 2, 0, 0)
-        bh.setSpacing(4)
-
-        btn_play = QPushButton("▶")
-        btn_play.setFixedHeight(26)
-        btn_play.setEnabled(self._available)
-        btn_play.setToolTip("Afspelen")
-        if self._available:
-            btn_play.setStyleSheet(
-                "QPushButton{background:#1a2a1a;border:1px solid #2a5a2a;"
-                "border-radius:4px;color:#55e055;font-size:13px;border-bottom:none;}"
-                "QPushButton:hover{background:#1f3f1f;}"
-                "QPushButton:pressed{background:#55e055;color:#000;}"
-            )
-        else:
-            btn_play.setStyleSheet(
-                "QPushButton{background:#141414;border:1px solid #2a2a2a;"
-                "border-radius:4px;color:#333;font-size:13px;border-bottom:none;}"
-            )
+        # ▶  Play button
+        btn_play = QPushButton("▶  Afspelen in speler")
+        btn_play.setFixedHeight(28)
+        btn_play.setToolTip("Openen in de speler — maak daar de thumbnail en koppel acteurs")
+        btn_play.setStyleSheet(
+            "QPushButton{background:#1a2a1a;border:1px solid #2a5a2a;"
+            "border-radius:4px;color:#55e055;font-size:12px;}"
+            "QPushButton:hover{background:#1f3f1f;}"
+            "QPushButton:pressed{background:#55e055;color:#000;}"
+        )
         btn_play.clicked.connect(lambda: self.play_requested.emit(self._record['full_path']))
-        bh.addWidget(btn_play)
-
-        btn_thumb = QPushButton("📷")
-        btn_thumb.setFixedHeight(26)
-        btn_thumb.setToolTip("Thumbnail van huidige spelerframe")
-        btn_thumb.setStyleSheet(
-            "QPushButton{background:#1a1a2a;border:1px solid #2a2a5a;"
-            "border-radius:4px;color:#5588ee;font-size:12px;border-bottom:none;}"
-            "QPushButton:hover{background:#1f1f3f;}"
-            "QPushButton:pressed{background:#5588ee;color:#000;}"
-        )
-        btn_thumb.clicked.connect(lambda: self.thumb_requested.emit(self._record['id']))
-        bh.addWidget(btn_thumb)
-
-        btn_actors = QPushButton("◉")
-        btn_actors.setFixedHeight(26)
-        btn_actors.setToolTip("Acteurs koppelen")
-        btn_actors.setStyleSheet(
-            "QPushButton{background:#1a1a1a;border:1px solid #323232;"
-            "border-radius:4px;color:#777;font-size:13px;border-bottom:none;}"
-            "QPushButton:hover{background:#242424;}"
-            "QPushButton:pressed{background:#444;color:#fff;}"
-        )
-        btn_actors.clicked.connect(self._open_actor_picker)
-        bh.addWidget(btn_actors)
-
-        v.addLayout(bh)
+        v.addWidget(btn_play)
 
     # ── Thumbnail helpers ────────────────────────────────────────────────
 
     def _reload_thumb(self):
+        if self._thumb_lbl is None:
+            return
         tp = self._record.get('thumbnail_path')
         if tp and Path(tp).exists():
             pix = QPixmap(tp).scaled(
@@ -252,17 +134,8 @@ class _BigFileCard(QFrame):
 
     def update_actors(self, names: list):
         self._actor_names = names
-        self._lbl_actors.setText(", ".join(names) if names else "—")
-
-    # ── Actor picker ─────────────────────────────────────────────────────
-
-    def _open_actor_picker(self):
-        current_ids = db.get_bigfile_actor_ids(self._record['id'])
-        dlg = _ActorPickerDlg(self.window(), current_ids)
-        if dlg.exec() == QDialog.DialogCode.Accepted:
-            new_ids = dlg.get_selected_ids()
-            db.set_bigfile_actors(self._record['id'], new_ids)
-            self.actors_changed.emit(self._record['id'])
+        if self._lbl_actors is not None:
+            self._lbl_actors.setText(", ".join(names) if names else "—")
 
 
 # ── Archive card (compact, read-only) ────────────────────────────────────────
@@ -366,12 +239,10 @@ class DataPanel(QWidget):
       • Onder  — archief van ALLE geïndexeerde bestanden + thumbnails (ook offline)
     """
 
-    play_file_requested     = pyqtSignal(str)   # pad naar videobestand
-    capture_thumb_requested = pyqtSignal(int)   # bigfile_id waarvoor screenshot gewenst is
+    play_file_requested = pyqtSignal(str)   # pad naar videobestand
 
     def __init__(self):
         super().__init__()
-        self._pending_thumb_id: int | None         = None
         self._cards:         dict[int, _BigFileCard]  = {}  # bigfile_id → actieve kaart
         self._archive_cards: dict[int, _ArchiveCard]  = {}  # bigfile_id → archiefkaart
         self._actor_map:     dict[int, str]           = {}  # actor_id → naam (cache)
@@ -646,8 +517,6 @@ class DataPanel(QWidget):
 
             card = _BigFileCard(display_rec, actor_names)
             card.play_requested.connect(self._on_play)
-            card.actors_changed.connect(self._on_actors_changed)
-            card.thumb_requested.connect(self._on_thumb_requested)
             self._cards[rec['id']] = card
 
             row, col = divmod(i, GRID_COLS)
@@ -718,18 +587,6 @@ class DataPanel(QWidget):
         db.update_bigfile_last_seen(rec['id'])
         self.play_file_requested.emit(full_path)
 
-    def _on_thumb_requested(self, bigfile_id: int):
-        self._pending_thumb_id = bigfile_id
-        self.capture_thumb_requested.emit(bigfile_id)
-
-    def _on_actors_changed(self, bigfile_id: int):
-        card = self._cards.get(bigfile_id)
-        if card is None:
-            return
-        actor_ids   = db.get_bigfile_actor_ids(bigfile_id)
-        actor_names = [self._actor_map[aid] for aid in actor_ids if aid in self._actor_map]
-        card.update_actors(actor_names)
-
     # ── List double-click (actieve sectie) ────────────────────────────────
 
     def _on_list_dblclick(self, item: QListWidgetItem):
@@ -739,16 +596,10 @@ class DataPanel(QWidget):
                 self._on_play(rec['full_path'])
                 return
 
-    # ── Thumbnail callback (called from player.py after screenshot) ───────
+    # ── Thumbnail sync (aangeroepen vanuit player._sync_bigfile_thumbnail) ──
 
-    def on_thumbnail_saved(self, thumb_path: str):
-        """Wordt aangeroepen door player.py nadat een bigfile-thumbnail is opgeslagen."""
-        if self._pending_thumb_id is None:
-            return
-        bigfile_id             = self._pending_thumb_id
-        self._pending_thumb_id = None
-        db.set_bigfile_thumbnail(bigfile_id, thumb_path)
-        # Beide secties direct bijwerken
+    def sync_thumbnail(self, bigfile_id: int, thumb_path: str):
+        """Update beide secties direct als de speler een thumbnail heeft opgeslagen."""
         card = self._cards.get(bigfile_id)
         if card:
             card.update_thumbnail(thumb_path)
