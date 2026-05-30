@@ -282,9 +282,43 @@ class DataPanel(QWidget):
         self._refresh()
 
     def showEvent(self, event):
-        """Ververs de lijst elke keer dat dit tabblad zichtbaar wordt."""
+        """Ververs + herscant bij elke tabwissel naar DATA."""
         super().showEvent(event)
+        self._rescan_and_refresh()
+
+    # ── Rescan ───────────────────────────────────────────────────────────
+
+    def _rescan_and_refresh(self):
+        """Scan alle bekende mappen op nieuwe videobestanden, dan ververs de UI."""
+        self._rescan_known_folders()
         self._refresh()
+
+    def _rescan_known_folders(self):
+        """Doorzoek alle parent-mappen van bekende bigfiles op nieuwe videobestanden.
+
+        Slaat mappen over die niet bereikbaar zijn (externe schijf weg, etc.).
+        Voegt nieuw gevonden bestanden toe aan de DB zonder bestaande records aan te raken.
+        """
+        # Verzamel unieke parent-mappen van alle bekende bigfiles
+        folders: set[Path] = set()
+        for rec in db.get_all_bigfiles():
+            folders.add(Path(rec['full_path']).parent)
+
+        # Voeg de handmatig gekozen map toe (ook al heeft die misschien geen bigfiles)
+        last = db.get_setting('data_panel_folder', '')
+        if last:
+            folders.add(Path(last))
+
+        # Scan elke beschikbare map
+        for folder in folders:
+            if not folder.exists():
+                continue           # schijf niet bereikbaar — stilletjes overslaan
+            try:
+                for f in folder.iterdir():
+                    if f.is_file() and f.suffix.lower() in VIDEO_EXTS:
+                        db.get_or_create_bigfile(str(f))
+            except OSError:
+                pass               # geen leesrechten of schijf verdween tijdens scan
 
     # ── UI build ─────────────────────────────────────────────────────────
 
@@ -313,11 +347,24 @@ class DataPanel(QWidget):
 
         bh.addStretch()
 
+        btn_refresh = QPushButton("↺")
+        btn_refresh.setFixedSize(28, 28)
+        btn_refresh.setToolTip(
+            "Herscant alle bekende mappen op nieuwe bestanden\n"
+            "en vernieuwt de lijst (beschikbaarheid bijwerken)."
+        )
+        btn_refresh.setStyleSheet(
+            "QPushButton { font-size:16px; }"
+            "QPushButton:hover { color:#aaa; }"
+        )
+        btn_refresh.clicked.connect(self._rescan_and_refresh)
+        bh.addWidget(btn_refresh)
+
         btn_folder = QPushButton("📁  Map toevoegen")
         btn_folder.setFixedHeight(28)
         btn_folder.setToolTip(
-            "Scan een map en voeg alle videobestanden toe aan de lijst.\n"
-            "Bestanden die niet bereikbaar zijn blijven zichtbaar in de lijst."
+            "Scan een nieuwe map en voeg alle videobestanden toe aan de lijst.\n"
+            "Bestanden die niet bereikbaar zijn blijven zichtbaar."
         )
         btn_folder.clicked.connect(self._pick_folder)
         bh.addWidget(btn_folder)
@@ -472,10 +519,13 @@ class DataPanel(QWidget):
                 db.get_or_create_bigfile(str(f))
                 added += 1
         self._refresh()
-        if added:
-            self.window().statusBar().showMessage(
-                f"  {added} bestand{'en' if added != 1 else ''} toegevoegd uit {p.name}"
-            ) if hasattr(self.window(), 'statusBar') else None
+        try:
+            if added and hasattr(self.window(), 'statusBar'):
+                self.window().statusBar().showMessage(
+                    f"  {added} bestand{'en' if added != 1 else ''} toegevoegd uit {p.name}"
+                )
+        except Exception:
+            pass
 
     # ── Card signal handlers ──────────────────────────────────────────────
 
