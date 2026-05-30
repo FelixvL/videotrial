@@ -265,60 +265,150 @@ class _BigFileCard(QFrame):
             self.actors_changed.emit(self._record['id'])
 
 
+# ── Archive card (compact, read-only) ────────────────────────────────────────
+
+ARCHIVE_W       = 180
+ARCHIVE_THUMB_H = 101   # 16:9 voor 180px breed
+ARCHIVE_COLS    = 5
+
+
+class _ArchiveCard(QFrame):
+    """Compacte thumbnailkaart voor de archiefsectie — geen actieknoppen.
+
+    Toont thumbnail + bestandsnaam. Grijs/dimmed als bestand niet beschikbaar.
+    Dubbelklik speelt af als bestand bereikbaar is.
+    """
+
+    play_requested = pyqtSignal(str)   # full_path
+
+    def __init__(self, record: dict):
+        super().__init__()
+        self._record    = record
+        self._available = Path(record['full_path']).exists()
+        self._thumb_lbl: QLabel | None = None
+        self._build()
+
+    def _build(self):
+        self.setFixedWidth(ARCHIVE_W)
+        self.setStyleSheet(
+            f"QFrame {{ background:{'#141414' if self._available else '#0d0d0d'};"
+            f"  border:1px solid {'#232323' if self._available else '#181818'};"
+            f"  border-radius:5px; }}"
+        )
+
+        v = QVBoxLayout(self)
+        v.setContentsMargins(3, 3, 3, 3)
+        v.setSpacing(3)
+
+        # Thumbnail
+        self._thumb_lbl = QLabel()
+        self._thumb_lbl.setFixedSize(ARCHIVE_W - 6, ARCHIVE_THUMB_H)
+        self._thumb_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._thumb_lbl.setStyleSheet("border-radius:3px; background:#0a0a0a; border:none;")
+        self._load_thumb()
+        v.addWidget(self._thumb_lbl)
+
+        # Filename
+        name = Path(self._record['full_path']).name
+        name_lbl = QLabel(name)
+        name_lbl.setWordWrap(True)
+        name_lbl.setFixedWidth(ARCHIVE_W - 6)
+        name_lbl.setStyleSheet(
+            f"color:{'#888' if self._available else '#383838'};"
+            f"  font-size:9px; border:none;"
+        )
+        name_lbl.setToolTip(self._record['full_path'])
+        v.addWidget(name_lbl)
+
+        if self._available:
+            path = self._record['full_path']
+            self.mouseDoubleClickEvent = lambda _e, p=path: self.play_requested.emit(p)
+            self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    def _load_thumb(self):
+        if self._thumb_lbl is None:
+            return
+        tp = self._record.get('thumbnail_path')
+        if tp and Path(tp).exists():
+            pix = QPixmap(tp).scaled(
+                ARCHIVE_W - 6, ARCHIVE_THUMB_H,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            # Dim offline thumbnails with a dark overlay
+            if not self._available:
+                overlay = QPainter(pix)
+                overlay.fillRect(pix.rect(), QColor(0, 0, 0, 130))
+                overlay.end()
+            self._thumb_lbl.setPixmap(pix)
+        else:
+            ph = QPixmap(ARCHIVE_W - 6, ARCHIVE_THUMB_H)
+            ph.fill(QColor(14, 14, 14))
+            p = QPainter(ph)
+            p.setPen(QColor(35, 35, 35))
+            p.setFont(QFont("Segoe UI", 18))
+            p.drawText(ph.rect(), Qt.AlignmentFlag.AlignCenter, "▶")
+            p.end()
+            self._thumb_lbl.setPixmap(ph)
+
+    def update_thumbnail(self, thumb_path: str):
+        self._record['thumbnail_path'] = thumb_path
+        self._load_thumb()
+
+
 # ── DataPanel ────────────────────────────────────────────────────────────────
 
 class DataPanel(QWidget):
-    """Tabblad voor grote/zelden-beschikbare videobestanden."""
+    """Tabblad voor grote/zelden-beschikbare videobestanden.
+
+    Twee gescheiden vensters:
+      • Boven  — bestanden die NU op een aangesloten schijf staan (interactief)
+      • Onder  — archief van ALLE geïndexeerde bestanden + thumbnails (ook offline)
+    """
 
     play_file_requested     = pyqtSignal(str)   # pad naar videobestand
     capture_thumb_requested = pyqtSignal(int)   # bigfile_id waarvoor screenshot gewenst is
 
     def __init__(self):
         super().__init__()
-        self._pending_thumb_id: int | None = None
-        self._cards: dict[int, _BigFileCard] = {}     # bigfile_id → card
-        self._actor_map: dict[int, str]      = {}     # actor_id → name (cache)
+        self._pending_thumb_id: int | None         = None
+        self._cards:         dict[int, _BigFileCard]  = {}  # bigfile_id → actieve kaart
+        self._archive_cards: dict[int, _ArchiveCard]  = {}  # bigfile_id → archiefkaart
+        self._actor_map:     dict[int, str]           = {}  # actor_id → naam (cache)
         self._build_ui()
         self._refresh()
 
     def showEvent(self, event):
-        """Ververs + herscant bij elke tabwissel naar DATA."""
+        """Herscant + ververs bij elke tabwissel naar DATA."""
         super().showEvent(event)
         self._rescan_and_refresh()
 
     # ── Rescan ───────────────────────────────────────────────────────────
 
     def _rescan_and_refresh(self):
-        """Scan alle bekende mappen op nieuwe videobestanden, dan ververs de UI."""
         self._rescan_known_folders()
         self._refresh()
 
     def _rescan_known_folders(self):
-        """Doorzoek alle parent-mappen van bekende bigfiles op nieuwe videobestanden.
+        """Doorzoek alle bekende parent-mappen op nieuwe videobestanden.
 
         Slaat mappen over die niet bereikbaar zijn (externe schijf weg, etc.).
-        Voegt nieuw gevonden bestanden toe aan de DB zonder bestaande records aan te raken.
         """
-        # Verzamel unieke parent-mappen van alle bekende bigfiles
         folders: set[Path] = set()
         for rec in db.get_all_bigfiles():
             folders.add(Path(rec['full_path']).parent)
-
-        # Voeg de handmatig gekozen map toe (ook al heeft die misschien geen bigfiles)
         last = db.get_setting('data_panel_folder', '')
         if last:
             folders.add(Path(last))
-
-        # Scan elke beschikbare map
         for folder in folders:
             if not folder.exists():
-                continue           # schijf niet bereikbaar — stilletjes overslaan
+                continue
             try:
                 for f in folder.iterdir():
                     if f.is_file() and f.suffix.lower() in VIDEO_EXTS:
                         db.get_or_create_bigfile(str(f))
             except OSError:
-                pass               # geen leesrechten of schijf verdween tijdens scan
+                pass
 
     # ── UI build ─────────────────────────────────────────────────────────
 
@@ -341,9 +431,9 @@ class DataPanel(QWidget):
         lbl.setStyleSheet("color:#555; font-size:10px; letter-spacing:4px;")
         bh.addWidget(lbl)
 
-        self._lbl_count = QLabel("")
-        self._lbl_count.setStyleSheet("color:#444; font-size:11px;")
-        bh.addWidget(self._lbl_count)
+        self._lbl_active_count = QLabel("")
+        self._lbl_active_count.setStyleSheet("color:#444; font-size:11px;")
+        bh.addWidget(self._lbl_active_count)
 
         bh.addStretch()
 
@@ -351,7 +441,7 @@ class DataPanel(QWidget):
         btn_refresh.setFixedSize(28, 28)
         btn_refresh.setToolTip(
             "Herscant alle bekende mappen op nieuwe bestanden\n"
-            "en vernieuwt de lijst (beschikbaarheid bijwerken)."
+            "en vernieuwt de beschikbaarheidsstatus."
         )
         btn_refresh.setStyleSheet(
             "QPushButton { font-size:16px; }"
@@ -363,117 +453,184 @@ class DataPanel(QWidget):
         btn_folder = QPushButton("📁  Map toevoegen")
         btn_folder.setFixedHeight(28)
         btn_folder.setToolTip(
-            "Scan een nieuwe map en voeg alle videobestanden toe aan de lijst.\n"
-            "Bestanden die niet bereikbaar zijn blijven zichtbaar."
+            "Scan een nieuwe map en voeg alle videobestanden toe.\n"
+            "Bestanden die niet bereikbaar zijn blijven in het archief."
         )
         btn_folder.clicked.connect(self._pick_folder)
         bh.addWidget(btn_folder)
 
         root.addWidget(bar)
 
-        # ── Splitter ──────────────────────────────────────────────────────
-        splitter = QSplitter(Qt.Orientation.Horizontal)
-        splitter.setHandleWidth(4)
-        splitter.setStyleSheet("QSplitter::handle { background:#1a1a1a; }")
+        # ── Verticale splitter: actief (boven) + archief (onder) ──────────
+        vsplit = QSplitter(Qt.Orientation.Vertical)
+        vsplit.setHandleWidth(6)
+        vsplit.setStyleSheet(
+            "QSplitter::handle { background:#181818; }"
+            "QSplitter::handle:hover { background:#2a2a2a; }"
+        )
 
-        # Left: file list
+        # ── Bovenste sectie: bestanden OP SCHIJF ──────────────────────────
+        top_w = QWidget()
+        top_w.setStyleSheet("background:#0a0a0a;")
+        tv = QVBoxLayout(top_w)
+        tv.setContentsMargins(0, 0, 0, 0)
+        tv.setSpacing(0)
+
+        top_hdr = QFrame()
+        top_hdr.setFixedHeight(28)
+        top_hdr.setStyleSheet(
+            "QFrame { background:#0d0d0d; border-bottom:1px solid #181818; }"
+        )
+        th = QHBoxLayout(top_hdr)
+        th.setContentsMargins(12, 0, 12, 0)
+        th.setSpacing(8)
+        lbl_top = QLabel("OP SCHIJF")
+        lbl_top.setStyleSheet("color:#3a5a3a; font-size:9px; letter-spacing:3px;")
+        th.addWidget(lbl_top)
+        self._lbl_active_count = QLabel("")
+        self._lbl_active_count.setStyleSheet("color:#2a3a2a; font-size:9px;")
+        th.addWidget(self._lbl_active_count)
+        th.addStretch()
+        hint_top = QLabel("dubbelklik = afspelen  •  📷 = thumbnail  •  ◉ = acteurs")
+        hint_top.setStyleSheet("color:#1e2e1e; font-size:9px;")
+        th.addWidget(hint_top)
+        tv.addWidget(top_hdr)
+
+        # Horizontale splitter: lijst (links) | kaartgrid (rechts)
+        hsplit = QSplitter(Qt.Orientation.Horizontal)
+        hsplit.setHandleWidth(4)
+        hsplit.setStyleSheet("QSplitter::handle { background:#141414; }")
+
         self._list = QListWidget()
-        self._list.setMinimumWidth(200)
-        self._list.setMaximumWidth(360)
+        self._list.setMinimumWidth(180)
+        self._list.setMaximumWidth(320)
         self._list.setStyleSheet("""
             QListWidget {
-                background:#0d0d0d;
+                background:#0b0b0b;
                 border:none;
-                border-right:1px solid #1e1e1e;
+                border-right:1px solid #181818;
             }
             QListWidget::item {
                 padding:5px 10px;
-                border-bottom:1px solid #161616;
-                color:#888;
+                border-bottom:1px solid #141414;
+                color:#7a9a7a;
                 font-size:11px;
             }
-            QListWidget::item:selected {
-                background:#1a1a2a;
-                color:#aac;
-            }
-            QListWidget::item:hover:!selected {
-                background:#141414;
-            }
+            QListWidget::item:selected { background:#1a2a1a; color:#aacaaa; }
+            QListWidget::item:hover:!selected { background:#111611; }
         """)
         self._list.itemDoubleClicked.connect(self._on_list_dblclick)
-        splitter.addWidget(self._list)
+        hsplit.addWidget(self._list)
 
-        # Right: scrollable card grid
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setStyleSheet("border:none; background:#0a0a0a;")
-
+        card_scroll = QScrollArea()
+        card_scroll.setWidgetResizable(True)
+        card_scroll.setStyleSheet("border:none; background:#0a0a0a;")
         self._grid_widget = QWidget()
         self._grid_widget.setStyleSheet("background:#0a0a0a;")
         self._grid_layout = QGridLayout(self._grid_widget)
-        self._grid_layout.setContentsMargins(14, 14, 14, 14)
+        self._grid_layout.setContentsMargins(12, 12, 12, 12)
         self._grid_layout.setSpacing(10)
-        self._grid_layout.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
-        scroll.setWidget(self._grid_widget)
-        splitter.addWidget(scroll)
-
-        splitter.setSizes([260, 900])
-        root.addWidget(splitter, stretch=1)
-
-        # ── Footer hint ───────────────────────────────────────────────────
-        foot = QFrame()
-        foot.setFixedHeight(24)
-        foot.setStyleSheet(
-            "QFrame { background:#080808; border-top:1px solid #141414; }"
+        self._grid_layout.setAlignment(
+            Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft
         )
-        fh = QHBoxLayout(foot)
-        fh.setContentsMargins(12, 0, 12, 0)
-        hint = QLabel(
-            "Dubbelklik op bestand om af te spelen  •  "
-            "📷 = thumbnail van huidig spelerframe  •  "
-            "◉ = acteurs koppelen"
+        card_scroll.setWidget(self._grid_widget)
+        hsplit.addWidget(card_scroll)
+        hsplit.setSizes([240, 860])
+        tv.addWidget(hsplit, stretch=1)
+
+        vsplit.addWidget(top_w)
+
+        # ── Onderste sectie: ARCHIEF ──────────────────────────────────────
+        bot_w = QWidget()
+        bot_w.setStyleSheet("background:#080808;")
+        bv = QVBoxLayout(bot_w)
+        bv.setContentsMargins(0, 0, 0, 0)
+        bv.setSpacing(0)
+
+        arch_hdr = QFrame()
+        arch_hdr.setFixedHeight(28)
+        arch_hdr.setStyleSheet(
+            "QFrame { background:#0a0a0a; border-bottom:1px solid #161616; }"
         )
-        hint.setStyleSheet("color:#282828; font-size:10px;")
-        fh.addWidget(hint)
-        fh.addStretch()
-        root.addWidget(foot)
+        ah = QHBoxLayout(arch_hdr)
+        ah.setContentsMargins(12, 0, 12, 0)
+        ah.setSpacing(8)
+        lbl_arch = QLabel("ARCHIEF")
+        lbl_arch.setStyleSheet("color:#3a3a5a; font-size:9px; letter-spacing:3px;")
+        ah.addWidget(lbl_arch)
+        self._lbl_arch_count = QLabel("")
+        self._lbl_arch_count.setStyleSheet("color:#252535; font-size:9px;")
+        ah.addWidget(self._lbl_arch_count)
+        ah.addStretch()
+        hint_arch = QLabel(
+            "alle geïndexeerde bestanden — ook niet bereikbare  •  "
+            "dubbelklik = afspelen als beschikbaar"
+        )
+        hint_arch.setStyleSheet("color:#1a1a28; font-size:9px;")
+        ah.addWidget(hint_arch)
+        bv.addWidget(arch_hdr)
+
+        arch_scroll = QScrollArea()
+        arch_scroll.setWidgetResizable(True)
+        arch_scroll.setStyleSheet("border:none; background:#080808;")
+        self._arch_widget = QWidget()
+        self._arch_widget.setStyleSheet("background:#080808;")
+        self._arch_layout = QGridLayout(self._arch_widget)
+        self._arch_layout.setContentsMargins(12, 12, 12, 12)
+        self._arch_layout.setSpacing(8)
+        self._arch_layout.setAlignment(
+            Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft
+        )
+        arch_scroll.setWidget(self._arch_widget)
+        bv.addWidget(arch_scroll, stretch=1)
+
+        vsplit.addWidget(bot_w)
+
+        vsplit.setSizes([400, 300])
+        root.addWidget(vsplit, stretch=1)
 
     # ── Data refresh ──────────────────────────────────────────────────────
 
     def _refresh(self):
-        """Herlaad alle bigfiles uit de DB en bouw lijst + grid opnieuw op."""
+        """Herlaad alle bigfiles en vul beide secties opnieuw."""
+        self._actor_map = {a['id']: a['name'] for a in db.get_all_actors()}
+        all_records = db.get_all_bigfiles()
+
+        # Splits in beschikbaar (boven) vs archief (onder)
+        available_recs = [r for r in all_records if Path(r['full_path']).exists()]
+        n_all  = len(all_records)
+        n_avail = len(available_recs)
+
+        self._lbl_active_count.setText(
+            f"{n_avail} bestand{'en' if n_avail != 1 else ''} bereikbaar"
+        )
+        self._lbl_arch_count.setText(
+            f"{n_all} totaal  •  "
+            f"{sum(1 for r in all_records if r.get('thumbnail_path') and Path(r['thumbnail_path']).exists())} "
+            f"met thumbnail"
+        )
+
+        self._refresh_active(available_recs)
+        self._refresh_archive(all_records)
+
+    def _refresh_active(self, records: list):
+        """Vul de bovenste sectie met alleen bereikbare bestanden."""
         self._list.clear()
         self._cards.clear()
 
-        # Clear grid
         while self._grid_layout.count():
             item = self._grid_layout.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
 
-        # Actor map (cache)
-        self._actor_map = {a['id']: a['name'] for a in db.get_all_actors()}
-
-        records = db.get_all_bigfiles()
-        n = len(records)
-        self._lbl_count.setText(
-            f"{n} bestand{'en' if n != 1 else ''}"
-            + (f"  ({sum(1 for r in records if Path(r['full_path']).exists())} beschikbaar)" if n else "")
-        )
-
         for i, rec in enumerate(records):
-            available = Path(rec['full_path']).exists()
-
-            # ── List item ─────────────────────────
-            name = Path(rec['full_path']).name
-            li = QListWidgetItem(name)
+            # Lijst
+            li = QListWidgetItem(Path(rec['full_path']).name)
             li.setData(Qt.ItemDataRole.UserRole, rec['id'])
             li.setToolTip(rec['full_path'])
-            if not available:
-                li.setForeground(QColor(70, 70, 70))
             self._list.addItem(li)
 
-            # ── Thumbnail: bigfile-specific, anders film-thumbnail als fallback ──
+            # Thumbnail fallback
             display_rec = dict(rec)
             bf_thumb = rec.get('thumbnail_path') or ''
             if not bf_thumb or not Path(bf_thumb).exists():
@@ -481,13 +638,12 @@ class DataPanel(QWidget):
                 if film_thumb:
                     display_rec['thumbnail_path'] = film_thumb
 
-            # ── Acteurs: bigfile-acteurs, anders film-acteurs als fallback ──────
+            # Acteurs
             actor_ids   = db.get_bigfile_actor_ids(rec['id'])
             actor_names = [self._actor_map[aid] for aid in actor_ids if aid in self._actor_map]
             if not actor_names:
                 actor_names = db.get_actor_names_for_film_path(rec['full_path'])
 
-            # ── Card ──────────────────────────────
             card = _BigFileCard(display_rec, actor_names)
             card.play_requested.connect(self._on_play)
             card.actors_changed.connect(self._on_actors_changed)
@@ -496,6 +652,34 @@ class DataPanel(QWidget):
 
             row, col = divmod(i, GRID_COLS)
             self._grid_layout.addWidget(card, row, col)
+
+    def _refresh_archive(self, records: list | None = None):
+        """Vul de onderste archiefsectie met ALLE geïndexeerde bestanden."""
+        if records is None:
+            records = db.get_all_bigfiles()
+
+        self._archive_cards.clear()
+
+        while self._arch_layout.count():
+            item = self._arch_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        for i, rec in enumerate(records):
+            # Thumbnail fallback
+            display_rec = dict(rec)
+            bf_thumb = rec.get('thumbnail_path') or ''
+            if not bf_thumb or not Path(bf_thumb).exists():
+                film_thumb = db.get_best_film_thumbnail(rec['full_path'])
+                if film_thumb:
+                    display_rec['thumbnail_path'] = film_thumb
+
+            card = _ArchiveCard(display_rec)
+            card.play_requested.connect(self._on_play)
+            self._archive_cards[rec['id']] = card
+
+            row, col = divmod(i, ARCHIVE_COLS)
+            self._arch_layout.addWidget(card, row, col)
 
     # ── Folder scanning ───────────────────────────────────────────────────
 
@@ -546,22 +730,13 @@ class DataPanel(QWidget):
         actor_names = [self._actor_map[aid] for aid in actor_ids if aid in self._actor_map]
         card.update_actors(actor_names)
 
-    # ── List double-click ─────────────────────────────────────────────────
+    # ── List double-click (actieve sectie) ────────────────────────────────
 
     def _on_list_dblclick(self, item: QListWidgetItem):
         bigfile_id = item.data(Qt.ItemDataRole.UserRole)
-        records    = db.get_all_bigfiles()
-        for rec in records:
+        for rec in db.get_all_bigfiles():
             if rec['id'] == bigfile_id:
-                path = rec['full_path']
-                if Path(path).exists():
-                    self._on_play(path)
-                else:
-                    QMessageBox.information(
-                        self, "Bestand niet beschikbaar",
-                        f"Dit bestand is momenteel niet bereikbaar:\n\n{path}\n\n"
-                        "Controleer of het opslagmedium is aangesloten."
-                    )
+                self._on_play(rec['full_path'])
                 return
 
     # ── Thumbnail callback (called from player.py after screenshot) ───────
@@ -573,6 +748,10 @@ class DataPanel(QWidget):
         bigfile_id             = self._pending_thumb_id
         self._pending_thumb_id = None
         db.set_bigfile_thumbnail(bigfile_id, thumb_path)
+        # Beide secties direct bijwerken
         card = self._cards.get(bigfile_id)
         if card:
             card.update_thumbnail(thumb_path)
+        arch_card = self._archive_cards.get(bigfile_id)
+        if arch_card:
+            arch_card.update_thumbnail(thumb_path)
