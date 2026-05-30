@@ -801,53 +801,6 @@ class ActorDetailView(QWidget):
         self.films_list.itemClicked.connect(self._on_film_filter_clicked)
         fv.addWidget(self.films_list)
 
-        # ── DATA-scheiding + bigfile-thumbnailstrip ───────────────────────
-        # Separator: ────── DATA ─────
-        self._bf_separator = QWidget()
-        self._bf_separator.setVisible(False)
-        _sep_h = QHBoxLayout(self._bf_separator)
-        _sep_h.setContentsMargins(0, 6, 0, 2)
-        _sep_h.setSpacing(8)
-        _line_l = QFrame()
-        _line_l.setFixedHeight(1)
-        _line_l.setStyleSheet("background:#2a2a2a;")
-        _line_l.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        _lbl_data = QLabel("DATA")
-        _lbl_data.setStyleSheet("color:#333; font-size:9px; letter-spacing:3px;")
-        _line_r = QFrame()
-        _line_r.setFixedHeight(1)
-        _line_r.setStyleSheet("background:#2a2a2a;")
-        _line_r.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        _sep_h.addWidget(_line_l)
-        _sep_h.addWidget(_lbl_data)
-        _sep_h.addWidget(_line_r)
-        fv.addWidget(self._bf_separator)
-
-        # Horizontal bigfile thumbnail strip
-        self._bf_scroll = QScrollArea()
-        self._bf_scroll.setVisible(False)
-        self._bf_scroll.setFixedHeight(ch0 + 20)
-        self._bf_scroll.setHorizontalScrollBarPolicy(
-            Qt.ScrollBarPolicy.ScrollBarAsNeeded
-        )
-        self._bf_scroll.setVerticalScrollBarPolicy(
-            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
-        )
-        self._bf_scroll.setWidgetResizable(True)
-        self._bf_scroll.setStyleSheet(
-            "QScrollArea { border:none; background:#0a0a0a; }"
-        )
-        self._bf_inner = QWidget()
-        self._bf_inner.setStyleSheet("background:#0a0a0a;")
-        self._bf_row = QHBoxLayout(self._bf_inner)
-        self._bf_row.setContentsMargins(4, 4, 4, 4)
-        self._bf_row.setSpacing(6)
-        self._bf_row.addStretch()
-        self._bf_scroll.setWidget(self._bf_inner)
-        fv.addWidget(self._bf_scroll)
-
-        self._bf_records: list = []   # bigfile records for current actor (cached)
-
         # Animation timer — cycles multi-thumbnail films every 2 s
         self._films_anim_timer = QTimer(self)
         self._films_anim_timer.setInterval(2000)
@@ -922,6 +875,71 @@ class ActorDetailView(QWidget):
         fm_row.addWidget(markers_frame, stretch=1)
 
         right.addLayout(fm_row, stretch=1)
+
+        # ── DATA-bestanden — volledig gescheiden sectie ───────────────────
+        # Eigen frame, eigen stijl, eigen logica — géén overlap met films.
+        # Alleen zichtbaar als er bigfiles aan deze acteur zijn gekoppeld.
+        self._data_frame = QFrame()
+        self._data_frame.setVisible(False)
+        self._data_frame.setStyleSheet(
+            "QFrame#data_frame {"
+            "  background:#0c0c10;"
+            "  border:1px solid #1e1e2a;"
+            "  border-radius:6px;"
+            "}"
+        )
+        self._data_frame.setObjectName("data_frame")
+        dv = QVBoxLayout(self._data_frame)
+        dv.setContentsMargins(8, 6, 8, 6)
+        dv.setSpacing(4)
+
+        # Header
+        dh = QHBoxLayout()
+        dh.setSpacing(8)
+        _d_icon = QLabel("◈")
+        _d_icon.setStyleSheet("color:#3a3a5a; font-size:11px;")
+        dh.addWidget(_d_icon)
+        _d_lbl = QLabel("GROTE BESTANDEN")
+        _d_lbl.setStyleSheet(
+            "color:#3a3a5a; font-size:9px; letter-spacing:3px;"
+        )
+        dh.addWidget(_d_lbl)
+        _d_note = QLabel("— beelden gemaakt via DATA-tabblad, bestanden doorgaans niet beschikbaar")
+        _d_note.setStyleSheet("color:#252530; font-size:9px;")
+        dh.addWidget(_d_note)
+        dh.addStretch()
+        dv.addLayout(dh)
+
+        # Horizontal scroll strip
+        self._bf_scroll = QScrollArea()
+        self._bf_scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded
+        )
+        self._bf_scroll.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self._bf_scroll.setWidgetResizable(True)
+        self._bf_scroll.setStyleSheet(
+            "QScrollArea { border:none; background:transparent; }"
+            "QScrollBar:horizontal { height:6px; background:#111; }"
+            "QScrollBar::handle:horizontal { background:#2a2a3a; border-radius:3px; }"
+        )
+        self._bf_inner = QWidget()
+        self._bf_inner.setStyleSheet("background:transparent;")
+        self._bf_row = QHBoxLayout(self._bf_inner)
+        self._bf_row.setContentsMargins(0, 0, 0, 0)
+        self._bf_row.setSpacing(6)
+        self._bf_row.addStretch()
+        self._bf_scroll.setWidget(self._bf_inner)
+        dv.addWidget(self._bf_scroll)
+
+        self._bf_records: list = []   # bigfile records voor huidige acteur (cache)
+
+        _, ch0_bf = self._films_zoom_size()
+        self._bf_scroll.setFixedHeight(ch0_bf + 20)
+
+        right.addWidget(self._data_frame)
+
         ch.addLayout(right, stretch=1)
         v.addWidget(content, stretch=1)
 
@@ -1052,8 +1070,7 @@ class ActorDetailView(QWidget):
                 item.setData(Qt.ItemDataRole.UserRole, d)
         self.films_list.itemDelegate().invalidate_cache()
         self.films_list.update()
-        # Pas ook de bigfile-strip aan op het nieuwe zoomniveau
-        self._bf_scroll.setFixedHeight(ch + 20)
+        # Pas ook de DATA-strip aan op het nieuwe zoomniveau
         self._rebuild_bf_strip()
 
     def _make_bf_cell(self, bf: dict, cw: int, ch: int) -> QFrame:
@@ -1127,8 +1144,7 @@ class ActorDetailView(QWidget):
                 item.widget().deleteLater()
 
         if not self._bf_records:
-            self._bf_separator.setVisible(False)
-            self._bf_scroll.setVisible(False)
+            self._data_frame.setVisible(False)
             return
 
         cw, ch = self._films_zoom_size()
@@ -1138,8 +1154,7 @@ class ActorDetailView(QWidget):
             cell = self._make_bf_cell(bf, cw, ch)
             self._bf_row.insertWidget(self._bf_row.count() - 1, cell)
 
-        self._bf_separator.setVisible(True)
-        self._bf_scroll.setVisible(True)
+        self._data_frame.setVisible(True)
 
     def _films_anim_tick(self):
         self._films_tick += 1
