@@ -195,6 +195,13 @@ class SorterPanel(QWidget):
 
     def _load_folder(self, folder: str):
         self._folder = Path(folder)
+        if not self._folder.exists():
+            # Folder was saved in settings but is no longer available (drive
+            # disconnected, path renamed, etc.) — silently skip instead of crash.
+            self._photos = []
+            self._index = 0
+            self._show_current()
+            return
         already = _already_sorted_names(self._folder)
         self._photos = sorted(
             [f for f in self._folder.iterdir()
