@@ -1250,4 +1250,17 @@ def get_bigfile_by_path(full_path: str) -> dict | None:
         return dict(row) if row else None
 
 
+def get_bigfiles_for_actor(actor_id: int) -> list:
+    """Return all bigfiles that have this actor linked (via bigfiles_acteurs)."""
+    with _db() as conn:
+        rows = conn.execute(
+            "SELECT b.* FROM bigfiles b "
+            "JOIN bigfiles_acteurs ba ON ba.bigfile_id = b.id "
+            "WHERE ba.acteur_id = ? "
+            "ORDER BY b.created_at DESC",
+            (actor_id,)
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
 auto_link_actor_photos()

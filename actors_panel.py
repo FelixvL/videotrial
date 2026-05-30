@@ -801,6 +801,53 @@ class ActorDetailView(QWidget):
         self.films_list.itemClicked.connect(self._on_film_filter_clicked)
         fv.addWidget(self.films_list)
 
+        # ── DATA-scheiding + bigfile-thumbnailstrip ───────────────────────
+        # Separator: ────── DATA ─────
+        self._bf_separator = QWidget()
+        self._bf_separator.setVisible(False)
+        _sep_h = QHBoxLayout(self._bf_separator)
+        _sep_h.setContentsMargins(0, 6, 0, 2)
+        _sep_h.setSpacing(8)
+        _line_l = QFrame()
+        _line_l.setFixedHeight(1)
+        _line_l.setStyleSheet("background:#2a2a2a;")
+        _line_l.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        _lbl_data = QLabel("DATA")
+        _lbl_data.setStyleSheet("color:#333; font-size:9px; letter-spacing:3px;")
+        _line_r = QFrame()
+        _line_r.setFixedHeight(1)
+        _line_r.setStyleSheet("background:#2a2a2a;")
+        _line_r.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        _sep_h.addWidget(_line_l)
+        _sep_h.addWidget(_lbl_data)
+        _sep_h.addWidget(_line_r)
+        fv.addWidget(self._bf_separator)
+
+        # Horizontal bigfile thumbnail strip
+        self._bf_scroll = QScrollArea()
+        self._bf_scroll.setVisible(False)
+        self._bf_scroll.setFixedHeight(ch0 + 20)
+        self._bf_scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded
+        )
+        self._bf_scroll.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self._bf_scroll.setWidgetResizable(True)
+        self._bf_scroll.setStyleSheet(
+            "QScrollArea { border:none; background:#0a0a0a; }"
+        )
+        self._bf_inner = QWidget()
+        self._bf_inner.setStyleSheet("background:#0a0a0a;")
+        self._bf_row = QHBoxLayout(self._bf_inner)
+        self._bf_row.setContentsMargins(4, 4, 4, 4)
+        self._bf_row.setSpacing(6)
+        self._bf_row.addStretch()
+        self._bf_scroll.setWidget(self._bf_inner)
+        fv.addWidget(self._bf_scroll)
+
+        self._bf_records: list = []   # bigfile records for current actor (cached)
+
         # Animation timer — cycles multi-thumbnail films every 2 s
         self._films_anim_timer = QTimer(self)
         self._films_anim_timer.setInterval(2000)
@@ -1005,6 +1052,94 @@ class ActorDetailView(QWidget):
                 item.setData(Qt.ItemDataRole.UserRole, d)
         self.films_list.itemDelegate().invalidate_cache()
         self.films_list.update()
+        # Pas ook de bigfile-strip aan op het nieuwe zoomniveau
+        self._bf_scroll.setFixedHeight(ch + 20)
+        self._rebuild_bf_strip()
+
+    def _make_bf_cell(self, bf: dict, cw: int, ch: int) -> QFrame:
+        """Maak een klikbare thumbnailcel voor een bigfile in de DATA-strip."""
+        cell = QFrame()
+        cell.setFixedSize(cw, ch)
+        cell.setStyleSheet(
+            "QFrame { background:#111; border-radius:4px; border:1px solid #1e1e1e; }"
+        )
+        v = QVBoxLayout(cell)
+        v.setContentsMargins(2, 2, 2, 2)
+        v.setSpacing(1)
+
+        # Thumbnail
+        lbl_pix = QLabel()
+        lbl_pix.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lbl_pix.setStyleSheet("border:none; background:#0a0a0a; border-radius:3px;")
+        lbl_pix.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        tp = bf.get('thumbnail_path')
+        if tp and Path(tp).exists():
+            pix = QPixmap(tp).scaled(
+                cw - 4, ch - 18,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            lbl_pix.setPixmap(pix)
+        else:
+            placeholder = QPixmap(cw - 4, ch - 18)
+            placeholder.fill(QColor(18, 18, 18))
+            _p = QPainter(placeholder)
+            _p.setPen(QColor(50, 50, 50))
+            _p.setFont(QFont("Segoe UI", max(10, (cw - 4) // 8)))
+            _p.drawText(placeholder.rect(), Qt.AlignmentFlag.AlignCenter, "▶")
+            _p.end()
+            lbl_pix.setPixmap(placeholder)
+        v.addWidget(lbl_pix, stretch=1)
+
+        # Filename label
+        name = Path(bf['full_path']).name
+        lbl_name = QLabel(name)
+        lbl_name.setStyleSheet("color:#555; font-size:8px; border:none; background:transparent;")
+        lbl_name.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lbl_name.setFixedHeight(14)
+        lbl_name.setToolTip(bf['full_path'])
+        v.addWidget(lbl_name)
+
+        # Unavailable indicator
+        available = Path(bf['full_path']).exists()
+        if not available:
+            cell.setStyleSheet(
+                "QFrame { background:#0e0e0e; border-radius:4px;"
+                " border:1px solid #1a1a1a; }"
+            )
+
+        # Double-click → play (only when available)
+        if available:
+            _path = bf['full_path']
+            cell.mouseDoubleClickEvent = (
+                lambda _e, p=_path: self.open_film_requested.emit(p)
+            )
+            cell.setCursor(Qt.CursorShape.PointingHandCursor)
+
+        return cell
+
+    def _rebuild_bf_strip(self):
+        """Herbouw de bigfile-thumbnailstrip op basis van self._bf_records."""
+        # Wis bestaande cellen (alles behalve de eindstretch)
+        while self._bf_row.count() > 1:
+            item = self._bf_row.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        if not self._bf_records:
+            self._bf_separator.setVisible(False)
+            self._bf_scroll.setVisible(False)
+            return
+
+        cw, ch = self._films_zoom_size()
+        self._bf_scroll.setFixedHeight(ch + 20)
+
+        for bf in self._bf_records:
+            cell = self._make_bf_cell(bf, cw, ch)
+            self._bf_row.insertWidget(self._bf_row.count() - 1, cell)
+
+        self._bf_separator.setVisible(True)
+        self._bf_scroll.setVisible(True)
 
     def _films_anim_tick(self):
         self._films_tick += 1
@@ -1111,6 +1246,10 @@ class ActorDetailView(QWidget):
             })
             self.films_list.addItem(item)
             self._films_all_items.append(item)
+
+        # ── Bigfile-thumbnailstrip ────────────────────────────────────────
+        self._bf_records = db.get_bigfiles_for_actor(self._actor['id'])
+        self._rebuild_bf_strip()
 
     def _refresh_markers(self):
         self.markers_list.clear()
