@@ -247,6 +247,21 @@ def init_db():
         );
     """)
 
+    c.executescript("""
+        CREATE TABLE IF NOT EXISTS bigfiles (
+            id             INTEGER PRIMARY KEY AUTOINCREMENT,
+            full_path      TEXT    NOT NULL UNIQUE,
+            thumbnail_path TEXT,
+            last_seen      TEXT,
+            created_at     TEXT    DEFAULT (datetime('now'))
+        );
+        CREATE TABLE IF NOT EXISTS bigfiles_acteurs (
+            bigfile_id  INTEGER NOT NULL REFERENCES bigfiles(id) ON DELETE CASCADE,
+            acteur_id   INTEGER NOT NULL REFERENCES actors(id)   ON DELETE CASCADE,
+            PRIMARY KEY (bigfile_id, acteur_id)
+        );
+    """)
+
     conn.commit()
     conn.close()
 
@@ -1117,5 +1132,72 @@ def auto_link_actor_photos():
     conn.commit()
     conn.close()
 
+
+# ── Bigfiles ──────────────────────────────────────────────────────────────────
+
+def get_or_create_bigfile(full_path: str) -> dict:
+    """Geeft een bestaand bigfile-record terug of maakt een nieuw aan."""
+    with _db() as conn:
+        row = conn.execute(
+            "SELECT * FROM bigfiles WHERE full_path=?", (full_path,)
+        ).fetchone()
+        if row:
+            return dict(row)
+        conn.execute(
+            "INSERT INTO bigfiles (full_path) VALUES (?)", (full_path,)
+        )
+        conn.commit()
+        row = conn.execute(
+            "SELECT * FROM bigfiles WHERE full_path=?", (full_path,)
+        ).fetchone()
+        return dict(row)
+
+
+def update_bigfile_last_seen(bigfile_id: int):
+    with _db() as conn:
+        conn.execute(
+            "UPDATE bigfiles SET last_seen=datetime('now') WHERE id=?",
+            (bigfile_id,)
+        )
+        conn.commit()
+
+
+def set_bigfile_thumbnail(bigfile_id: int, thumb_path: str):
+    with _db() as conn:
+        conn.execute(
+            "UPDATE bigfiles SET thumbnail_path=? WHERE id=?",
+            (thumb_path, bigfile_id)
+        )
+        conn.commit()
+
+
+def get_all_bigfiles() -> list:
+    with _db() as conn:
+        rows = conn.execute(
+            "SELECT * FROM bigfiles ORDER BY created_at DESC"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_bigfile_actor_ids(bigfile_id: int) -> list:
+    with _db() as conn:
+        rows = conn.execute(
+            "SELECT acteur_id FROM bigfiles_acteurs WHERE bigfile_id=?",
+            (bigfile_id,)
+        ).fetchall()
+        return [r['acteur_id'] for r in rows]
+
+
+def set_bigfile_actors(bigfile_id: int, actor_ids: list):
+    with _db() as conn:
+        conn.execute(
+            "DELETE FROM bigfiles_acteurs WHERE bigfile_id=?", (bigfile_id,)
+        )
+        for aid in actor_ids:
+            conn.execute(
+                "INSERT OR IGNORE INTO bigfiles_acteurs (bigfile_id, acteur_id) VALUES (?,?)",
+                (bigfile_id, aid)
+            )
+        conn.commit()
 
 auto_link_actor_photos()

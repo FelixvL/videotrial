@@ -64,8 +64,9 @@ from films_panel import FilmsPanel
 from database_panel import DatabasePanel, SHORTCUT_DEFS
 from sorter_panel import SorterPanel
 from markers_panel import MarkersPanel
+from data_panel import DataPanel
 import database as db
-from paths import THUMBNAILS_DIR, ensure_data_dirs, migrate_legacy_data
+from paths import THUMBNAILS_DIR, BIGFILES_DIR, ensure_data_dirs, migrate_legacy_data
 
 
 # ─────────────────────────────────────────────
@@ -2804,6 +2805,12 @@ class CineMarker(QMainWindow):
         self.sorter_panel = SorterPanel()
         self.main_tabs.addTab(self.sorter_panel, "⊕  SORTEREN")
 
+        # Data tab
+        self.data_panel = DataPanel()
+        self.data_panel.play_file_requested.connect(self._load_bigfile_and_switch)
+        self.data_panel.capture_thumb_requested.connect(self._capture_bigfile_thumbnail)
+        self.main_tabs.addTab(self.data_panel, "◈  DATA")
+
         self._build_converter_tab()
         self.main_tabs.addTab(self._converter_widget, "⟳  CONVERTER")
 
@@ -3857,6 +3864,43 @@ class CineMarker(QMainWindow):
             self.status.showMessage(f"  Thumbnail opgeslagen voor {Path(self._video_path).name}")
         except Exception as e:
             self.status.showMessage(f"  Thumbnail mislukt: {e}")
+
+    # ── Data-tab bigfile helpers ───────────────────────────────────────────
+
+    def _load_bigfile_and_switch(self, path: str):
+        """Speel een bigfile af: laad video en schakel naar speler-tab."""
+        if hasattr(self, '_fade_overlay'):
+            self._fade_overlay.abort()
+        self._load_video(path)
+        self.main_tabs.setCurrentIndex(0)
+
+    def _capture_bigfile_thumbnail(self, bigfile_id: int):
+        """Sla huidig spelerframe op als thumbnail voor een bigfile."""
+        import time as _time
+        BIGFILES_DIR.mkdir(parents=True, exist_ok=True)
+        ts   = int(_time.time() * 1000)
+        dest = str(BIGFILES_DIR / f"bf_{bigfile_id}_{ts}.jpg")
+        try:
+            try:
+                _old_osd = self.player.osd_level
+                self.player.osd_level = 0
+            except Exception:
+                _old_osd = None
+            try:
+                self.player.command('screenshot-to-file', dest, 'window')
+            finally:
+                if _old_osd is not None:
+                    try:
+                        self.player.osd_level = _old_osd
+                    except Exception:
+                        pass
+            if os.path.exists(dest):
+                self.data_panel.on_thumbnail_saved(dest)
+                self.status.showMessage(f"  Bigfile-thumbnail opgeslagen")
+            else:
+                self.status.showMessage("  Thumbnail mislukt: bestand niet aangemaakt")
+        except Exception as e:
+            self.status.showMessage(f"  Bigfile-thumbnail mislukt: {e}")
 
     def _quick_marker(self, actors: list, categories: list,
                       pos: float | None = None, stars: int = 0):

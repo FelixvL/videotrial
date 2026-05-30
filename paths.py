@@ -26,6 +26,10 @@ SCALED_FILM_THUMBS_DIR = _SCALED_CACHE_ROOT / 'film'
 SCALED_ACTOR_GRID_DIR  = _SCALED_CACHE_ROOT / 'actor_grid'
 SCALED_ACTOR_CARDS_DIR = _SCALED_CACHE_ROOT / 'actor_cards'
 
+# Grote bestanden — thumbnails voor bestanden die MEESTAL niet toegankelijk zijn
+# Staat in de app-root (naast player.py), NIET in TE_KOPIEREN
+BIGFILES_DIR = APP_ROOT / '_BIGFILES'
+
 
 def ensure_data_dirs():
     """Maak alle datamappen aan als ze nog niet bestaan."""
@@ -36,6 +40,7 @@ def ensure_data_dirs():
     SCALED_FILM_THUMBS_DIR.mkdir(parents=True, exist_ok=True)
     SCALED_ACTOR_GRID_DIR.mkdir(parents=True, exist_ok=True)
     SCALED_ACTOR_CARDS_DIR.mkdir(parents=True, exist_ok=True)
+    BIGFILES_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def ensure_volume_id(film_folder: str) -> str:
