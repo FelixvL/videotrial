@@ -1522,6 +1522,236 @@ class ActorDetailView(QWidget):
 
 
 # ─────────────────────────────────────────────
+#  Naam-splitter: kaart per acteur zonder voornaam
+# ─────────────────────────────────────────────
+
+class _SplitCard(QFrame):
+    """Compacte kaart: foto links, tekstveld rechts.
+
+    Gebruiker klikt in het tekstveld (fotobestandsnaamstem), plaatst de cursor
+    op de scheidingspositie en drukt Enter.  Alles vóór de cursor wordt
+    voornaam, alles erna tot een eventuele extensie wordt achternaam.
+    """
+
+    split_done = pyqtSignal(int, str, str)   # actor_id, voornaam, achternaam
+
+    _PHOTO_EXTS = ('.jpg', '.jpeg', '.png', '.webp', '.bmp')
+    _PH_W, _PH_H = 55, 75
+
+    def __init__(self, actor: dict, meta: dict, foto_folder: str):
+        super().__init__()
+        self._actor_id   = actor['id']
+        self._stem       = actor.get('name', '')
+        self._foto_folder = foto_folder
+        self._build()
+
+    def _build(self):
+        self.setFixedWidth(230)
+        self.setStyleSheet(
+            "QFrame { background:#111; border:1px solid #1e1e1e; border-radius:5px; }"
+        )
+
+        h = QHBoxLayout(self)
+        h.setContentsMargins(5, 5, 5, 5)
+        h.setSpacing(6)
+
+        # ── Foto ─────────────────────────────────────────────────────────
+        photo_lbl = QLabel()
+        photo_lbl.setFixedSize(self._PH_W, self._PH_H)
+        photo_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        photo_lbl.setStyleSheet(
+            "border:none; background:#0a0a0a; border-radius:3px;"
+        )
+        if self._foto_folder:
+            for ext in self._PHOTO_EXTS:
+                fp = Path(self._foto_folder) / f"{self._stem}{ext}"
+                if fp.exists():
+                    pix = QPixmap(str(fp)).scaled(
+                        self._PH_W, self._PH_H,
+                        Qt.AspectRatioMode.KeepAspectRatio,
+                        Qt.TransformationMode.SmoothTransformation,
+                    )
+                    photo_lbl.setPixmap(pix)
+                    break
+        h.addWidget(photo_lbl)
+
+        # ── Rechts: naam-label + invoer ───────────────────────────────────
+        v = QVBoxLayout()
+        v.setSpacing(4)
+        v.setContentsMargins(0, 0, 0, 0)
+
+        lbl_stem = QLabel(self._stem)
+        lbl_stem.setStyleSheet("color:#383838; font-size:8px; border:none;")
+        lbl_stem.setWordWrap(True)
+        v.addWidget(lbl_stem)
+
+        self._inp = QLineEdit(self._stem)
+        self._inp.setStyleSheet(
+            "QLineEdit { background:#181818; border:1px solid #2a2a2a; "
+            "border-radius:3px; color:#ccc; font-size:11px; padding:2px 4px; }"
+            "QLineEdit:focus { border-color:#e8b86d; }"
+        )
+        self._inp.setToolTip("Cursor op de scheidingspositie zetten, dan Enter")
+        self._inp.returnPressed.connect(self._on_enter)
+        v.addWidget(self._inp)
+
+        lbl_hint = QLabel("cursor ▏ Enter")
+        lbl_hint.setStyleSheet("color:#252525; font-size:8px; border:none;")
+        v.addWidget(lbl_hint)
+
+        v.addStretch()
+        h.addLayout(v, stretch=1)
+
+    def _on_enter(self):
+        text = self._inp.text()
+        pos  = self._inp.cursorPosition()
+        voornaam   = text[:pos].strip()
+        achternaam = text[pos:].strip()
+
+        # Verwijder extensie als die per ongeluk in achternaam zit
+        for ext in self._PHOTO_EXTS:
+            if achternaam.lower().endswith(ext):
+                achternaam = achternaam[:-len(ext)].strip()
+                break
+
+        if not voornaam:
+            # Cursor staat helemaal links — flash rood en doe niets
+            ok_style = self._inp.styleSheet()
+            self._inp.setStyleSheet(
+                "QLineEdit { background:#2a1010; border:1px solid #cc3333; "
+                "border-radius:3px; color:#ccc; font-size:11px; padding:2px 4px; }"
+            )
+            QTimer.singleShot(500, lambda: self._inp.setStyleSheet(ok_style))
+            return
+
+        self.split_done.emit(self._actor_id, voornaam, achternaam)
+
+
+# ─────────────────────────────────────────────
+#  Naam-splitter paneel  (stack page 2)
+# ─────────────────────────────────────────────
+
+class _SplitNaamPanel(QWidget):
+    """Overzicht van alle acteurs zonder voornaam — naam splitsen via bestandsnaam."""
+
+    back_requested = pyqtSignal()
+    split_done     = pyqtSignal()   # één acteur gesplitst → ververs hoofdgrid
+
+    COLS = 4
+
+    def __init__(self):
+        super().__init__()
+        self._foto_folder: str = ''
+        self._build_ui()
+
+    # ── UI ───────────────────────────────────────────────────────────────
+
+    def _build_ui(self):
+        v = QVBoxLayout(self)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(0)
+
+        bar = QFrame()
+        bar.setFixedHeight(42)
+        bar.setStyleSheet(
+            "QFrame { background:#0d0d0d; border-bottom:1px solid #1e1e1e; }"
+        )
+        bh = QHBoxLayout(bar)
+        bh.setContentsMargins(10, 0, 10, 0)
+        bh.setSpacing(10)
+
+        btn_back = QPushButton("◀  Terug")
+        btn_back.setFixedHeight(28)
+        btn_back.clicked.connect(self.back_requested)
+        bh.addWidget(btn_back)
+
+        lbl_title = QLabel("NAAM SPLITSEN")
+        lbl_title.setStyleSheet(
+            "color:#666; font-size:10px; letter-spacing:3px;"
+        )
+        bh.addWidget(lbl_title)
+
+        self._lbl_count = QLabel("")
+        self._lbl_count.setStyleSheet("color:#333; font-size:10px;")
+        bh.addWidget(self._lbl_count)
+
+        bh.addStretch()
+
+        lbl_hint = QLabel(
+            "klik in tekstveld  •  cursor op scheidingspositie  •  Enter = splitsen"
+        )
+        lbl_hint.setStyleSheet("color:#252525; font-size:9px;")
+        bh.addWidget(lbl_hint)
+
+        v.addWidget(bar)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setStyleSheet("border:none; background:#0a0a0a;")
+
+        self._inner = QWidget()
+        self._inner.setStyleSheet("background:#0a0a0a;")
+        self._grid_layout = QGridLayout(self._inner)
+        self._grid_layout.setContentsMargins(12, 12, 12, 12)
+        self._grid_layout.setSpacing(10)
+        self._grid_layout.setAlignment(
+            Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft
+        )
+        scroll.setWidget(self._inner)
+        v.addWidget(scroll, stretch=1)
+
+    # ── Data ─────────────────────────────────────────────────────────────
+
+    def refresh(self, foto_folder: str):
+        """Herlaad alle acteurs zonder voornaam direct uit de DB."""
+        self._foto_folder = foto_folder
+
+        while self._grid_layout.count():
+            item = self._grid_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        # Haal acteurs zonder voornaam op
+        no_naam = []
+        for actor in db.get_all_actors():
+            meta = {}
+            if actor.get('notes'):
+                try:
+                    meta = json.loads(actor['notes'])
+                except (ValueError, TypeError):
+                    meta = {}
+            if not meta.get('voornaam', '').strip():
+                no_naam.append((actor, meta))
+        no_naam.sort(key=lambda t: t[0].get('name', '').lower())
+
+        n = len(no_naam)
+        self._lbl_count.setText(
+            f"{n} acteur{'s' if n != 1 else ''} zonder voornaam"
+        )
+
+        for i, (actor, meta) in enumerate(no_naam):
+            card = _SplitCard(actor, meta, self._foto_folder)
+            card.split_done.connect(self._on_split)
+            row, col = divmod(i, self.COLS)
+            self._grid_layout.addWidget(card, row, col)
+
+    def _on_split(self, actor_id: int, voornaam: str, achternaam: str):
+        actor = db.get_actor(actor_id)
+        meta  = {}
+        if actor and actor.get('notes'):
+            try:
+                meta = json.loads(actor['notes'])
+            except (ValueError, TypeError):
+                meta = {}
+        meta['voornaam']   = voornaam
+        meta['achternaam'] = achternaam
+        db.update_actor_meta(actor_id, meta)
+
+        self.split_done.emit()          # → ActorsPanel vernieuwt _all_items
+        self.refresh(self._foto_folder) # kaart verdwijnt direct
+
+
+# ─────────────────────────────────────────────
 #  Main Actors Panel — full-screen photo grid
 # ─────────────────────────────────────────────
 
@@ -1604,6 +1834,20 @@ class ActorsPanel(QWidget):
         )
         self._btn_mode.toggled.connect(self._toggle_mode)
         tb.addWidget(self._btn_mode)
+
+        self._btn_split_naam = QPushButton("✂  NAAM")
+        self._btn_split_naam.setFixedHeight(28)
+        self._btn_split_naam.setToolTip(
+            "Toon alle acteurs zonder voornaam\n"
+            "Bestandsnaamstem splitsen via cursor + Enter"
+        )
+        self._btn_split_naam.setStyleSheet(
+            "QPushButton { background: #0a0a0a; border: 1px solid #2a2a2a;"
+            "  border-radius: 4px; color: #444; font-size: 10px; padding: 0 8px; }"
+            "QPushButton:hover { border-color: #555; color: #777; }"
+        )
+        self._btn_split_naam.clicked.connect(self._open_split_panel)
+        tb.addWidget(self._btn_split_naam)
 
         btn_folder = QPushButton("📁  Map")
         btn_folder.setFixedHeight(28)
@@ -1751,6 +1995,12 @@ class ActorsPanel(QWidget):
         self._detail_view.navigate_requested.connect(self._navigate_actor)
         self._stack.addWidget(self._detail_view)
 
+        # ── Page 2: naam-splitter ─────────────────
+        self._split_naam_panel = _SplitNaamPanel()
+        self._split_naam_panel.back_requested.connect(self._on_split_naam_back)
+        self._split_naam_panel.split_done.connect(self._on_split_naam_done)
+        self._stack.addWidget(self._split_naam_panel)
+
     def _cb_group(self, layout: QHBoxLayout, label: str,
                   options: list) -> dict:
         from PyQt6.QtWidgets import QCheckBox
@@ -1846,6 +2096,26 @@ class ActorsPanel(QWidget):
         self._mode = 'buiten_db' if checked else 'in_db'
         self._db_group_widget.setVisible(not checked)
         self._reset_filters()
+
+    # ── Naam-splitter ─────────────────────────────────────────────────────
+
+    def _open_split_panel(self):
+        """Open het naam-splitter paneel (page 2)."""
+        foto_folder = db.get_setting('photo_folder', '')
+        self._split_naam_panel.refresh(foto_folder)
+        self._stack.setCurrentIndex(2)
+
+    def _on_split_naam_back(self):
+        """Terug naar het hoofdgrid (page 0)."""
+        self._stack.setCurrentIndex(0)
+
+    def _on_split_naam_done(self):
+        """Één acteur is gesplitst — ververs het hoofdgrid op de achtergrond."""
+        folder = db.get_setting('photo_folder', '')
+        if folder:
+            self._scan_folder(folder)
+
+    # ─────────────────────────────────────────────────────────────────────
 
     def _on_filter_changed(self):
         if self._mode == 'buiten_db':

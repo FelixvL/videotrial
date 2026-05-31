@@ -5,6 +5,7 @@ Overzicht van grote/zelden-beschikbare bestanden.
 Thumbnail en acteurskoppeling verlopen via de gewone speler — niet hier.
 """
 
+import re
 from pathlib import Path
 
 from PyQt6.QtWidgets import (
@@ -28,6 +29,19 @@ CARD_THUMB_H = 130
 GRID_COLS    = 4
 
 
+def _build_archive_filename(source: Path, actor_names: list) -> str:
+    """Bouw de gearchiveerde bestandsnaam op.
+
+    Formaat:  CMARCH [Acteur1 Acteur2] originelebestandsnaam.ext
+    Zonder acteurs:  CMARCH originelebestandsnaam.ext
+    """
+    # Verwijder Windows-onveilige tekens uit acteursnamen
+    safe = [re.sub(r'[\\/:*?"<>|]', '', n).strip() for n in actor_names]
+    safe = [n for n in safe if n]
+    prefix = f"CMARCH [{' '.join(safe)}] " if safe else "CMARCH "
+    return prefix + source.name
+
+
 # ── BigFile card (actieve sectie — alleen play-knop) ─────────────────────────
 
 class _BigFileCard(QFrame):
@@ -37,7 +51,8 @@ class _BigFileCard(QFrame):
     Thumbnail en acteurs worden beheerd via de gewone speler, niet hier.
     """
 
-    play_requested = pyqtSignal(str)   # full_path
+    play_requested    = pyqtSignal(str)   # full_path
+    archive_requested = pyqtSignal(int)   # bigfile_id
 
     def __init__(self, record: dict, actor_names: list):
         super().__init__()
@@ -88,18 +103,41 @@ class _BigFileCard(QFrame):
         self._lbl_actors.setStyleSheet("color:#555; font-size:9px; border:none;")
         v.addWidget(self._lbl_actors)
 
-        # ▶  Play button
-        btn_play = QPushButton("▶  Afspelen in speler")
+        # ── Knoppen-rij ──────────────────────────────────────────────────
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(6)
+
+        # ▶  Afspelen
+        btn_play = QPushButton("▶  Afspelen")
         btn_play.setFixedHeight(28)
         btn_play.setToolTip("Openen in de speler — maak daar de thumbnail en koppel acteurs")
         btn_play.setStyleSheet(
             "QPushButton{background:#1a2a1a;border:1px solid #2a5a2a;"
-            "border-radius:4px;color:#55e055;font-size:12px;}"
+            "border-radius:4px;color:#55e055;font-size:11px;}"
             "QPushButton:hover{background:#1f3f1f;}"
             "QPushButton:pressed{background:#55e055;color:#000;}"
         )
         btn_play.clicked.connect(lambda: self.play_requested.emit(self._record['full_path']))
-        v.addWidget(btn_play)
+        btn_row.addWidget(btn_play, stretch=1)
+
+        # 📦  Archiveer
+        btn_arch = QPushButton("📦")
+        btn_arch.setFixedSize(28, 28)
+        btn_arch.setToolTip(
+            "Verplaats naar 'deleted'-map met nieuwe naam:\n"
+            "CMARCH [acteurs] originelebestandsnaam.ext\n\n"
+            "Thumbnails en acteurskoppelingen blijven bewaard in het archief."
+        )
+        btn_arch.setStyleSheet(
+            "QPushButton{background:#1e1200;border:1px solid #4a2800;"
+            "border-radius:4px;color:#c07020;font-size:14px;}"
+            "QPushButton:hover{background:#2a1800;border-color:#8a4800;}"
+            "QPushButton:pressed{background:#c07020;color:#000;}"
+        )
+        btn_arch.clicked.connect(lambda: self.archive_requested.emit(self._record['id']))
+        btn_row.addWidget(btn_arch)
+
+        v.addLayout(btn_row)
 
     # ── Thumbnail helpers ────────────────────────────────────────────────
 
@@ -362,7 +400,7 @@ class DataPanel(QWidget):
         self._lbl_active_count.setStyleSheet("color:#2a3a2a; font-size:9px;")
         th.addWidget(self._lbl_active_count)
         th.addStretch()
-        hint_top = QLabel("dubbelklik = afspelen  •  📷 = thumbnail  •  ◉ = acteurs")
+        hint_top = QLabel("▶ = afspelen in speler  •  📦 = archiveer naar 'deleted'-map")
         hint_top.setStyleSheet("color:#1e2e1e; font-size:9px;")
         th.addWidget(hint_top)
         tv.addWidget(top_hdr)
@@ -517,6 +555,7 @@ class DataPanel(QWidget):
 
             card = _BigFileCard(display_rec, actor_names)
             card.play_requested.connect(self._on_play)
+            card.archive_requested.connect(self._do_archive)
             self._cards[rec['id']] = card
 
             row, col = divmod(i, GRID_COLS)
@@ -595,6 +634,107 @@ class DataPanel(QWidget):
             if rec['id'] == bigfile_id:
                 self._on_play(rec['full_path'])
                 return
+
+    # ── Archiveren ────────────────────────────────────────────────────────
+
+    def _deleted_folder_for(self, source: Path) -> Path | None:
+        """Zoek de 'deleted'-map naast het bronbestand.
+
+        Controleert hoofdletterongevoelig (Windows).
+        Vraagt om aanmaken als de map er niet is.
+        """
+        parent = source.parent
+        try:
+            for d in parent.iterdir():
+                if d.is_dir() and d.name.lower() == 'deleted':
+                    return d
+        except OSError:
+            pass
+
+        # Niet gevonden — vraag om aanmaken
+        ans = QMessageBox.question(
+            self,
+            "Map 'deleted' niet gevonden",
+            f"Er bestaat geen 'deleted'-map in:\n{parent}\n\n"
+            "Aanmaken?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if ans != QMessageBox.StandardButton.Yes:
+            return None
+        new_dir = parent / "deleted"
+        try:
+            new_dir.mkdir()
+            return new_dir
+        except OSError as e:
+            QMessageBox.warning(self, "Fout", f"Kan map niet aanmaken:\n{e}")
+            return None
+
+    def _do_archive(self, bigfile_id: int):
+        """Verplaats een bigfile naar de 'deleted'-map met CMARCH-naam."""
+        # Haal record op
+        rec = next(
+            (r for r in db.get_all_bigfiles() if r['id'] == bigfile_id), None
+        )
+        if not rec:
+            return
+
+        source = Path(rec['full_path'])
+        if not source.exists():
+            QMessageBox.warning(
+                self, "Bestand niet gevonden",
+                f"Het bestand staat niet meer op schijf:\n{source}"
+            )
+            self._refresh()
+            return
+
+        # Acteursnamen — via kaart-cache, anders DB-fallback
+        card = self._cards.get(bigfile_id)
+        actor_names = card._actor_names if card else []
+        if not actor_names:
+            actor_names = db.get_actor_names_for_film_path(rec['full_path'])
+
+        # Bouw nieuwe bestandsnaam
+        new_name = _build_archive_filename(source, actor_names)
+
+        # Doelmap
+        deleted_dir = self._deleted_folder_for(source)
+        if deleted_dir is None:
+            return
+
+        dest = deleted_dir / new_name
+        # Vermijd naamconflict
+        if dest.exists():
+            stem, suffix = dest.stem, dest.suffix
+            i = 2
+            while dest.exists():
+                dest = deleted_dir / f"{stem} ({i}){suffix}"
+                i += 1
+
+        # Bevestiging
+        actors_str = (
+            ", ".join(actor_names) if actor_names else "— geen acteurs gekoppeld —"
+        )
+        ans = QMessageBox.question(
+            self,
+            "Bestand archiveren",
+            f"Verplaats naar:\n{dest}\n\n"
+            f"Acteurs: {actors_str}\n\n"
+            "Thumbnails en acteurskoppelingen blijven bewaard in het archief. "
+            "Het bestand verdwijnt uit het bovenste venster.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if ans != QMessageBox.StandardButton.Yes:
+            return
+
+        try:
+            source.rename(dest)
+        except OSError as e:
+            QMessageBox.warning(self, "Fout bij archiveren", str(e))
+            return
+
+        # Ververs beide panelen — bestand bestaat niet meer op oud pad,
+        # dus verdwijnt het vanzelf uit OP SCHIJF en wordt gedimmed in ARCHIEF.
+        self._refresh()
 
     # ── Thumbnail sync (aangeroepen vanuit player._sync_bigfile_thumbnail) ──
 
