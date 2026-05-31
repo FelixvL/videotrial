@@ -281,9 +281,10 @@ class DataPanel(QWidget):
 
     def __init__(self):
         super().__init__()
-        self._cards:         dict[int, _BigFileCard]  = {}  # bigfile_id → actieve kaart
-        self._archive_cards: dict[int, _ArchiveCard]  = {}  # bigfile_id → archiefkaart
-        self._actor_map:     dict[int, str]           = {}  # actor_id → naam (cache)
+        self._cards:               dict[int, _BigFileCard]  = {}  # bigfile_id → actieve kaart
+        self._archive_cards:       dict[int, _ArchiveCard]  = {}  # bigfile_id → archiefkaart
+        self._actor_map:           dict[int, str]           = {}  # actor_id → naam (cache)
+        self._archive_actor_names: dict[int, list[str]]     = {}  # bigfile_id → display-namen
         self._build_ui()
         self._refresh()
 
@@ -457,7 +458,7 @@ class DataPanel(QWidget):
         bv.setSpacing(0)
 
         arch_hdr = QFrame()
-        arch_hdr.setFixedHeight(28)
+        arch_hdr.setFixedHeight(36)
         arch_hdr.setStyleSheet(
             "QFrame { background:#0a0a0a; border-bottom:1px solid #161616; }"
         )
@@ -471,12 +472,17 @@ class DataPanel(QWidget):
         self._lbl_arch_count.setStyleSheet("color:#252535; font-size:9px;")
         ah.addWidget(self._lbl_arch_count)
         ah.addStretch()
-        hint_arch = QLabel(
-            "alle geïndexeerde bestanden — ook niet bereikbare  •  "
-            "dubbelklik = afspelen als beschikbaar"
+        self._arch_search = QLineEdit()
+        self._arch_search.setPlaceholderText("zoek op acteur…")
+        self._arch_search.setFixedWidth(200)
+        self._arch_search.setFixedHeight(24)
+        self._arch_search.setStyleSheet(
+            "QLineEdit { background:#111; border:1px solid #2a2a3a;"
+            " border-radius:3px; color:#888; font-size:11px; padding:0 6px; }"
+            "QLineEdit:focus { border-color:#5555aa; color:#bbb; }"
         )
-        hint_arch.setStyleSheet("color:#1a1a28; font-size:9px;")
-        ah.addWidget(hint_arch)
+        self._arch_search.textChanged.connect(self._filter_archive)
+        ah.addWidget(self._arch_search)
         bv.addWidget(arch_hdr)
 
         arch_scroll = QScrollArea()
@@ -567,6 +573,7 @@ class DataPanel(QWidget):
             records = db.get_all_bigfiles()
 
         self._archive_cards.clear()
+        self._archive_actor_names.clear()
 
         while self._arch_layout.count():
             item = self._arch_layout.takeAt(0)
@@ -582,12 +589,45 @@ class DataPanel(QWidget):
                 if film_thumb:
                     display_rec['thumbnail_path'] = film_thumb
 
+            # Acteursnamen opslaan voor zoekfilter
+            names = db.get_actor_display_names_for_film_path(rec['full_path'])
+            self._archive_actor_names[rec['id']] = [n.lower() for n in names]
+
             card = _ArchiveCard(display_rec)
             card.play_requested.connect(self._on_play)
             self._archive_cards[rec['id']] = card
 
             row, col = divmod(i, ARCHIVE_COLS)
             self._arch_layout.addWidget(card, row, col)
+
+        # Zoekfilter opnieuw toepassen na verversing
+        self._filter_archive(self._arch_search.text())
+
+    # ── Archief zoekfilter ────────────────────────────────────────────────
+
+    def _filter_archive(self, query: str):
+        """Toon alleen archiefkaarten waarvan een acteur overeenkomt met de zoekopdracht."""
+        q = query.strip().lower()
+
+        # Herpositioneer zichtbare kaarten in het grid zodat er geen gaten vallen
+        visible_ids = []
+        for bf_id, card in self._archive_cards.items():
+            if not q:
+                match = True
+            else:
+                names = self._archive_actor_names.get(bf_id, [])
+                match = any(q in name for name in names)
+            card.setVisible(match)
+            if match:
+                visible_ids.append(bf_id)
+
+        # Grid herindelen: verwijder alle kaarten en voeg alleen zichtbare toe
+        while self._arch_layout.count():
+            self._arch_layout.takeAt(0)
+
+        for i, bf_id in enumerate(visible_ids):
+            row, col = divmod(i, ARCHIVE_COLS)
+            self._arch_layout.addWidget(self._archive_cards[bf_id], row, col)
 
     # ── Folder scanning ───────────────────────────────────────────────────
 
@@ -687,11 +727,8 @@ class DataPanel(QWidget):
             self._refresh()
             return
 
-        # Acteursnamen — via kaart-cache, anders DB-fallback
-        card = self._cards.get(bigfile_id)
-        actor_names = card._actor_names if card else []
-        if not actor_names:
-            actor_names = db.get_actor_names_for_film_path(rec['full_path'])
+        # Acteursnamen als "Voornaam Achternaam" — altijd vers uit DB
+        actor_names = db.get_actor_display_names_for_film_path(rec['full_path'])
 
         # Bouw nieuwe bestandsnaam
         new_name = _build_archive_filename(source, actor_names)

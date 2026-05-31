@@ -1241,6 +1241,40 @@ def get_actor_names_for_film_path(file_path: str) -> list:
         return [r['name'] for r in rows]
 
 
+def get_actor_display_names_for_film_path(file_path: str) -> list:
+    """Return 'Voornaam Achternaam' strings for actors linked to a film.
+
+    Leest voornaam en achternaam uit het notes-JSON-veld van elke acteur.
+    Valt terug op actors.name als beide leeg zijn (bijv. nog niet gesplitst).
+    """
+    with _db() as conn:
+        film = conn.execute(
+            "SELECT id FROM films WHERE file_path=?", (file_path,)
+        ).fetchone()
+        if not film:
+            return []
+        rows = conn.execute(
+            "SELECT a.name, a.notes FROM actors a "
+            "JOIN actor_films af ON af.actor_id = a.id "
+            "WHERE af.film_id = ? ORDER BY a.name COLLATE NOCASE",
+            (film['id'],)
+        ).fetchall()
+
+    result = []
+    for row in rows:
+        meta = {}
+        if row['notes']:
+            try:
+                meta = json.loads(row['notes'])
+            except (ValueError, TypeError):
+                pass
+        voornaam   = meta.get('voornaam', '').strip()
+        achternaam = meta.get('achternaam', '').strip()
+        full = f"{voornaam} {achternaam}".strip()
+        result.append(full or row['name'])
+    return result
+
+
 def get_bigfile_by_path(full_path: str) -> dict | None:
     """Return a bigfile record by its full path, or None if not found."""
     with _db() as conn:
