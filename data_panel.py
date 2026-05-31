@@ -32,13 +32,13 @@ GRID_COLS    = 4
 def _build_archive_filename(source: Path, actor_names: list) -> str:
     """Bouw de gearchiveerde bestandsnaam op.
 
-    Formaat:  CMARCH [Acteur1 Acteur2] originelebestandsnaam.ext
+    Formaat:  CMARCH Voornaam Achternaam Voornaam2 Achternaam2 originelebestandsnaam.ext
     Zonder acteurs:  CMARCH originelebestandsnaam.ext
     """
     # Verwijder Windows-onveilige tekens uit acteursnamen
     safe = [re.sub(r'[\\/:*?"<>|]', '', n).strip() for n in actor_names]
     safe = [n for n in safe if n]
-    prefix = f"CMARCH [{' '.join(safe)}] " if safe else "CMARCH "
+    prefix = f"CMARCH {' '.join(safe)} " if safe else "CMARCH "
     return prefix + source.name
 
 
@@ -125,7 +125,7 @@ class _BigFileCard(QFrame):
         btn_arch.setFixedSize(28, 28)
         btn_arch.setToolTip(
             "Verplaats naar 'deleted'-map met nieuwe naam:\n"
-            "CMARCH [acteurs] originelebestandsnaam.ext\n\n"
+            "CMARCH Voornaam Achternaam originelebestandsnaam.ext\n\n"
             "Thumbnails en acteurskoppelingen blijven bewaard in het archief."
         )
         btn_arch.setStyleSheet(
