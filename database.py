@@ -1201,6 +1201,13 @@ def set_bigfile_actors(bigfile_id: int, actor_ids: list):
         conn.commit()
 
 
+def delete_bigfile(bigfile_id: int):
+    """Verwijder een bigfile-record volledig uit de DB (bestand onaangeroerd)."""
+    with _db() as conn:
+        conn.execute("DELETE FROM bigfiles_acteurs WHERE bigfile_id=?", (bigfile_id,))
+        conn.execute("DELETE FROM bigfiles WHERE id=?", (bigfile_id,))
+
+
 def get_best_film_thumbnail(file_path: str) -> str | None:
     """Return the best available thumbnail path for a film by file path, or None.
 

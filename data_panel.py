@@ -190,7 +190,8 @@ class _ArchiveCard(QFrame):
     Dubbelklik speelt af als bestand bereikbaar is.
     """
 
-    play_requested = pyqtSignal(str)   # full_path
+    play_requested   = pyqtSignal(str)   # full_path
+    delete_requested = pyqtSignal(int)   # bigfile_id
 
     def __init__(self, record: dict):
         super().__init__()
@@ -230,6 +231,22 @@ class _ArchiveCard(QFrame):
         )
         name_lbl.setToolTip(self._record['full_path'])
         v.addWidget(name_lbl)
+
+        # × knopje — rechtsboven, absoluut gepositioneerd over de kaart
+        del_btn = QPushButton("×", self)
+        del_btn.setFixedSize(16, 16)
+        del_btn.move(ARCHIVE_W - 19, 3)
+        del_btn.setToolTip("Verwijder uit archief")
+        del_btn.setStyleSheet(
+            "QPushButton { background:#1a0a0a; border:1px solid #3a1a1a;"
+            " border-radius:3px; color:#4a2020; font-size:11px; font-weight:bold; }"
+            "QPushButton:hover { background:#3a1010; border-color:#cc3333; color:#cc3333; }"
+            "QPushButton:pressed { background:#cc3333; color:#fff; }"
+        )
+        del_btn.raise_()
+        del_btn.clicked.connect(
+            lambda: self.delete_requested.emit(self._record['id'])
+        )
 
         if self._available:
             path = self._record['full_path']
@@ -595,6 +612,7 @@ class DataPanel(QWidget):
 
             card = _ArchiveCard(display_rec)
             card.play_requested.connect(self._on_play)
+            card.delete_requested.connect(self._do_delete_archive)
             self._archive_cards[rec['id']] = card
 
             row, col = divmod(i, ARCHIVE_COLS)
@@ -602,6 +620,28 @@ class DataPanel(QWidget):
 
         # Zoekfilter opnieuw toepassen na verversing
         self._filter_archive(self._arch_search.text())
+
+    # ── Archief verwijderen ───────────────────────────────────────────────
+
+    def _do_delete_archive(self, bigfile_id: int):
+        """Verwijder een bigfile-record uit de DB (het bestand zelf blijft onaangeroerd)."""
+        rec = next(
+            (r for r in db.get_all_bigfiles() if r['id'] == bigfile_id), None
+        )
+        name = Path(rec['full_path']).name if rec else str(bigfile_id)
+
+        ans = QMessageBox.question(
+            self,
+            "Verwijder uit archief",
+            f"Verwijder\n{name}\nuit het archief?\n\n"
+            "Het bestand zelf wordt niet aangeraakt.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if ans != QMessageBox.StandardButton.Yes:
+            return
+
+        db.delete_bigfile(bigfile_id)
+        self._refresh()
 
     # ── Archief zoekfilter ────────────────────────────────────────────────
 
