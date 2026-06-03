@@ -320,7 +320,10 @@ class DataPanel(QWidget):
         """Doorzoek alle bekende parent-mappen op nieuwe videobestanden.
 
         Slaat mappen over die niet bereikbaar zijn (externe schijf weg, etc.).
+        Geblokkeerde paden (handmatig verwijderd) worden overgeslagen.
         """
+        blocked = db.get_blocked_bigfile_paths()
+
         folders: set[Path] = set()
         for rec in db.get_all_bigfiles():
             folders.add(Path(rec['full_path']).parent)
@@ -332,7 +335,9 @@ class DataPanel(QWidget):
                 continue
             try:
                 for f in folder.iterdir():
-                    if f.is_file() and f.suffix.lower() in VIDEO_EXTS:
+                    if (f.is_file()
+                            and f.suffix.lower() in VIDEO_EXTS
+                            and str(f) not in blocked):
                         db.get_or_create_bigfile(str(f))
             except OSError:
                 pass
@@ -685,9 +690,12 @@ class DataPanel(QWidget):
         p = Path(folder)
         if not p.exists():
             return
+        blocked = db.get_blocked_bigfile_paths()
         added = 0
         for f in sorted(p.iterdir(), key=lambda x: x.name.lower()):
-            if f.is_file() and f.suffix.lower() in VIDEO_EXTS:
+            if (f.is_file()
+                    and f.suffix.lower() in VIDEO_EXTS
+                    and str(f) not in blocked):
                 db.get_or_create_bigfile(str(f))
                 added += 1
         self._refresh()

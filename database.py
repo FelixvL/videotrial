@@ -1202,10 +1202,44 @@ def set_bigfile_actors(bigfile_id: int, actor_ids: list):
 
 
 def delete_bigfile(bigfile_id: int):
-    """Verwijder een bigfile-record volledig uit de DB (bestand onaangeroerd)."""
+    """Verwijder een bigfile-record en blokkeer het pad zodat rescan het niet herplaatst."""
     with _db() as conn:
+        row = conn.execute(
+            "SELECT full_path FROM bigfiles WHERE id=?", (bigfile_id,)
+        ).fetchone()
+        if row:
+            _block_bigfile_path(row['full_path'], conn)
         conn.execute("DELETE FROM bigfiles_acteurs WHERE bigfile_id=?", (bigfile_id,))
         conn.execute("DELETE FROM bigfiles WHERE id=?", (bigfile_id,))
+
+
+def _block_bigfile_path(full_path: str, conn):
+    """Voeg pad toe aan de blokkeerlijst (opgeslagen in settings als JSON)."""
+    raw = conn.execute(
+        "SELECT value FROM settings WHERE key='bigfiles_blocked'"
+    ).fetchone()
+    try:
+        blocked = set(json.loads(raw['value'])) if raw else set()
+    except (ValueError, TypeError):
+        blocked = set()
+    blocked.add(full_path)
+    value = json.dumps(list(blocked))
+    conn.execute(
+        "INSERT OR REPLACE INTO settings (key, value) VALUES ('bigfiles_blocked', ?)",
+        (value,)
+    )
+
+
+def get_blocked_bigfile_paths() -> set:
+    """Geeft de set van geblokkeerde paden terug."""
+    with _db() as conn:
+        raw = conn.execute(
+            "SELECT value FROM settings WHERE key='bigfiles_blocked'"
+        ).fetchone()
+    try:
+        return set(json.loads(raw['value'])) if raw else set()
+    except (ValueError, TypeError):
+        return set()
 
 
 def get_best_film_thumbnail(file_path: str) -> str | None:
