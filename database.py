@@ -1211,10 +1211,14 @@ def delete_bigfile(bigfile_id: int):
             _block_bigfile_path(row['full_path'], conn)
         conn.execute("DELETE FROM bigfiles_acteurs WHERE bigfile_id=?", (bigfile_id,))
         conn.execute("DELETE FROM bigfiles WHERE id=?", (bigfile_id,))
+        conn.commit()
 
 
 def _block_bigfile_path(full_path: str, conn):
-    """Voeg pad toe aan de blokkeerlijst (opgeslagen in settings als JSON)."""
+    """Voeg pad toe aan de blokkeerlijst (opgeslagen in settings als JSON).
+
+    Geen eigen commit — aanroeper (delete_bigfile) doet dat.
+    """
     raw = conn.execute(
         "SELECT value FROM settings WHERE key='bigfiles_blocked'"
     ).fetchone()
