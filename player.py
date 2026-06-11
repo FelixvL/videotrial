@@ -3822,9 +3822,7 @@ class CineMarker(QMainWindow):
             self._actors_overlay.load_thumbnails(film['id'])
             # Ook bigfile thumbnail bijwerken als dit bestand ook in de data-tab staat
             self._sync_bigfile_thumbnail(self._video_path, dest)
-            folder = db.get_setting('film_folder', '')
-            if folder:
-                self.films_panel._scan_folder(folder)
+            self.films_panel.update_film_thumbnail(self._video_path, dest)
             self.status.showMessage(f"  Thumbnail opgeslagen voor {Path(self._video_path).name}")
         except Exception as e:
             self.status.showMessage(f"  Thumbnail mislukt: {e}")
@@ -3861,9 +3859,7 @@ class CineMarker(QMainWindow):
             self._actors_overlay.load_thumbnails(film['id'])
             # Ook bigfile thumbnail bijwerken als dit bestand ook in de data-tab staat
             self._sync_bigfile_thumbnail(self._video_path, path)
-            folder = db.get_setting('film_folder', '')
-            if folder:
-                self.films_panel._scan_folder(folder)
+            self.films_panel.update_film_thumbnail(self._video_path, path)
             self.status.showMessage(f"  Thumbnail opgeslagen voor {Path(self._video_path).name}")
         except Exception as e:
             self.status.showMessage(f"  Thumbnail mislukt: {e}")

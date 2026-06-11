@@ -215,6 +215,12 @@ class FilmGridDelegate(QStyledItemDelegate):
         self._thumb_cache.clear()
         self._actor_cache.clear()
 
+    def invalidate_cache_for(self, file_path: str):
+        """Verwijder alleen de cache-entries voor één specifiek bestand."""
+        keys = [k for k in self._thumb_cache if k.startswith(file_path + ':')]
+        for k in keys:
+            del self._thumb_cache[k]
+
     def _thumb(self, path: str, w: int, h: int) -> QPixmap | None:
         key = f"{path}:{w}:{h}"
         if key not in self._thumb_cache:
@@ -1593,6 +1599,18 @@ class FilmsPanel(QWidget):
             if d and d.get('path') == file_path:
                 d['afgeleide_rating'] = rating
                 item.setData(Qt.ItemDataRole.UserRole, d)
+                break
+        self.film_list.viewport().update()
+
+    def update_film_thumbnail(self, file_path: str, thumb_path: str):
+        """Live-update de thumbnail van één film — sortering en filter blijven intact."""
+        for item in self._all_items:
+            d = item.data(Qt.ItemDataRole.UserRole)
+            if d and d.get('path') == file_path:
+                d['thumbnail']  = thumb_path
+                d['has_thumb']  = True
+                item.setData(Qt.ItemDataRole.UserRole, d)
+                self.film_list.itemDelegate().invalidate_cache_for(file_path)
                 break
         self.film_list.viewport().update()
 

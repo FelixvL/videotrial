@@ -29,7 +29,9 @@ from paths import THUMBNAILS_DIR, MARKER_THUMBS_DIR, SCALED_ACTOR_CARDS_DIR
 
 
 def _count_actor_markers(actor_id: int, films: list) -> int:
-    """Count how many markers across all films reference this actor."""
+    """Count how many markers across all films reference this actor.
+    Alleen nog gebruikt als fallback — gebruik _batch_marker_counts() bij voorkeur.
+    """
     count = 0
     for film in films:
         p = Path(film['file_path'])
@@ -43,6 +45,29 @@ def _count_actor_markers(actor_id: int, films: list) -> int:
             except Exception:
                 pass
     return count
+
+
+def _batch_marker_counts(film_folder: str) -> dict:
+    """Lees alle marker-JSON-bestanden in de filmmap EENMALIG.
+
+    Geeft {actor_id: aantal_markers} terug voor alle acteurs tegelijk.
+    Veel sneller dan per-acteur inlezen bij grote bibliotheken.
+    """
+    counts: dict[int, int] = {}
+    if not film_folder:
+        return counts
+    try:
+        for mf in Path(film_folder).rglob('*_markers.json'):
+            try:
+                with open(str(mf), 'r', encoding='utf-8') as fh:
+                    for m in json.load(fh):
+                        for aid in (m.get('actors') or []):
+                            counts[aid] = counts.get(aid, 0) + 1
+            except Exception:
+                pass
+    except OSError:
+        pass
+    return counts
 
 
 # ─────────────────────────────────────────────
@@ -2059,32 +2084,37 @@ class ActorsPanel(QWidget):
             key=lambda f: f.stem.lower()
         )
 
+        # ── Batch: één keer alle acteurs, filmtellingen en markertelling ophalen ──
+        actor_by_name = {a['name']: a for a in db.get_all_actors()}
+        film_counts   = db.get_actor_film_counts_batch()   # {actor_id: count}
+        film_folder   = db.get_setting('film_folder', '')
+        marker_counts = _batch_marker_counts(film_folder)  # {actor_id: count}
+
+        cw, ch = self._zoom_size()
         for photo_path in photos:
-            actor = db.get_actor_by_name(photo_path.stem)
+            actor = actor_by_name.get(photo_path.stem)
             meta = {}
             if actor and actor.get('notes'):
                 try:
                     meta = json.loads(actor['notes'])
                 except (ValueError, TypeError):
                     meta = {}
-            # in_db = heeft zinvolle metadata (voornaam of achternaam ingevuld)
             in_db = bool(meta.get('voornaam') or meta.get('achternaam'))
 
-            films       = db.get_films_for_actor(actor['id']) if actor else []
-            film_count  = len(films)
-            marker_count = _count_actor_markers(actor['id'], films) if actor else 0
+            actor_id     = actor['id'] if actor else None
+            film_count   = film_counts.get(actor_id, 0)   if actor_id else 0
+            marker_count = marker_counts.get(actor_id, 0) if actor_id else 0
 
-            cw, ch = self._zoom_size()
             item = QListWidgetItem()
             item.setSizeHint(QSize(cw, ch))
             item.setData(Qt.ItemDataRole.UserRole, {
-                'photo_path': str(photo_path),
-                'stem': photo_path.stem,
-                'actor': actor,
-                'in_db': in_db,
-                'meta': meta,
-                'cell_size': QSize(cw, ch),
-                'film_count': film_count,
+                'photo_path':   str(photo_path),
+                'stem':         photo_path.stem,
+                'actor':        actor,
+                'in_db':        in_db,
+                'meta':         meta,
+                'cell_size':    QSize(cw, ch),
+                'film_count':   film_count,
                 'marker_count': marker_count,
             })
             self.grid.addItem(item)

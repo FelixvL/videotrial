@@ -303,7 +303,8 @@ class DataPanel(QWidget):
         self._actor_map:           dict[int, str]           = {}  # actor_id → naam (cache)
         self._archive_actor_names: dict[int, list[str]]     = {}  # bigfile_id → display-namen
         self._build_ui()
-        self._refresh()
+        # Geen _refresh() bij opstart — showEvent laadt het paneel zodra de
+        # gebruiker het tabblad voor het eerst opent.
 
     def showEvent(self, event):
         """Herscant + ververs bij elke tabwissel naar DATA."""
