@@ -217,6 +217,7 @@ class MarkersPanel(QWidget):
         super().__init__()
         self._player      = mpv_player
         self._all_entries: list = []    # alle geladen markers (dicts)
+        self._dirty: bool = True        # True = herlaad nodig bij volgende tabwissel
 
         # Actor three-state: 0=neutral, 1=include, 2=exclude  {actor_id: int}
         self._actor_states: dict = {}
@@ -247,6 +248,7 @@ class MarkersPanel(QWidget):
         self._film_cat_map:     dict = {}   # {film_id:  set(cat_id)}
         self._film_path_to_id:  dict = {}   # {file_path: film_id}
         self._film_size_map:    dict = {}   # {file_path: file_size_bytes}
+        self._actors_dict:      dict = {}   # {actor_id: actor} — cache zodat klik-handlers geen DB-query doen
         self._actor_search: str = ''
         self._sort_btns: dict = {}          # {field: QPushButton}
         self._build_ui()
@@ -616,8 +618,18 @@ class MarkersPanel(QWidget):
 
     # ── Data laden ───────────────────────────────────────────────
 
+    def mark_dirty(self):
+        """Markeer dat de data veranderd is — volgende tabwissel herlaadt."""
+        self._dirty = True
+
+    def refresh_if_dirty(self):
+        """Herlaad alleen als er iets veranderd is sinds de laatste refresh."""
+        if self._dirty:
+            self.refresh()
+
     def refresh(self):
         """Laad alle markers van alle films opnieuw."""
+        self._dirty = False
         self._stop_worker()
         self._all_entries.clear()
 
@@ -650,6 +662,7 @@ class MarkersPanel(QWidget):
         # _dd_markertype wordt hersteld door _update_markertype_dropdown()
 
         actors_dict = {a['id']: a for a in db.get_all_actors()}
+        self._actors_dict = actors_dict   # cache voor gebruik in klik-handlers
         cats_dict   = {c['id']: c for c in db.get_all_categories()}
 
         # ── Batch maps ───────────────────────────────────────────
@@ -849,7 +862,8 @@ class MarkersPanel(QWidget):
         self._actor_list.blockSignals(True)
         self._actor_list.clear()
 
-        actors_dict = {a['id']: a for a in db.get_all_actors()}
+        # Gebruik gecachede dict — wordt gevuld in refresh(), niet bij elke klik
+        actors_dict = self._actors_dict or {a['id']: a for a in db.get_all_actors()}
         for aid, cnt in sorted(
             actor_counts.items(),
             key=lambda x: (-x[1], actors_dict.get(x[0], {}).get('name', '').lower())

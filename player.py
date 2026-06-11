@@ -2832,7 +2832,7 @@ class CineMarker(QMainWindow):
         on_player = (idx == player_idx)
         on_actors = (idx == actors_idx)
         if idx == markers_idx:
-            QTimer.singleShot(0, self.markers_panel.refresh)
+            QTimer.singleShot(0, self.markers_panel.refresh_if_dirty)
         if idx == films_idx:
             # Herlaad filterbalk zodat nieuw aangemaakte filmcategorieën/kleuren
             # direct zichtbaar zijn na een bezoek aan de DATABASE-tab
@@ -2934,6 +2934,7 @@ class CineMarker(QMainWindow):
             return
         film = db.get_or_create_film(self._video_path)
         db.link_actor_film(actor['id'], film['id'])
+        self._actors_cache = []   # invalideer suggestie-cache
         self._actors_overlay.refresh(film['id'])
         self._player_search.clear()   # reset search → full video visible again
         self.status.showMessage(
@@ -3300,7 +3301,10 @@ class CineMarker(QMainWindow):
             first = name.split()[0].lower()
             return first in filename_words
 
-        matches = [a for a in db.get_all_actors() if _first_name_matches(a)]
+        # Gebruik gecachede acteurlijst — DB-query alleen als cache leeg of oud is
+        if not hasattr(self, '_actors_cache') or not self._actors_cache:
+            self._actors_cache = db.get_all_actors()
+        matches = [a for a in self._actors_cache if _first_name_matches(a)]
         # Nooit het paneel tonen als fullscreen actief is (activeert anders het
         # hoofd-QMainWindow op Windows via het Tool-venster).
         if self._fs_win and self._fs_win.isVisible():
@@ -3930,6 +3934,7 @@ class CineMarker(QMainWindow):
         self._markers.sort(key=lambda m: m['time'])
         save_markers(self._video_path, self._markers)
         self._recalc_film_rating(self._video_path)
+        self.markers_panel.mark_dirty()
         self._refresh_marker_list()
         self._actors_overlay._cat_sel.clear()
         self._actors_overlay.update()
@@ -4323,6 +4328,7 @@ class CineMarker(QMainWindow):
         self._markers.append(marker)
         self._markers.sort(key=lambda m: m['time'])
         save_markers(self._video_path, self._markers)
+        self.markers_panel.mark_dirty()
         self._refresh_marker_list()
         # Switch panel back to markers view so the new negative marker is visible
         self._panel.show_search(False)
@@ -4432,6 +4438,7 @@ class CineMarker(QMainWindow):
             self._markers.pop(idx)
             save_markers(self._video_path, self._markers)
             self._recalc_film_rating(self._video_path)
+            self.markers_panel.mark_dirty()
             self._refresh_marker_list()
 
     def _edit_marker_by_index(self, idx: int):
@@ -4513,7 +4520,7 @@ class CineMarker(QMainWindow):
                     break
         mf.write_text(_json.dumps(markers, ensure_ascii=False, indent=2), 'utf-8')
         self._recalc_film_rating(film_path)
-        self.markers_panel.refresh()
+        self.markers_panel.mark_dirty()
         # Als de film ook open staat in de speler, herlaad de markerlijst
         if self._video_path and str(_Path(self._video_path).resolve()) == str(p.resolve()):
             self._markers = markers

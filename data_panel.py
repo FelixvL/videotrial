@@ -6,6 +6,7 @@ Thumbnail en acteurskoppeling verlopen via de gewone speler — niet hier.
 """
 
 import re
+import shutil
 from pathlib import Path
 
 from PyQt6.QtWidgets import (
@@ -302,14 +303,20 @@ class DataPanel(QWidget):
         self._archive_cards:       dict[int, _ArchiveCard]  = {}  # bigfile_id → archiefkaart
         self._actor_map:           dict[int, str]           = {}  # actor_id → naam (cache)
         self._archive_actor_names: dict[int, list[str]]     = {}  # bigfile_id → display-namen
+        self._initial_load_done:   bool                     = False
         self._build_ui()
         # Geen _refresh() bij opstart — showEvent laadt het paneel zodra de
         # gebruiker het tabblad voor het eerst opent.
 
     def showEvent(self, event):
-        """Herscant + ververs bij elke tabwissel naar DATA."""
+        """Eerste bezoek: volledige map-scan + refresh.
+        Daarna: alleen DB-gebaseerde refresh — geen trage filesystem-iteratie."""
         super().showEvent(event)
-        self._rescan_and_refresh()
+        if not self._initial_load_done:
+            self._initial_load_done = True
+            self._rescan_and_refresh()
+        else:
+            self._refresh()
 
     # ── Rescan ───────────────────────────────────────────────────────────
 
@@ -603,6 +610,10 @@ class DataPanel(QWidget):
             if item.widget():
                 item.widget().deleteLater()
 
+        # Acteursnamen voor alle bigfiles in één batch-query ophalen
+        all_paths = [r['full_path'] for r in records]
+        names_batch = db.get_actor_display_names_batch(all_paths)
+
         for i, rec in enumerate(records):
             # Thumbnail fallback
             display_rec = dict(rec)
@@ -612,8 +623,8 @@ class DataPanel(QWidget):
                 if film_thumb:
                     display_rec['thumbnail_path'] = film_thumb
 
-            # Acteursnamen opslaan voor zoekfilter
-            names = db.get_actor_display_names_for_film_path(rec['full_path'])
+            # Acteursnamen opslaan voor zoekfilter (uit batch)
+            names = names_batch.get(rec['full_path'], [])
             self._archive_actor_names[rec['id']] = [n.lower() for n in names]
 
             card = _ArchiveCard(display_rec)
@@ -646,7 +657,11 @@ class DataPanel(QWidget):
         if ans != QMessageBox.StandardButton.Yes:
             return
 
-        db.delete_bigfile(bigfile_id)
+        try:
+            db.delete_bigfile(bigfile_id)
+        except Exception as e:
+            QMessageBox.warning(self, "Fout bij verwijderen", str(e))
+            return
         self._refresh()
 
     # ── Archief zoekfilter ────────────────────────────────────────────────
@@ -813,8 +828,8 @@ class DataPanel(QWidget):
             return
 
         try:
-            source.rename(dest)
-        except OSError as e:
+            shutil.move(str(source), str(dest))
+        except Exception as e:
             QMessageBox.warning(self, "Fout bij archiveren", str(e))
             return
 

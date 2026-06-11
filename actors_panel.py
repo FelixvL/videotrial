@@ -28,6 +28,75 @@ from films_panel import (FilmGridDelegate as _FilmGridDelegate,
 from paths import THUMBNAILS_DIR, MARKER_THUMBS_DIR, SCALED_ACTOR_CARDS_DIR
 
 
+class _ActorScanWorker(QThread):
+    """Verzamelt acteurdata in de achtergrond zodat de UI niet bevriest."""
+
+    scan_ready = pyqtSignal(list)   # lijst van item-dicts
+
+    PHOTO_EXTS = {'.jpg', '.jpeg', '.png', '.webp', '.bmp', '.tiff', '.gif'}
+
+    def __init__(self, folder: str, film_folder: str):
+        super().__init__()
+        self._folder      = folder
+        self._film_folder = film_folder
+        self._stop        = False
+
+    def stop(self):
+        self._stop = True
+
+    def run(self):
+        try:
+            self._run()
+        except Exception:
+            # Zorg altijd dat de grid niet leeg/geblokkeerd blijft
+            self.scan_ready.emit([])
+
+    def _run(self):
+        folder_path = Path(self._folder)
+        if not folder_path.exists():
+            self.scan_ready.emit([])
+            return
+
+        try:
+            photos = sorted(
+                (f for f in folder_path.iterdir()
+                 if f.suffix.lower() in self.PHOTO_EXTS),
+                key=lambda f: f.stem.lower(),
+            )
+        except OSError:
+            self.scan_ready.emit([])
+            return
+
+        actor_by_name = {a['name']: a for a in db.get_all_actors()}
+        film_counts   = db.get_actor_film_counts_batch()
+        marker_counts = _batch_marker_counts(self._film_folder)
+
+        items_data = []
+        for photo_path in photos:
+            if self._stop:
+                return
+            actor = actor_by_name.get(photo_path.stem)
+            meta  = {}
+            if actor and actor.get('notes'):
+                try:
+                    meta = json.loads(actor['notes'])
+                except (ValueError, TypeError):
+                    meta = {}
+            in_db      = bool(meta.get('voornaam') or meta.get('achternaam'))
+            actor_id   = actor['id'] if actor else None
+            items_data.append({
+                'photo_path':   str(photo_path),
+                'stem':         photo_path.stem,
+                'actor':        actor,
+                'in_db':        in_db,
+                'meta':         meta,
+                'film_count':   film_counts.get(actor_id, 0)   if actor_id else 0,
+                'marker_count': marker_counts.get(actor_id, 0) if actor_id else 0,
+            })
+
+        self.scan_ready.emit(items_data)
+
+
 def _count_actor_markers(actor_id: int, films: list) -> int:
     """Count how many markers across all films reference this actor.
     Alleen nog gebruikt als fallback — gebruik _batch_marker_counts() bij voorkeur.
@@ -1232,40 +1301,31 @@ class ActorDetailView(QWidget):
 
         cw, ch = self._films_zoom_size()
 
-        for f in db.get_films_for_actor(self._actor['id']):
+        films = db.get_films_for_actor(self._actor['id'])
+
+        # Batch: alle thumbnails in één DB-query ipv één query per film
+        all_thumbs = db.get_all_film_thumbnails_batch()   # {film_id: [path, ...]}
+
+        for f in films:
             film_id = f.get('id')
 
-            # All thumbnails for cycling animation
-            if film_id:
-                rows = db.get_film_thumbnails(film_id)
-                thumbnails = [r['path'] for r in rows if os.path.exists(r['path'])]
-            else:
-                thumbnails = []
+            # Thumbnails uit batch — geen per-film query meer
+            thumbnails = [p for p in all_thumbs.get(film_id, []) if os.path.exists(p)]
             if not thumbnails and f.get('thumbnail') and os.path.exists(f.get('thumbnail', '')):
                 thumbnails = [f['thumbnail']]
 
-            # File size from disk
+            # Bestandsgrootte
             fp = f.get('file_path', '')
             size = 0
-            if fp and os.path.exists(fp):
+            if fp:
                 try:
                     size = os.path.getsize(fp)
                 except OSError:
                     pass
 
-            # Marker count (total and negative)
-            markers     = 0
-            neg_markers = 0
-            if fp:
-                _mp = Path(fp)
-                _mf = _mp.parent / f".{_mp.stem}_markers.json"
-                if _mf.exists():
-                    try:
-                        _ms = json.loads(_mf.read_text('utf-8'))
-                        markers     = len(_ms)
-                        neg_markers = sum(1 for m in _ms if m.get('negative'))
-                    except Exception:
-                        pass
+            # Markertelling uit gecachede DB-velden — geen JSON-bestanden lezen
+            markers     = f.get('marker_count',     0) or 0
+            neg_markers = f.get('neg_marker_count', 0) or 0
 
             item = QListWidgetItem()
             item.setSizeHint(QSize(cw, ch))
@@ -1770,7 +1830,12 @@ class _SplitNaamPanel(QWidget):
                 meta = {}
         meta['voornaam']   = voornaam
         meta['achternaam'] = achternaam
-        db.update_actor_meta(actor_id, meta)
+        try:
+            db.update_actor_meta(actor_id, meta)
+        except Exception as e:
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.warning(None, "Fout bij opslaan", str(e))
+            return
 
         self.split_done.emit()          # → ActorsPanel vernieuwt _all_items
         self.refresh(self._foto_folder) # kaart verdwijnt direct
@@ -1808,6 +1873,7 @@ class ActorsPanel(QWidget):
         self._sort_reverse: bool = False
         self._sort_btns: dict = {}
         self._last_foto_mtime: float = 0.0   # voor auto_link throttle
+        self._scan_worker: _ActorScanWorker | None = None
         self._build_ui()
         folder = db.get_setting('photo_folder', '')
         if folder:
@@ -2075,52 +2141,26 @@ class ActorsPanel(QWidget):
         self._all_items.clear()
         self._delegate._cache.clear()
 
-        folder_path = Path(folder)
-        if not folder_path.exists():
-            return
+        # Stop eventuele lopende worker
+        if self._scan_worker and self._scan_worker.isRunning():
+            self._scan_worker.stop()
+            self._scan_worker.wait(300)
 
-        photos = sorted(
-            (f for f in folder_path.iterdir() if f.suffix.lower() in self.PHOTO_EXTS),
-            key=lambda f: f.stem.lower()
-        )
+        film_folder = db.get_setting('film_folder', '')
+        self._scan_worker = _ActorScanWorker(folder, film_folder)
+        self._scan_worker.scan_ready.connect(self._on_scan_ready)
+        self._scan_worker.start()
 
-        # ── Batch: één keer alle acteurs, filmtellingen en markertelling ophalen ──
-        actor_by_name = {a['name']: a for a in db.get_all_actors()}
-        film_counts   = db.get_actor_film_counts_batch()   # {actor_id: count}
-        film_folder   = db.get_setting('film_folder', '')
-        marker_counts = _batch_marker_counts(film_folder)  # {actor_id: count}
-
+    def _on_scan_ready(self, items_data: list):
+        """Bouw de QListWidgetItems op de hoofdthread nadat de worker klaar is."""
         cw, ch = self._zoom_size()
-        for photo_path in photos:
-            actor = actor_by_name.get(photo_path.stem)
-            meta = {}
-            if actor and actor.get('notes'):
-                try:
-                    meta = json.loads(actor['notes'])
-                except (ValueError, TypeError):
-                    meta = {}
-            in_db = bool(meta.get('voornaam') or meta.get('achternaam'))
-
-            actor_id     = actor['id'] if actor else None
-            film_count   = film_counts.get(actor_id, 0)   if actor_id else 0
-            marker_count = marker_counts.get(actor_id, 0) if actor_id else 0
-
+        for d in items_data:
             item = QListWidgetItem()
             item.setSizeHint(QSize(cw, ch))
-            item.setData(Qt.ItemDataRole.UserRole, {
-                'photo_path':   str(photo_path),
-                'stem':         photo_path.stem,
-                'actor':        actor,
-                'in_db':        in_db,
-                'meta':         meta,
-                'cell_size':    QSize(cw, ch),
-                'film_count':   film_count,
-                'marker_count': marker_count,
-            })
+            item.setData(Qt.ItemDataRole.UserRole, {**d, 'cell_size': QSize(cw, ch)})
             self.grid.addItem(item)
             self._all_items.append(item)
-
-        self._apply_sort()   # past ook _apply_filters() toe achteraf
+        self._apply_sort()
 
     def _toggle_mode(self, checked: bool):
         self._mode = 'buiten_db' if checked else 'in_db'

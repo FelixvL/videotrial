@@ -1286,6 +1286,41 @@ def get_actor_names_for_film_path(file_path: str) -> list:
         return [r['name'] for r in rows]
 
 
+def get_actor_display_names_batch(file_paths: list) -> dict:
+    """Return {file_path: [display_name, ...]} voor meerdere films in één query.
+
+    Gebruikt door DataPanel._refresh_archive om N afzonderlijke DB-calls te vermijden.
+    Geeft altijd een dict terug — bij een fout een lege dict zodat de UI niet crasht.
+    """
+    if not file_paths:
+        return {}
+    try:
+        placeholders = ','.join('?' * len(file_paths))
+        with _db() as conn:
+            rows = conn.execute(
+                f"SELECT f.file_path, a.name, a.notes FROM films f "
+                f"JOIN actor_films af ON af.film_id = f.id "
+                f"JOIN actors a ON a.id = af.actor_id "
+                f"WHERE f.file_path IN ({placeholders})",
+                file_paths
+            ).fetchall()
+        result: dict = {fp: [] for fp in file_paths}
+        for row in rows:
+            meta = {}
+            if row['notes']:
+                try:
+                    meta = json.loads(row['notes'])
+                except (ValueError, TypeError):
+                    pass
+            voornaam   = meta.get('voornaam', '').strip()
+            achternaam = meta.get('achternaam', '').strip()
+            full = f"{voornaam} {achternaam}".strip() or row['name']
+            result[row['file_path']].append(full)
+        return result
+    except Exception:
+        return {fp: [] for fp in file_paths}
+
+
 def get_actor_display_names_for_film_path(file_path: str) -> list:
     """Return 'Voornaam Achternaam' strings for actors linked to a film.
 
