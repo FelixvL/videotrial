@@ -1364,6 +1364,48 @@ def get_bigfile_by_path(full_path: str) -> dict | None:
         return dict(row) if row else None
 
 
+def remap_file_paths(path_map: dict) -> tuple[int, int]:
+    """Pas opgeslagen paden aan op basis van {oud_pad: nieuw_pad}.
+
+    Werkt op bigfiles.full_path, films.file_path en de geblokkeerde-paden
+    lijst in settings.  Handig als een externe schijf een andere
+    stationsletter of mountpunt gekregen heeft.
+
+    Geeft (bijgewerkte_bigfiles, bijgewerkte_films) terug.
+    """
+    with _db() as conn:
+        bf_count = 0
+        fm_count = 0
+        for old, new in path_map.items():
+            r = conn.execute(
+                "UPDATE bigfiles SET full_path=? WHERE full_path=?", (new, old)
+            )
+            bf_count += r.rowcount
+            r = conn.execute(
+                "UPDATE films SET file_path=? WHERE file_path=?", (new, old)
+            )
+            fm_count += r.rowcount
+
+        # Update geblokkeerde paden (bigfiles_blocked is een JSON-lijst)
+        raw = conn.execute(
+            "SELECT value FROM settings WHERE key='bigfiles_blocked'"
+        ).fetchone()
+        if raw:
+            try:
+                blocked = set(json.loads(raw['value']))
+                new_blocked = {path_map.get(p, p) for p in blocked}
+                conn.execute(
+                    "INSERT OR REPLACE INTO settings (key, value) VALUES "
+                    "('bigfiles_blocked', ?)",
+                    (json.dumps(list(new_blocked)),)
+                )
+            except (ValueError, TypeError):
+                pass
+
+        conn.commit()
+        return bf_count, fm_count
+
+
 def get_bigfiles_for_actor(actor_id: int) -> list:
     """Return all bigfiles linked to this actor via the regular film system.
 

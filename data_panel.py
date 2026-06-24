@@ -13,7 +13,7 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel,
     QFileDialog, QFrame, QScrollArea, QListWidget,
     QListWidgetItem, QSplitter, QGridLayout,
-    QMessageBox, QLineEdit
+    QMessageBox, QLineEdit, QDialog
 )
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QPixmap, QColor, QPainter, QFont
@@ -390,6 +390,21 @@ class DataPanel(QWidget):
         btn_refresh.clicked.connect(self._rescan_and_refresh)
         bh.addWidget(btn_refresh)
 
+        btn_repair = QPushButton("🔗  Paden herstellen")
+        btn_repair.setFixedHeight(28)
+        btn_repair.setToolTip(
+            "Scan een map en herstel gebroken paden op basis van bestandsnaam.\n"
+            "Gebruik dit als een schijf een andere stationsletter gekregen heeft."
+        )
+        btn_repair.setStyleSheet(
+            "QPushButton{background:#1a1a2a;border:1px solid #2a2a4a;"
+            "border-radius:4px;color:#6699cc;font-size:11px;padding:0 8px;}"
+            "QPushButton:hover{background:#1f1f3a;border-color:#6699cc;}"
+            "QPushButton:pressed{background:#6699cc;color:#000;}"
+        )
+        btn_repair.clicked.connect(self._repair_paths_dialog)
+        bh.addWidget(btn_repair)
+
         btn_folder = QPushButton("📁  Map toevoegen")
         btn_folder.setFixedHeight(28)
         btn_folder.setToolTip(
@@ -689,6 +704,171 @@ class DataPanel(QWidget):
         for i, bf_id in enumerate(visible_ids):
             row, col = divmod(i, ARCHIVE_COLS)
             self._arch_layout.addWidget(self._archive_cards[bf_id], row, col)
+
+    # ── Pad-herstel dialoog ───────────────────────────────────────────────
+
+    def _repair_paths_dialog(self):
+        """Scan een map recursief en herstel gebroken DB-paden op bestandsnaam."""
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Paden herstellen")
+        dlg.setMinimumSize(600, 500)
+        dlg.setStyleSheet("QDialog { background: #0e0e0e; }")
+
+        v = QVBoxLayout(dlg)
+        v.setSpacing(10)
+        v.setContentsMargins(16, 16, 16, 16)
+
+        # ── Uitleg ───────────────────────────────────────────────────────
+        lbl_info = QLabel(
+            "Scant een map recursief en koppelt gevonden bestanden opnieuw aan "
+            "DB-records op basis van bestandsnaam.\n"
+            "Gebruik dit als een schijf een andere stationsletter gekregen heeft."
+        )
+        lbl_info.setWordWrap(True)
+        lbl_info.setStyleSheet("color:#555; font-size:11px;")
+        v.addWidget(lbl_info)
+
+        # ── Mappenkiezer ─────────────────────────────────────────────────
+        pick_row = QHBoxLayout()
+        inp_folder = QLineEdit()
+        inp_folder.setPlaceholderText("Kies de map (of schiijfhoofdmap) om te scannen…")
+        inp_folder.setReadOnly(True)
+        inp_folder.setFixedHeight(30)
+        pick_row.addWidget(inp_folder, stretch=1)
+        btn_pick = QPushButton("📁  Kies map")
+        btn_pick.setFixedHeight(30)
+        pick_row.addWidget(btn_pick)
+        v.addLayout(pick_row)
+
+        # ── Resultatenlijst ───────────────────────────────────────────────
+        result_list = QListWidget()
+        result_list.setStyleSheet(
+            "QListWidget { background:#080808; border:1px solid #1a1a1a;"
+            "  border-radius:4px; }"
+            "QListWidget::item { padding:5px 10px; border-bottom:1px solid #111; }"
+        )
+        v.addWidget(result_list, stretch=1)
+
+        # ── Samenvatting ─────────────────────────────────────────────────
+        lbl_stats = QLabel("Kies een map om de scan te starten.")
+        lbl_stats.setStyleSheet("color:#444; font-size:10px; padding:2px 0;")
+        v.addWidget(lbl_stats)
+
+        # ── Knoppenrij ────────────────────────────────────────────────────
+        btn_row = QHBoxLayout()
+        btn_apply = QPushButton("✓  Toepassen")
+        btn_apply.setObjectName("accent")
+        btn_apply.setFixedHeight(32)
+        btn_apply.setEnabled(False)
+        btn_close = QPushButton("Sluiten")
+        btn_close.setFixedHeight(32)
+        btn_row.addStretch()
+        btn_row.addWidget(btn_apply)
+        btn_row.addWidget(btn_close)
+        v.addLayout(btn_row)
+
+        _path_map: dict = {}   # {oud_pad: nieuw_pad}
+
+        def _scan(folder: str):
+            nonlocal _path_map
+            _path_map = {}
+            result_list.clear()
+            lbl_stats.setText("Bezig met scannen…")
+            lbl_stats.repaint()
+
+            # Bouw naam→nieuw_pad kaart van alle video's op schijf
+            available: dict[str, str] = {}
+            try:
+                for p in Path(folder).rglob('*'):
+                    if p.suffix.lower() in VIDEO_EXTS:
+                        available[p.name] = str(p)
+            except OSError:
+                pass
+
+            all_bf    = db.get_all_bigfiles()
+            all_films = db.get_all_films()
+
+            matched   = 0
+            not_found = 0
+            unchanged = 0
+
+            # ── Bigfiles ─────────────────────────────────────────────────
+            for rec in all_bf:
+                old_path = rec['full_path']
+                filename = Path(old_path).name
+
+                if Path(old_path).exists():
+                    unchanged += 1
+                    continue
+
+                new_path = available.get(filename)
+                if new_path and new_path != old_path:
+                    _path_map[old_path] = new_path
+                    item = QListWidgetItem(f"✓  {filename}")
+                    item.setForeground(QColor('#55cc55'))
+                    item.setToolTip(f"Was:  {old_path}\nWordt: {new_path}")
+                    result_list.addItem(item)
+                    matched += 1
+                else:
+                    item = QListWidgetItem(f"✗  {filename}")
+                    item.setForeground(QColor('#884444'))
+                    item.setToolTip(f"Niet gevonden in gescande map:\n{old_path}")
+                    result_list.addItem(item)
+                    not_found += 1
+
+            # ── Films (die op dezelfde schijf stonden maar niet als bigfile) ─
+            for rec in all_films:
+                old_path = rec['file_path']
+                if old_path in _path_map:
+                    continue   # al verwerkt via bigfiles
+                if Path(old_path).exists():
+                    continue
+
+                new_path = available.get(Path(old_path).name)
+                if new_path and new_path != old_path:
+                    _path_map[old_path] = new_path
+                    matched += 1
+
+            parts = []
+            if matched:
+                parts.append(f"{matched} te herstellen")
+            if not_found:
+                parts.append(f"{not_found} niet gevonden in gescande map")
+            if unchanged:
+                parts.append(f"{unchanged} ongewijzigd")
+            lbl_stats.setText("  •  ".join(parts) or "Niets gevonden.")
+            btn_apply.setEnabled(bool(_path_map))
+
+        def _pick():
+            folder = QFileDialog.getExistingDirectory(
+                dlg, "Kies de map (of schijfhoofdmap) om te scannen"
+            )
+            if folder:
+                inp_folder.setText(folder)
+                _scan(folder)
+
+        def _apply():
+            if not _path_map:
+                return
+            try:
+                bf_n, fm_n = db.remap_file_paths(_path_map)
+            except Exception as e:
+                QMessageBox.warning(dlg, "Fout bij opslaan", str(e))
+                return
+            QMessageBox.information(
+                dlg, "Klaar",
+                f"Hersteld:\n• {bf_n} bigfile-pad{'en' if bf_n != 1 else ''}\n"
+                f"• {fm_n} film-pad{'en' if fm_n != 1 else ''}"
+            )
+            self._initial_load_done = False   # forceer volledige herlaad
+            dlg.accept()
+            self._rescan_and_refresh()
+
+        btn_pick.clicked.connect(_pick)
+        btn_apply.clicked.connect(_apply)
+        btn_close.clicked.connect(dlg.reject)
+        dlg.exec()
 
     # ── Folder scanning ───────────────────────────────────────────────────
 

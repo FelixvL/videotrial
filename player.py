@@ -2408,7 +2408,7 @@ class _VideoFullscreenWindow(QWidget):
 class CineMarker(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("CineMarker")
+        self.setWindowTitle("CineMarker v2")
         self.resize(1400, 900)
 
         self._video_path = None
@@ -3285,7 +3285,7 @@ class CineMarker(QMainWindow):
         film = db.get_or_create_film(path)
         self._actors_overlay.refresh(film['id'])
         self.status.showMessage(f"  {Path(path).name}  •  {path}")
-        self.setWindowTitle(f"CineMarker  —  {Path(path).name}")
+        self.setWindowTitle(f"CineMarker v2  —  {Path(path).name}")
         self._suggest_actors_from_filename(path)
 
     def _suggest_actors_from_filename(self, path: str):
