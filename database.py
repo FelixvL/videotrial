@@ -1377,6 +1377,24 @@ def remap_file_paths(path_map: dict) -> tuple[int, int]:
         bf_count = 0
         fm_count = 0
         for old, new in path_map.items():
+            # Als het nieuwe pad al als leeg record bestaat (app maakte het aan
+            # vóór de herstelactie), verwijder dat dubbelrecord eerst zodat de
+            # UNIQUE constraint niet botst.
+            dup_bf = conn.execute(
+                "SELECT id FROM bigfiles WHERE full_path=?", (new,)
+            ).fetchone()
+            if dup_bf:
+                conn.execute(
+                    "DELETE FROM bigfiles_acteurs WHERE bigfile_id=?", (dup_bf['id'],)
+                )
+                conn.execute("DELETE FROM bigfiles WHERE id=?", (dup_bf['id'],))
+
+            dup_fm = conn.execute(
+                "SELECT id FROM films WHERE file_path=?", (new,)
+            ).fetchone()
+            if dup_fm:
+                conn.execute("DELETE FROM films WHERE id=?", (dup_fm['id'],))
+
             r = conn.execute(
                 "UPDATE bigfiles SET full_path=? WHERE full_path=?", (new, old)
             )
