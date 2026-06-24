@@ -1424,6 +1424,58 @@ def remap_file_paths(path_map: dict) -> tuple[int, int]:
         return bf_count, fm_count
 
 
+def cleanup_duplicate_bigfiles() -> int:
+    """Verwijder dubbele bigfile-records die dezelfde bestandsnaam delen.
+
+    Per filenaam-groep blijft het 'rijkste' record over:
+    bestaat op schijf (100 pt) > heeft thumbnail (10 pt) > acteur-links (1 pt each).
+    Geeft het aantal verwijderde records terug.
+    """
+    from pathlib import Path as _Path
+    with _db() as conn:
+        rows = conn.execute(
+            "SELECT id, full_path, thumbnail_path FROM bigfiles"
+        ).fetchall()
+
+        by_name: dict = {}
+        for r in rows:
+            name = _Path(r['full_path']).name
+            by_name.setdefault(name, []).append(dict(r))
+
+        deleted = 0
+        for name, group in by_name.items():
+            if len(group) <= 1:
+                continue
+
+            def _score(r, _conn=conn, _Path=_Path):
+                # Data-rijkheid wint altijd boven "bestaat op schijf":
+                # een leeg nieuw record (verkeerde letter) mag het origineel
+                # met thumbnail/acteurs nooit verdringen.
+                s = 0
+                if r['thumbnail_path']:
+                    s += 10_000
+                cnt = _conn.execute(
+                    "SELECT COUNT(*) FROM bigfiles_acteurs WHERE bigfile_id=?",
+                    (r['id'],)
+                ).fetchone()[0]
+                s += cnt * 100
+                if _Path(r['full_path']).exists():
+                    s += 1   # tiebreaker bij gelijke data
+                return s
+
+            group.sort(key=_score, reverse=True)
+            for discard in group[1:]:
+                conn.execute(
+                    "DELETE FROM bigfiles_acteurs WHERE bigfile_id=?", (discard['id'],)
+                )
+                conn.execute("DELETE FROM bigfiles WHERE id=?", (discard['id'],))
+                deleted += 1
+
+        if deleted:
+            conn.commit()
+        return deleted
+
+
 def get_bigfiles_for_actor(actor_id: int) -> list:
     """Return all bigfiles linked to this actor via the regular film system.
 

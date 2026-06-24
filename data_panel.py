@@ -757,12 +757,24 @@ class DataPanel(QWidget):
 
         # ── Knoppenrij ────────────────────────────────────────────────────
         btn_row = QHBoxLayout()
+        btn_cleanup = QPushButton("🧹  Opruim duplicaten")
+        btn_cleanup.setFixedHeight(32)
+        btn_cleanup.setToolTip(
+            "Verwijder dubbele DB-records met dezelfde bestandsnaam.\n"
+            "Behoudt het record met de meeste data (thumbnail, acteurs)."
+        )
+        btn_cleanup.setStyleSheet(
+            "QPushButton{background:#1a1a1a;border:1px solid #333;"
+            "border-radius:4px;color:#888;font-size:11px;padding:0 8px;}"
+            "QPushButton:hover{color:#bbb;border-color:#555;}"
+        )
         btn_apply = QPushButton("✓  Toepassen")
         btn_apply.setObjectName("accent")
         btn_apply.setFixedHeight(32)
         btn_apply.setEnabled(False)
         btn_close = QPushButton("Sluiten")
         btn_close.setFixedHeight(32)
+        btn_row.addWidget(btn_cleanup)
         btn_row.addStretch()
         btn_row.addWidget(btn_apply)
         btn_row.addWidget(btn_close)
@@ -778,9 +790,13 @@ class DataPanel(QWidget):
             lbl_stats.repaint()
 
             # Bouw naam→nieuw_pad kaart van alle video's op schijf
+            # Sla de 'deleted'-submap over: gearchiveerde bestanden mogen niet
+            # worden herkoppeld aan actieve DB-records.
             available: dict[str, str] = {}
             try:
                 for p in Path(folder).rglob('*'):
+                    if any(part.lower() == 'deleted' for part in p.parts):
+                        continue
                     if p.suffix.lower() in VIDEO_EXTS:
                         available[p.name] = str(p)
             except OSError:
@@ -861,12 +877,22 @@ class DataPanel(QWidget):
                 f"Hersteld:\n• {bf_n} bigfile-pad{'en' if bf_n != 1 else ''}\n"
                 f"• {fm_n} film-pad{'en' if fm_n != 1 else ''}"
             )
-            self._initial_load_done = False   # forceer volledige herlaad
             dlg.accept()
-            self._rescan_and_refresh()
+            self._refresh()
+
+        def _cleanup():
+            n = db.cleanup_duplicate_bigfiles()
+            QMessageBox.information(
+                dlg, "Opruimen klaar",
+                f"{n} dubbel{'e' if n != 1 else ''} record{'s' if n != 1 else ''} verwijderd."
+                if n else "Geen duplicaten gevonden."
+            )
+            if n:
+                self._refresh()
 
         btn_pick.clicked.connect(_pick)
         btn_apply.clicked.connect(_apply)
+        btn_cleanup.clicked.connect(_cleanup)
         btn_close.clicked.connect(dlg.reject)
         dlg.exec()
 
