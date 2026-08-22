@@ -1085,8 +1085,9 @@ class _FilmEditPanel(QWidget):
         lbl_p = QLabel(); lbl_p.setFixedSize(22, 28)
         lbl_p.setStyleSheet("background:#161616;border-radius:2px;")
         photos = db.get_actor_photos(actor['id'])
-        if photos:
-            raw = QPixmap(photos[0]['photo_path'])
+        _pp = next((p['photo_path'] for p in photos if os.path.exists(p['photo_path'])), '')
+        if _pp:
+            raw = QPixmap(_pp)
             if not raw.isNull():
                 sc = raw.scaled(22, 28,
                     Qt.AspectRatioMode.KeepAspectRatioByExpanding,
@@ -1198,8 +1199,9 @@ class _FilmEditPanel(QWidget):
         lbl_p = QLabel(); lbl_p.setFixedSize(16, 20)
         lbl_p.setStyleSheet("background:#161616;border-radius:2px;")
         photos = db.get_actor_photos(actor['id'])
-        if photos:
-            raw = QPixmap(photos[0]['photo_path'])
+        _pp = next((p['photo_path'] for p in photos if os.path.exists(p['photo_path'])), '')
+        if _pp:
+            raw = QPixmap(_pp)
             if not raw.isNull():
                 sc = raw.scaled(16, 20,
                     Qt.AspectRatioMode.KeepAspectRatioByExpanding,
@@ -1542,7 +1544,8 @@ class _FilmActorsOverlay(QWidget):
             self._actors.append(actor)
             self._selected.add(actor['id'])   # pre-select all film actors
             photos = db.get_actor_photos(actor['id'])
-            path = photos[0]['photo_path'] if photos else ''
+            path = next((p['photo_path'] for p in photos
+                         if os.path.exists(p['photo_path'])), '')
             pix = None
             if path:
                 raw = QPixmap(path)
@@ -1646,7 +1649,7 @@ class _ActorCard(QWidget):
         v.setSpacing(3)
 
         photos = db.get_actor_photos(actor['id'])
-        path = photos[0]['photo_path'] if photos else ''
+        path = next((p['photo_path'] for p in photos if os.path.exists(p['photo_path'])), '')
         v.addWidget(_PhotoWidget(path))
 
         lbl = QLabel(actor.get('name', ''))
@@ -3161,8 +3164,10 @@ class CineMarker(QMainWindow):
             sz     = self._MARKER_SZ_A
             photos = db.get_actor_photos(aid)
             pix    = None
-            if photos:
-                raw = QPixmap(photos[0]['photo_path'])
+            _pp    = next((p['photo_path'] for p in photos
+                           if os.path.exists(p['photo_path'])), '')
+            if _pp:
+                raw = QPixmap(_pp)
                 if not raw.isNull():
                     sc  = raw.scaled(sz, sz,
                               Qt.AspectRatioMode.KeepAspectRatioByExpanding,

@@ -1477,27 +1477,43 @@ def cleanup_duplicate_bigfiles() -> int:
 
 
 def remap_thumbnail_paths_to_current_dir() -> int:
-    """Herstel absolute thumbnail-paden na verplaatsing naar een andere computer.
+    """Herstel absolute padverwijzingen na verplaatsing naar een andere computer.
 
-    Als een opgeslagen pad niet meer bestaat maar het BESTAND wel aanwezig is
-    in de huidige THUMBNAILS_DIR (via bestandsnaam), wordt het pad bijgewerkt.
-    Geeft het aantal bijgewerkte records terug.  Stil no-op als alles klopt.
+    Controleert film-thumbnails, acteurfotos en categorie-iconen.  Als een
+    opgeslagen pad niet meer bestaat maar het bestand via bestandsnaam wél
+    in de huidige doelmap gevonden wordt, wordt het pad bijgewerkt.
+    Geeft het totaal aantal bijgewerkte records terug.  No-op als alles klopt.
     """
-    from paths import THUMBNAILS_DIR
+    from paths import THUMBNAILS_DIR, ACTEURFOTOS_DIR
+
+    # Iconen staan altijd naast de bronbestanden in <app>/iconen/
+    ICONEN_DIR = Path(__file__).parent / 'iconen'
+
     updated = 0
-    with _db() as conn:
-        # film_thumbnails (meerdere thumbnails per film)
-        rows = conn.execute("SELECT id, path FROM film_thumbnails").fetchall()
+
+    def _fix(conn, table: str, col_id: str, col_path: str, target_dir: Path):
+        """Update records in `table` waarvan col_path niet bestaat maar de
+        bestandsnaam wél in target_dir aanwezig is."""
+        nonlocal updated
+        rows = conn.execute(f"SELECT {col_id}, {col_path} FROM {table}").fetchall()
         for row in rows:
-            p = Path(row['path'])
-            if not p.exists():
-                new_p = THUMBNAILS_DIR / p.name
-                if new_p.exists():
-                    conn.execute(
-                        "UPDATE film_thumbnails SET path=? WHERE id=?",
-                        (str(new_p), row['id'])
-                    )
-                    updated += 1
+            raw = row[col_path]
+            if not raw:
+                continue
+            p = Path(raw)
+            if p.exists():
+                continue
+            new_p = target_dir / p.name
+            if new_p.exists():
+                conn.execute(
+                    f"UPDATE {table} SET {col_path}=? WHERE {col_id}=?",
+                    (str(new_p), row[col_id])
+                )
+                updated += 1
+
+    with _db() as conn:
+        # Film-thumbnails (meerdere per film)
+        _fix(conn, 'film_thumbnails', 'id', 'path', THUMBNAILS_DIR)
 
         # films.thumbnail (enkel-thumbnail fallback)
         rows2 = conn.execute(
@@ -1514,6 +1530,13 @@ def remap_thumbnail_paths_to_current_dir() -> int:
                         (str(new_p), row['id'])
                     )
                     updated += 1
+
+        # Acteurfotos
+        _fix(conn, 'actor_photos', 'id', 'photo_path', ACTEURFOTOS_DIR)
+
+        # Categorie-iconen (marker-categorieën en film-categorieën)
+        _fix(conn, 'categories',          'id', 'icon_path', ICONEN_DIR)
+        _fix(conn, 'film_categorie_types', 'id', 'icon_path', ICONEN_DIR)
 
         if updated:
             conn.commit()
