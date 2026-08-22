@@ -5205,6 +5205,7 @@ def main():
     # Migratie van oude locaties naar TE_KOPIEREN/ (eenmalig, stil op de achtergrond)
     migrate_legacy_data()
     ensure_data_dirs()
+    db.remap_thumbnail_paths_to_current_dir()
 
     app = QApplication(sys.argv)
     app.setApplicationName("CineMarker")

@@ -1476,6 +1476,50 @@ def cleanup_duplicate_bigfiles() -> int:
         return deleted
 
 
+def remap_thumbnail_paths_to_current_dir() -> int:
+    """Herstel absolute thumbnail-paden na verplaatsing naar een andere computer.
+
+    Als een opgeslagen pad niet meer bestaat maar het BESTAND wel aanwezig is
+    in de huidige THUMBNAILS_DIR (via bestandsnaam), wordt het pad bijgewerkt.
+    Geeft het aantal bijgewerkte records terug.  Stil no-op als alles klopt.
+    """
+    from paths import THUMBNAILS_DIR
+    updated = 0
+    with _db() as conn:
+        # film_thumbnails (meerdere thumbnails per film)
+        rows = conn.execute("SELECT id, path FROM film_thumbnails").fetchall()
+        for row in rows:
+            p = Path(row['path'])
+            if not p.exists():
+                new_p = THUMBNAILS_DIR / p.name
+                if new_p.exists():
+                    conn.execute(
+                        "UPDATE film_thumbnails SET path=? WHERE id=?",
+                        (str(new_p), row['id'])
+                    )
+                    updated += 1
+
+        # films.thumbnail (enkel-thumbnail fallback)
+        rows2 = conn.execute(
+            "SELECT id, thumbnail FROM films "
+            "WHERE thumbnail != '' AND thumbnail IS NOT NULL"
+        ).fetchall()
+        for row in rows2:
+            p = Path(row['thumbnail'])
+            if not p.exists():
+                new_p = THUMBNAILS_DIR / p.name
+                if new_p.exists():
+                    conn.execute(
+                        "UPDATE films SET thumbnail=? WHERE id=?",
+                        (str(new_p), row['id'])
+                    )
+                    updated += 1
+
+        if updated:
+            conn.commit()
+    return updated
+
+
 def get_bigfiles_for_actor(actor_id: int) -> list:
     """Return all bigfiles linked to this actor via the regular film system.
 
