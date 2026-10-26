@@ -90,7 +90,7 @@ def _update_db_counts(video_path: str, markers: list) -> None:
     """Houd marker_count / neg_marker_count in de DB bij zodat de filmscan
     geen JSON hoeft te lezen. Lazy import: database.py importeert deze module."""
     try:
-        import database as db
+        from . import database as db
         total = len(markers)
         neg   = sum(1 for m in markers if m.get('negative'))
         db.update_film_marker_counts(video_path, total, neg)

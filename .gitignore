@@ -44,3 +44,6 @@ scaled_cache/
 # Legacy locaties (niet meer in gebruik na migratie)
 acteurfotos/
 thumbnails/
+
+# Tests
+.pytest_cache/

@@ -10,8 +10,8 @@ import os
 from contextlib import contextmanager
 from pathlib import Path
 
-from paths import DB_PATH, ACTEURFOTOS_DIR
-from markers_io import load_markers, iter_marker_files, read_marker_file, write_marker_file
+from .paths import DB_PATH, ACTEURFOTOS_DIR, THUMBNAILS_DIR, ICONEN_DIR
+from .markers_io import load_markers, iter_marker_files, read_marker_file, write_marker_file
 
 _log = logging.getLogger('cinemarker.db')
 
@@ -337,12 +337,33 @@ def get_actor(actor_id):
     return dict(row) if row else None
 
 
-def update_actor_meta(actor_id, meta: dict):
-    conn = get_connection()
-    notes = json.dumps(meta, ensure_ascii=False) if meta else ''
-    conn.execute("UPDATE actors SET notes=? WHERE id=?", (notes, actor_id))
-    conn.commit()
-    conn.close()
+def update_actor_meta(actor_id, meta: dict, *, replace: bool = False):
+    """Werk de metadata (notes-JSON) van een acteur bij.
+
+    Standaard worden de gegeven sleutels GEMERGED met de bestaande notes, zodat
+    een scherm dat maar een deel van de velden kent (bv. de beheertabel) de
+    overige velden (piek_start, piek_eind, …) niet wist. Een sleutel met lege
+    waarde ('' of None) verwijdert dat veld. replace=True vervangt alles.
+    """
+    with _db() as conn:
+        if replace:
+            merged = dict(meta or {})
+        else:
+            row = conn.execute("SELECT notes FROM actors WHERE id=?", (actor_id,)).fetchone()
+            try:
+                merged = json.loads(row['notes']) if row and row['notes'] else {}
+            except (ValueError, TypeError):
+                merged = {}
+            if not isinstance(merged, dict):
+                merged = {}
+            for k, v in (meta or {}).items():
+                if v in ('', None):
+                    merged.pop(k, None)
+                else:
+                    merged[k] = v
+        notes = json.dumps(merged, ensure_ascii=False) if merged else ''
+        conn.execute("UPDATE actors SET notes=? WHERE id=?", (notes, actor_id))
+        conn.commit()
 
 
 
@@ -679,7 +700,7 @@ def delete_category(cat_id):
 
 
 # Initialize on import
-init_db()
+# init_db() wordt expliciet aangeroepen door app.main() (niet meer bij import).
 
 
 # ── Actor Kleuren ─────────────────────────────
@@ -698,6 +719,13 @@ def create_actor_kleur(naam: str, hex_color: str = '') -> int:
         )
         conn.commit()
         return cur.lastrowid
+
+
+def update_actor_kleur(kleur_id: int, naam: str, hex_color: str = ''):
+    with _db() as conn:
+        conn.execute("UPDATE actor_kleuren SET naam=?, hex=? WHERE id=?",
+                     (naam, hex_color, kleur_id))
+        conn.commit()
 
 
 def delete_actor_kleur(kleur_id: int):
@@ -734,6 +762,15 @@ def create_actor_trait_type(naam: str, type: str = 'beide') -> int:
         )
         conn.commit()
         return cur.lastrowid
+
+
+def update_actor_trait_type(trait_id: int, naam: str, type: str = 'beide'):
+    if type not in ('beide', 'positief', 'negatief'):
+        type = 'beide'
+    with _db() as conn:
+        conn.execute("UPDATE actor_trait_types SET naam=?, type=? WHERE id=?",
+                     (naam, type, trait_id))
+        conn.commit()
 
 
 def delete_actor_trait_type(trait_id: int):
@@ -1470,11 +1507,6 @@ def remap_thumbnail_paths_to_current_dir() -> int:
     in de huidige doelmap gevonden wordt, wordt het pad bijgewerkt.
     Geeft het totaal aantal bijgewerkte records terug.  No-op als alles klopt.
     """
-    from paths import THUMBNAILS_DIR, ACTEURFOTOS_DIR
-
-    # Iconen staan altijd naast de bronbestanden in <app>/iconen/
-    ICONEN_DIR = Path(__file__).parent / 'iconen'
-
     updated = 0
 
     def _fix(conn, table: str, col_id: str, col_path: str, target_dir: Path):
@@ -1550,4 +1582,3 @@ def get_bigfiles_for_actor(actor_id: int) -> list:
         return [dict(r) for r in rows]
 
 
-auto_link_actor_photos()

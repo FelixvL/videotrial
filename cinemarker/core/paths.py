@@ -4,21 +4,29 @@ CineMarker — centrale paaddefinities
 
 Alle data die je moet kopiëren/backuppen staat in TE_KOPIEREN/.
 De code (git repo) staat ernaast en is volledig apart.
+
+Tests kunnen de datamap verleggen met de omgevingsvariabele
+CINEMARKER_DATA_ROOT (moet gezet zijn vóór deze module geïmporteerd wordt).
 """
 
+from __future__ import annotations
+
+import os
 from pathlib import Path
 
-# Root van de applicatie (waar player.py e.d. staan)
-APP_ROOT = Path(__file__).parent.resolve()
+# Root van de applicatie (de map met main.py); dit bestand staat in cinemarker/core/
+APP_ROOT = Path(__file__).resolve().parents[2]
 
 # Alles wat je moet kopiëren bij verhuizen naar een andere computer
-DATA_ROOT = APP_ROOT / 'TE_KOPIEREN'
+_env_root = os.environ.get('CINEMARKER_DATA_ROOT')
+DATA_ROOT = Path(_env_root).resolve() if _env_root else APP_ROOT / 'TE_KOPIEREN'
 
 # Sub-mappen binnen TE_KOPIEREN
 DB_PATH        = DATA_ROOT / 'cinemarker.db'
 ACTEURFOTOS_DIR = DATA_ROOT / 'acteurfotos'
 THUMBNAILS_DIR      = DATA_ROOT / 'thumbnails'
-MARKER_THUMBS_DIR   = THUMBNAILS_DIR / 'markers'   # gedeeld door markers_panel én actors_panel
+MARKER_THUMBS_DIR   = THUMBNAILS_DIR / 'markers'   # gedeeld door markers-paneel én acteurs-detail
+ICONEN_DIR          = DATA_ROOT / 'iconen'          # categorie-iconen (gekozen via bestandsdialoog)
 
 # Lokale schaalcache — weggooimap, NIET kopiëren (snel te herberekenen)
 _SCALED_CACHE_ROOT     = APP_ROOT / 'scaled_cache'
@@ -37,6 +45,7 @@ def ensure_data_dirs():
     ACTEURFOTOS_DIR.mkdir(parents=True, exist_ok=True)
     THUMBNAILS_DIR.mkdir(parents=True, exist_ok=True)
     MARKER_THUMBS_DIR.mkdir(parents=True, exist_ok=True)
+    ICONEN_DIR.mkdir(parents=True, exist_ok=True)
     SCALED_FILM_THUMBS_DIR.mkdir(parents=True, exist_ok=True)
     SCALED_ACTOR_GRID_DIR.mkdir(parents=True, exist_ok=True)
     SCALED_ACTOR_CARDS_DIR.mkdir(parents=True, exist_ok=True)
@@ -104,7 +113,8 @@ def migrate_legacy_data():
 
     # 4. Vul marker-tellingen in DB vanuit bestaande JSON-bestanden (eenmalig)
     try:
-        import database as _db
+        from . import database as _db
+        _db.init_db()
         film_folder = _db.get_setting('film_folder', '')
         if film_folder:
             _db.populate_marker_counts_from_json(film_folder)
