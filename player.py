@@ -67,6 +67,7 @@ from markers_panel import MarkersPanel
 from data_panel import DataPanel
 import database as db
 from paths import THUMBNAILS_DIR, BIGFILES_DIR, ensure_data_dirs, migrate_legacy_data
+from markers_io import load_markers, save_markers
 
 
 # ─────────────────────────────────────────────
@@ -93,30 +94,7 @@ def _fmt_hms(seconds: float) -> str:
     return f"{h:02d}:{m:02d}:{s:02d}"
 
 
-def markers_file_for(video_path: str) -> str:
-    p = Path(video_path)
-    return str(p.parent / f".{p.stem}_markers.json")
-
-
-def load_markers(video_path: str) -> list:
-    path = markers_file_for(video_path)
-    if os.path.exists(path):
-        with open(path, 'r') as f:
-            return json.load(f)
-    return []
-
-
-def save_markers(video_path: str, markers: list):
-    path = markers_file_for(video_path)
-    with open(path, 'w') as f:
-        json.dump(markers, f, indent=2)
-    # Houd DB-tellers bij zodat _scan_folder geen JSON hoeft te lezen
-    total = len(markers)
-    neg   = sum(1 for m in markers if m.get('negative'))
-    try:
-        db.update_film_marker_counts(video_path, total, neg)
-    except Exception:
-        pass
+# Marker-IO (lezen/schrijven van .<naam>_markers.json) zit centraal in markers_io.py
 
 
 # ─────────────────────────────────────────────
@@ -4483,8 +4461,6 @@ class CineMarker(QMainWindow):
 
     def _edit_marker_from_panel(self, marker: dict, film_path: str):
         """Bewerk een marker vanuit het markers-tabblad (context menu ✎)."""
-        import json as _json
-        from pathlib import Path as _Path
         actors = [db.get_actor(aid) for aid in (marker.get('actors') or [])]
         actors = [a for a in actors if a]
         cats   = db.get_all_categories()
@@ -4504,13 +4480,8 @@ class CineMarker(QMainWindow):
                               initial_film_cat_ids=_fc_cur_p)
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
-        p  = _Path(film_path)
-        mf = p.parent / f".{p.stem}_markers.json"
-        if not mf.exists():
-            return
-        try:
-            markers = _json.loads(mf.read_text('utf-8'))
-        except Exception:
+        markers = load_markers(film_path)
+        if not markers:
             return
         target_time = marker.get('time')
         if dlg.was_deleted():
@@ -4523,11 +4494,11 @@ class CineMarker(QMainWindow):
                     m['categories'] = [chosen_cat['id']] if chosen_cat else m.get('categories', [])
                     m['stars']      = new_stars if new_stars > 0 else None
                     break
-        mf.write_text(_json.dumps(markers, ensure_ascii=False, indent=2), 'utf-8')
+        save_markers(film_path, markers)
         self._recalc_film_rating(film_path)
         self.markers_panel.mark_dirty()
         # Als de film ook open staat in de speler, herlaad de markerlijst
-        if self._video_path and str(_Path(self._video_path).resolve()) == str(p.resolve()):
+        if self._video_path and Path(self._video_path).resolve() == Path(film_path).resolve():
             self._markers = markers
             self._refresh_marker_list()
 

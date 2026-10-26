@@ -5,7 +5,6 @@ Toont alle markers van alle acteurs in alle films, filterbaar op categorie en ac
 """
 
 import os
-import json
 import random
 from pathlib import Path
 
@@ -20,6 +19,7 @@ from PyQt6.QtGui import QPixmap, QColor, QIcon
 import database as db
 from actors_panel import FrameExtractWorker, MarkerGridDelegate
 from paths import MARKER_THUMBS_DIR
+from markers_io import load_markers, save_markers
 
 
 # ─────────────────────────────────────────────
@@ -233,11 +233,15 @@ class MarkersPanel(QWidget):
         self._stars_filter:       set = set()   # sterren strings '1'-'5'
 
         # Sort state
-        self._sort_field: str = ''   # '' = bestandsvolgorde, 'film', 'tijd', 'sterren'
+        self._sort_field: str = ''   # '' | 'film'|'tijd'|'sterren'|'acteur'|
+                                     #    'decade'|'maat'|'filmgr'|'rating'|'shuffle'
         self._sort_asc:   bool = True
 
         # Text search
         self._search_text: str = ''
+
+        # Cache: filtered+sorted entries matching the current grid (voor afspelen)
+        self._sorted_entries: list = []
 
         # Internals
         self._all_items:   list = []
@@ -294,7 +298,17 @@ class MarkersPanel(QWidget):
         th.addWidget(self._search_input)
 
         # Sorteerknopen
-        for field, label in [('film', 'Film'), ('tijd', 'Tijd'), ('sterren', 'Sterren')]:
+        _sort_defs = [
+            ('film',    'Film'),
+            ('tijd',    'Tijd'),
+            ('sterren', '★'),
+            ('acteur',  'Acteur'),
+            ('decade',  'Decade'),
+            ('maat',    'Maat'),
+            ('filmgr',  'Filmgr.'),
+            ('rating',  'Rating'),
+        ]
+        for field, label in _sort_defs:
             btn = QPushButton(label)
             btn.setFixedHeight(28)
             btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
@@ -302,6 +316,16 @@ class MarkersPanel(QWidget):
             btn.clicked.connect(lambda checked, f=field: self._on_sort_click(f))
             self._sort_btns[field] = btn
             th.addWidget(btn)
+
+        # Shuffle-knop (apart: geen asc/desc, randomiseert direct)
+        btn_shuffle = QPushButton("🔀")
+        btn_shuffle.setFixedSize(28, 28)
+        btn_shuffle.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        btn_shuffle.setToolTip("Willekeurige volgorde")
+        btn_shuffle.setStyleSheet(self._SS_SORT_OFF)
+        btn_shuffle.clicked.connect(self._on_shuffle_click)
+        self._sort_btns['shuffle'] = btn_shuffle
+        th.addWidget(btn_shuffle)
 
         # Reset knop
         btn_reset = QPushButton("⊘")
@@ -542,14 +566,37 @@ class MarkersPanel(QWidget):
         self._update_sort_buttons()
         self._apply_filters()
 
+    def _on_shuffle_click(self):
+        """Shuffle: één klik = actief, tweede klik = uit."""
+        if self._sort_field == 'shuffle':
+            self._sort_field = ''
+        else:
+            self._sort_field = 'shuffle'
+            self._sort_asc = True
+        self._update_sort_buttons()
+        self._apply_filters()
+
     def _update_sort_buttons(self):
-        labels = {'film': 'Film', 'tijd': 'Tijd', 'sterren': 'Sterren'}
+        labels = {
+            'film':    'Film',
+            'tijd':    'Tijd',
+            'sterren': '★',
+            'acteur':  'Acteur',
+            'decade':  'Decade',
+            'maat':    'Maat',
+            'filmgr':  'Filmgr.',
+            'rating':  'Rating',
+            'shuffle': '🔀',
+        }
         for f, btn in self._sort_btns.items():
             if f == self._sort_field:
-                btn.setText(labels[f] + (' ↑' if self._sort_asc else ' ↓'))
-                btn.setStyleSheet(self._SS_SORT_ON)
+                if f == 'shuffle':
+                    btn.setStyleSheet(self._SS_SORT_ON)
+                else:
+                    btn.setText(labels[f] + (' ↑' if self._sort_asc else ' ↓'))
+                    btn.setStyleSheet(self._SS_SORT_ON)
             else:
-                btn.setText(labels[f])
+                btn.setText(labels.get(f, f))
                 btn.setStyleSheet(self._SS_SORT_OFF)
 
     # ── Reset ────────────────────────────────────────────────────
@@ -670,10 +717,12 @@ class MarkersPanel(QWidget):
         self._actor_meta_map  = db.get_actor_metadata_batch()
         self._film_cat_map    = db.get_film_category_ids_batch()
         all_films             = db.get_all_films()
-        self._film_path_to_id = {f['file_path']: f['id']
-                                 for f in all_films if f.get('file_path')}
-        self._film_size_map   = {f['file_path']: (f.get('file_size') or 0)
-                                 for f in all_films if f.get('file_path')}
+        self._film_path_to_id  = {f['file_path']: f['id']
+                                  for f in all_films if f.get('file_path')}
+        self._film_size_map    = {f['file_path']: (f.get('file_size') or 0)
+                                  for f in all_films if f.get('file_path')}
+        self._film_rating_map  = {f['file_path']: float(f.get('afgeleide_rating') or 0)
+                                  for f in all_films if f.get('file_path')}
 
         # ── Populate dynamische dropdowns ────────────────────────
         trait_items   = [(t['id'], t['naam'])  for t in db.get_actor_trait_types()]
@@ -687,13 +736,9 @@ class MarkersPanel(QWidget):
             fp = film.get('file_path', '')
             if not fp or not os.path.exists(fp):
                 continue
-            p  = Path(fp)
-            mf = p.parent / f".{p.stem}_markers.json"
-            if not mf.exists():
-                continue
-            try:
-                markers = json.loads(mf.read_text('utf-8'))
-            except Exception:
+            p = Path(fp)
+            markers = load_markers(fp)
+            if not markers:
                 continue
 
             for m in markers:
@@ -814,24 +859,69 @@ class MarkersPanel(QWidget):
                               for a in e['actor_objs'])]
 
         # Sortering
+        rev = not self._sort_asc
         if self._sort_field == 'film':
             entries = sorted(
                 entries,
                 key=lambda e: (e['film_name'].lower(), e['marker'].get('time', 0.0)),
-                reverse=not self._sort_asc,
+                reverse=rev,
             )
         elif self._sort_field == 'tijd':
             entries = sorted(
                 entries,
                 key=lambda e: e['marker'].get('time', 0.0),
-                reverse=not self._sort_asc,
+                reverse=rev,
             )
         elif self._sort_field == 'sterren':
             entries = sorted(
                 entries,
                 key=lambda e: int(e['marker'].get('stars') or 0),
-                reverse=not self._sort_asc,
+                reverse=rev,
             )
+        elif self._sort_field == 'acteur':
+            entries = sorted(
+                entries,
+                key=lambda e: (e['actor_objs'][0]['name'].lower()
+                               if e['actor_objs'] else ''),
+                reverse=rev,
+            )
+        elif self._sort_field == 'decade':
+            entries = sorted(
+                entries,
+                key=lambda e: next(
+                    (int(self._actor_meta_map.get(aid, {}).get('decennia') or 0)
+                     for aid in e['actor_ids']
+                     if self._actor_meta_map.get(aid, {}).get('decennia')),
+                    0
+                ),
+                reverse=rev,
+            )
+        elif self._sort_field == 'maat':
+            entries = sorted(
+                entries,
+                key=lambda e: next(
+                    (int(self._actor_meta_map.get(aid, {}).get('grootte') or 0)
+                     for aid in e['actor_ids']
+                     if self._actor_meta_map.get(aid, {}).get('grootte')),
+                    0
+                ),
+                reverse=rev,
+            )
+        elif self._sort_field == 'filmgr':
+            entries = sorted(
+                entries,
+                key=lambda e: self._film_size_map.get(e['film_path'], 0),
+                reverse=rev,
+            )
+        elif self._sort_field == 'rating':
+            entries = sorted(
+                entries,
+                key=lambda e: self._film_rating_map.get(e['film_path'], 0.0),
+                reverse=rev,
+            )
+        elif self._sort_field == 'shuffle':
+            entries = list(entries)
+            random.shuffle(entries)
         # Geen sorteerveld → behoud bestandsvolgorde
 
         return entries
@@ -927,6 +1017,7 @@ class MarkersPanel(QWidget):
         self._all_items.clear()
 
         entries = self._filtered_entries()
+        self._sorted_entries = entries  # afspeelvolgorde = weergavevolgorde
 
         cache_dir = MARKER_THUMBS_DIR
         cache_dir.mkdir(parents=True, exist_ok=True)
@@ -1016,8 +1107,8 @@ class MarkersPanel(QWidget):
             pass  # item al verwijderd door nieuwe filter
 
     def _emit_play_selection(self):
-        """Stuur de gefilterde entries naar de speler als afspeellijst."""
-        entries = self._filtered_entries()
+        """Stuur de entries in grid-volgorde naar de speler als afspeellijst."""
+        entries = self._sorted_entries or self._filtered_entries()
         if entries:
             self.play_selection_requested.emit(entries, self._interval_input.value())
 
@@ -1057,18 +1148,12 @@ class MarkersPanel(QWidget):
 
     def _delete_marker_in_file(self, marker: dict, film_path: str):
         """Verwijder een marker uit het JSON-bestand en vernieuw het grid."""
-        import json as _json
-        p  = Path(film_path)
-        mf = p.parent / f".{p.stem}_markers.json"
-        if not mf.exists():
-            return
-        try:
-            markers = _json.loads(mf.read_text('utf-8'))
-        except Exception:
+        markers = load_markers(film_path)
+        if not markers:
             return
         target_time = marker.get('time')
         markers = [m for m in markers if m.get('time') != target_time]
-        mf.write_text(_json.dumps(markers, ensure_ascii=False, indent=2), 'utf-8')
+        save_markers(film_path, markers)
         # Herbereken afgeleide_rating na verwijderen
         try:
             total = sum(int(m.get('stars') or 0)

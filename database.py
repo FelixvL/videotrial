@@ -11,6 +11,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from paths import DB_PATH, ACTEURFOTOS_DIR
+from markers_io import load_markers, iter_marker_files, read_marker_file, write_marker_file
 
 _log = logging.getLogger('cinemarker.db')
 
@@ -357,25 +358,16 @@ def _cleanup_id_from_marker_jsons(field: str, remove_id: int):
     film_folder = get_setting('film_folder', '')
     if not film_folder or not os.path.isdir(film_folder):
         return
-    try:
-        for p in Path(film_folder).rglob('*_markers.json'):
-            try:
-                data = json.loads(p.read_text(encoding='utf-8'))
-                changed = False
-                for m in data:
-                    lst = m.get(field) or []
-                    if remove_id in lst:
-                        m[field] = [x for x in lst if x != remove_id]
-                        changed = True
-                if changed:
-                    p.write_text(
-                        json.dumps(data, indent=2, ensure_ascii=False),
-                        encoding='utf-8'
-                    )
-            except Exception:
-                pass  # beschadigde of niet-gerelateerde JSON: stil negeren
-    except Exception:
-        pass
+    for p in iter_marker_files(film_folder):
+        data = read_marker_file(p)
+        changed = False
+        for m in data:
+            lst = m.get(field) or []
+            if remove_id in lst:
+                m[field] = [x for x in lst if x != remove_id]
+                changed = True
+        if changed:
+            write_marker_file(p, data)
 
 
 def delete_actor(actor_id):
@@ -509,17 +501,11 @@ def populate_marker_counts_from_json(film_folder: str):
     conn.close()
 
     for film in films:
-        fp = Path(film['file_path'])
-        mf = fp.parent / f".{fp.stem}_markers.json"
-        if mf.exists():
-            try:
-                markers = json.loads(mf.read_text('utf-8'))
-                total = len(markers)
-                neg   = sum(1 for m in markers if m.get('negative'))
-                if total > 0:
-                    update_film_marker_counts(film['file_path'], total, neg)
-            except Exception:
-                pass
+        markers = load_markers(film['file_path'])
+        total = len(markers)
+        neg   = sum(1 for m in markers if m.get('negative'))
+        if total > 0:
+            update_film_marker_counts(film['file_path'], total, neg)
 
 
 def get_film(film_id):

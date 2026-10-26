@@ -26,6 +26,7 @@ import database as db
 from films_panel import (FilmGridDelegate as _FilmGridDelegate,
                          load_scaled_cache, save_scaled_cache)
 from paths import THUMBNAILS_DIR, MARKER_THUMBS_DIR, SCALED_ACTOR_CARDS_DIR
+from markers_io import load_markers, save_markers, iter_marker_files, read_marker_file
 
 
 class _ActorScanWorker(QThread):
@@ -103,16 +104,9 @@ def _count_actor_markers(actor_id: int, films: list) -> int:
     """
     count = 0
     for film in films:
-        p = Path(film['file_path'])
-        mf = p.parent / f".{p.stem}_markers.json"
-        if mf.exists():
-            try:
-                import json as _json
-                for m in _json.load(open(str(mf), 'r')):
-                    if actor_id in (m.get('actors') or []):
-                        count += 1
-            except Exception:
-                pass
+        for m in load_markers(film['file_path']):
+            if actor_id in (m.get('actors') or []):
+                count += 1
     return count
 
 
@@ -123,19 +117,10 @@ def _batch_marker_counts(film_folder: str) -> dict:
     Veel sneller dan per-acteur inlezen bij grote bibliotheken.
     """
     counts: dict[int, int] = {}
-    if not film_folder:
-        return counts
-    try:
-        for mf in Path(film_folder).rglob('*_markers.json'):
-            try:
-                with open(str(mf), 'r', encoding='utf-8') as fh:
-                    for m in json.load(fh):
-                        for aid in (m.get('actors') or []):
-                            counts[aid] = counts.get(aid, 0) + 1
-            except Exception:
-                pass
-    except OSError:
-        pass
+    for mf in iter_marker_files(film_folder):
+        for m in read_marker_file(mf):
+            for aid in (m.get('actors') or []):
+                counts[aid] = counts.get(aid, 0) + 1
     return counts
 
 
@@ -153,42 +138,73 @@ class FrameExtractWorker(QThread):
         # tasks: [(row_idx, film_path, time_sec, cache_path), ...]
         self._tasks = tasks
         self._stop  = False
+        self._proc  = None   # huidig ffmpeg-proces (voor onmiddellijk stoppen)
 
     def stop(self):
+        """Zet stopvlag EN kill het lopende ffmpeg-proces zodat de thread
+        direct stopt — niet pas na de huidige 30-seconden timeout."""
         self._stop = True
+        proc = self._proc
+        if proc is not None:
+            try:
+                proc.kill()
+            except Exception:
+                pass
 
     # Target resolution for extracted frames — wide enough for all zoom levels
     THUMB_W = 320
     THUMB_H = 180
+
+    def _run_ffmpeg(self, args: list) -> bool:
+        """Start ffmpeg, wacht max 30s, geeft True terug bij succes.
+        Kan onmiddellijk afgebroken worden via stop()."""
+        try:
+            self._proc = subprocess.Popen(
+                args,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            try:
+                self._proc.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                self._proc.kill()
+                self._proc.wait()
+            rc = self._proc.returncode
+            self._proc = None
+            return rc == 0
+        except Exception:
+            self._proc = None
+            return False
 
     def run(self):
         for row_idx, film_path, time_sec, cache_path in self._tasks:
             if self._stop:
                 break
             if not os.path.exists(cache_path):
-                try:
-                    scale = f"scale={self.THUMB_W}:{self.THUMB_H}"
-                    result = subprocess.run([
+                scale = f"scale={self.THUMB_W}:{self.THUMB_H}"
+                ok = self._run_ffmpeg([
+                    'ffmpeg', '-y',
+                    '-ss', str(time_sec),
+                    '-i', film_path,
+                    '-frames:v', '1',
+                    '-vf', scale,
+                    '-q:v', '2',
+                    cache_path,
+                ])
+                if self._stop:
+                    break
+                # Fallback: extract without scale filter (handles unusual formats)
+                if not ok or not os.path.exists(cache_path):
+                    self._run_ffmpeg([
                         'ffmpeg', '-y',
                         '-ss', str(time_sec),
                         '-i', film_path,
                         '-frames:v', '1',
-                        '-vf', scale,
                         '-q:v', '2',
                         cache_path,
-                    ], capture_output=True, timeout=30)
-                    # Fallback: extract without scale filter (handles unusual formats)
-                    if result.returncode != 0 or not os.path.exists(cache_path):
-                        subprocess.run([
-                            'ffmpeg', '-y',
-                            '-ss', str(time_sec),
-                            '-i', film_path,
-                            '-frames:v', '1',
-                            '-q:v', '2',
-                            cache_path,
-                        ], capture_output=True, timeout=30)
-                except Exception:
-                    continue
+                    ])
+                if self._stop:
+                    break
             if os.path.exists(cache_path):
                 self.frame_ready.emit(row_idx, cache_path)
 
@@ -1373,7 +1389,7 @@ class ActorDetailView(QWidget):
         cw, ch = self._markers_zoom_size()
 
         for film in db.get_films_for_actor(actor_id):
-            for m in self._load_markers(film['file_path']):
+            for m in load_markers(film['file_path']):
                 if actor_id not in (m.get('actors') or []):
                     continue
 
@@ -1527,28 +1543,6 @@ class ActorDetailView(QWidget):
 
             item.setHidden(False)
 
-    @staticmethod
-    def _load_markers(video_path: str) -> list:
-        p = Path(video_path)
-        mf = p.parent / f".{p.stem}_markers.json"
-        if mf.exists():
-            try:
-                with open(str(mf), 'r') as f:
-                    return json.load(f)
-            except Exception:
-                return []
-        return []
-
-    @staticmethod
-    def _save_markers(video_path: str, markers: list):
-        p = Path(video_path)
-        mf = p.parent / f".{p.stem}_markers.json"
-        try:
-            with open(str(mf), 'w') as f:
-                json.dump(markers, f, indent=2)
-        except Exception:
-            pass
-
     def _remove_actor_from_marker(self, data: dict):
         """Remove the current actor from the marker described by `data`."""
         if not self._actor:
@@ -1558,7 +1552,7 @@ class ActorDetailView(QWidget):
         if not film_path or time_val is None:
             return
         actor_id = self._actor['id']
-        markers  = self._load_markers(film_path)
+        markers  = load_markers(film_path)
         changed  = False
         for m in markers:
             if abs(m.get('time', -1) - time_val) < 0.01:
@@ -1568,7 +1562,7 @@ class ActorDetailView(QWidget):
                     m['actors'] = actors
                     changed = True
         if changed:
-            self._save_markers(film_path, markers)
+            save_markers(film_path, markers)
             self._refresh_markers()
 
     def _set_combo(self, combo: QComboBox, value: str):

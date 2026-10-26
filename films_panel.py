@@ -25,6 +25,7 @@ import database as db
 from paths import (ensure_volume_id,
                    SCALED_FILM_THUMBS_DIR, SCALED_ACTOR_GRID_DIR,
                    MARKER_THUMBS_DIR)
+from markers_io import load_markers, markers_file_for
 
 
 VIDEO_EXTS = {
@@ -1540,15 +1541,10 @@ class FilmsPanel(QWidget):
             markers     = db_film.get('marker_count',     0) or 0
             neg_markers = db_film.get('neg_marker_count', 0) or 0
             marker_cat_ids: set = set()
-            mj = fp.parent / f".{fp.stem}_markers.json"
-            if mj.exists():
-                try:
-                    for m in json.loads(mj.read_text(encoding='utf-8')):
-                        if not m.get('negative'):
-                            for cid in (m.get('categories') or []):
-                                marker_cat_ids.add(cid)
-                except Exception:
-                    pass
+            for m in load_markers(fp):
+                if not m.get('negative'):
+                    for cid in (m.get('categories') or []):
+                        marker_cat_ids.add(cid)
             # Actor-count + foto-paden uit batch (geen DB-queries in paint())
             actor_count  = all_actor_counts.get(film_id, 0) if film_id else 0
             actor_photos = all_actor_photos.get(film_id, []) if film_id else []
@@ -2002,7 +1998,7 @@ class FilmsPanel(QWidget):
                 return False, f"Kan bestand niet verplaatsen:\n{e}"
 
             # Move markers JSON alongside the film
-            mf = p.parent / f".{p.stem}_markers.json"
+            mf = markers_file_for(p)
             if mf.exists():
                 try:
                     mf.rename(deleted_dir / mf.name)
