@@ -302,7 +302,7 @@ class PlayerPanel(QWidget):
     def play_selection(self, entries: list[MarkerEntry], interval_sec: int) -> None:
         if not entries:
             return
-        self._selection = sorted(entries, key=lambda e: (e.film_path, e.time))
+        self._selection = list(entries)          # volgorde = de gefilterde en gesorteerde weergave in Markers
         self._row = 0
         self._auto_sec = int(interval_sec)
         self.win.show_tab("player")
