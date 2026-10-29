@@ -87,8 +87,8 @@ def main(argv: list[str] | None = None) -> int:
     app = QApplication(argv if argv is not None else sys.argv)
     app.setApplicationName("CineMarker")
     app.setOrganizationName("CineMarker")
-    font = QFont("Segoe UI", 10)
-    font.setPixelSize(T.FONT_SIZE)
+    font = QFont("Segoe UI")
+    font.setPointSizeF(T.FONT_SIZE * 72 / 96)      # 13 px bij 96 dpi; puntgrootte houdt Qt-widgets tevreden
     app.setFont(font)
     app.setStyleSheet(build_stylesheet())
 

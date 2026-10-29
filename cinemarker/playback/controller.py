@@ -135,15 +135,29 @@ class PlayerController(QObject):
         self.neg_zones = []
         self._stop_reverse(silent=True)
         self.speed = 1.0
-        try:
-            if start is not None and start > 0:
-                self.mpv.command("loadfile", path, "replace", 0, {"start": str(round(start, 3))})
-            else:
+        loaded = False
+        if start is not None and start > 0:
+            # De signatuur van 'loadfile' verschilt per mpv-versie; probeer de varianten en val
+            # anders terug op gewoon laden (de aanroeper seekt dan via seek_when_ready).
+            opt = f"start={round(start, 3)}"
+            for args in (("loadfile", path, "replace", 0, opt), ("loadfile", path, "replace", opt)):
+                try:
+                    self.mpv.command(*args)
+                    loaded = True
+                    break
+                except Exception as e:  # noqa: BLE001
+                    _log.debug("loadfile-variant %s mislukt: %s", args[2:], e)
+        if not loaded:
+            try:
                 self.mpv.play(path)
+            except Exception as e:  # noqa: BLE001 — mpv-fouten mogen de UI niet laten crashen
+                _log.error("Laden mislukt (%s): %s", path, e)
+                return
+        try:
             self.mpv.speed = 1.0
             self.mpv.pause = False
-        except Exception as e:  # noqa: BLE001 — mpv-fouten mogen de UI niet laten crashen
-            _log.error("Laden mislukt (%s): %s", path, e)
+        except Exception as e:  # noqa: BLE001
+            _log.debug("speed/pause na laden: %s", e)
         self.speed_changed.emit(1.0)
 
     def stop(self) -> None:
