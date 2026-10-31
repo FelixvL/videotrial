@@ -114,13 +114,25 @@ class ActorCardDelegate(QStyledItemDelegate):
                 painter.drawPixmap(x, badge.y() + 4, icons.pixmap("star-filled", STAR, T.GOLD))
                 x += STAR + 1
 
-        # decennium linksboven
+        # rating (cijfer, medaillekleur) en decennium linksboven
+        painter.setFont(_font(base_font, T.FONT_SIZE_SM, bold=True))
+        fm = painter.fontMetrics()
+        bx = r.x() + 3
+        if card.meta.rating > 0:
+            txt = str(card.meta.rating)
+            col = RATING_BORDER.get(card.meta.rating, (T.TEXT,))[0]
+            bw = fm.horizontalAdvance(txt) + 12
+            badge = QRect(bx, r.y() + 3, bw, fm.height() + 4)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(*T.OVERLAY_DARK))
+            painter.drawRoundedRect(badge, 4, 4)
+            painter.setPen(QColor(col))
+            painter.drawText(badge, Qt.AlignmentFlag.AlignCenter, txt)
+            bx += bw + 3
         dec = decade_label(card.meta.decennia)
         if dec:
-            painter.setFont(_font(base_font, T.FONT_SIZE_SM, bold=True))
-            fm = painter.fontMetrics()
             bw = fm.horizontalAdvance(dec) + 10
-            badge = QRect(r.x() + 3, r.y() + 3, bw, fm.height() + 4)
+            badge = QRect(bx, r.y() + 3, bw, fm.height() + 4)
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(QColor(*T.OVERLAY_DARK))
             painter.drawRoundedRect(badge, 4, 4)

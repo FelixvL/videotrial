@@ -42,17 +42,19 @@ class FilmCriteria:
     film_size: set[str] = field(default_factory=set)
     # cross-entity (via de database)
     actor_groo: set[str] = field(default_factory=set)
+    actor_rating: set[str] = field(default_factory=set)
     film_cats: set[int] = field(default_factory=set)
     actor_kleur: set[str] = field(default_factory=set)
     actor_dec: set[str] = field(default_factory=set)
     actors: dict[int, str] = field(default_factory=dict)      # id → weergavenaam
 
     def needs_cross(self) -> bool:
-        return bool(self.actor_groo or self.film_cats or self.actor_kleur or self.actor_dec or self.actors)
+        return bool(self.actor_groo or self.actor_rating or self.film_cats or self.actor_kleur or self.actor_dec
+                    or self.actors)
 
     def cross_key(self) -> tuple:
-        return (frozenset(self.actor_groo), frozenset(self.film_cats), frozenset(self.actor_kleur),
-                frozenset(self.actor_dec), frozenset(self.actors))
+        return (frozenset(self.actor_groo), frozenset(self.actor_rating), frozenset(self.film_cats),
+                frozenset(self.actor_kleur), frozenset(self.actor_dec), frozenset(self.actors))
 
     def is_empty(self) -> bool:
         return not any((self.search.strip(), self.dur_min.strip(), self.dur_max.strip(), self.sz_min.strip(),
@@ -65,6 +67,7 @@ class FilmCriteria:
             "search": self.search, "dur_min": self.dur_min, "dur_max": self.dur_max,
             "sz_min": self.sz_min, "sz_max": self.sz_max,
             "flt_actor_groo": sorted(self.actor_groo),
+            "flt_actor_rating": sorted(self.actor_rating),
             "flt_1thumb": self.one_thumb, "flt_multithumb": self.multi_thumb, "flt_no_thumb": self.no_thumb,
             "flt_with_markers": self.with_markers, "flt_no_markers": self.no_markers,
             "flt_film_cats": sorted(self.film_cats), "flt_actor_kleur": sorted(self.actor_kleur),
@@ -91,6 +94,7 @@ class FilmCriteria:
             marker_cats={int(x) for x in d.get("flt_marker_cats") or []},
             film_size={str(x) for x in d.get("flt_film_size") or []},
             actor_groo={str(x) for x in d.get("flt_actor_groo") or []},
+            actor_rating={str(x) for x in d.get("flt_actor_rating") or []},
             film_cats={int(x) for x in d.get("flt_film_cats") or []},
             actor_kleur={str(x) for x in d.get("flt_actor_kleur") or []},
             actor_dec={str(x) for x in d.get("flt_actor_dec") or []},
@@ -112,6 +116,8 @@ def compute_cross_film_ids(crit: FilmCriteria) -> set[int] | None:
         _and(db.get_film_ids_by_actor_kleuren(sorted(crit.actor_kleur)))
     if crit.actor_groo:
         _and(db.get_film_ids_by_actor_grootte_exact(set(crit.actor_groo)))
+    if crit.actor_rating:
+        _and(db.get_film_ids_by_actor_rating(set(crit.actor_rating)))
     if crit.actor_dec:
         _and(db.get_film_ids_by_actor_decennia(sorted(crit.actor_dec)))
     if crit.actors:
@@ -179,6 +185,7 @@ def sort_film_cards(cards: list[FilmCard], key: str, ascending: bool) -> list[Fi
 # ── Acteurs ─────────────────────────────────────────────────────────────────
 
 ACTOR_SORT_FIELDS: tuple[tuple[str, str], ...] = (
+    ("rating", "Rating"),
     ("decennia", "Decennia"),
     ("grootte", "Grootte"),
     ("kleur", "Kleur"),
@@ -251,6 +258,8 @@ def actor_sort_key(card: ActorCard, key: str):
         return (0, decade_sort_key(m.decennia)) if m.decennia else (1, 0)
     if key == "grootte":
         return (0, m.grootte) if m.grootte else (1, 0)
+    if key == "rating":
+        return (0, m.rating) if m.rating else (1, 0)
     if key == "kleur":
         return (0, m.kleur) if m.kleur else (1, "")
     if key == "markers":
@@ -269,7 +278,7 @@ def actor_default_key(card: ActorCard):
 def sort_actor_cards(cards: list[ActorCard], key: str, descending: bool) -> list[ActorCard]:
     if not key:
         return sorted(cards, key=actor_default_key)
-    if key in ("decennia", "grootte", "kleur"):
+    if key in ("decennia", "grootte", "kleur", "rating"):
         # lege waarden achteraan houden: sorteer eerst op "leeg", dan op waarde in de gevraagde richting
         empties = [c for c in cards if actor_sort_key(c, key)[0] == 1]
         filled = [c for c in cards if actor_sort_key(c, key)[0] == 0]
@@ -287,8 +296,9 @@ MARKER_SORT_FIELDS: tuple[tuple[str, str], ...] = (
     ("acteur", "Acteur"),
     ("decade", "Decennium"),
     ("maat", "Grootte"),
+    ("actrating", "Act. rating"),
     ("filmgr", "Film gr."),
-    ("rating", "Rating"),
+    ("rating", "Filmrating"),
 )
 
 
@@ -313,13 +323,15 @@ class MarkerCriteria:
     film_cats: set[int] = field(default_factory=set)
     kleur: set[str] = field(default_factory=set)
     grootte: set[str] = field(default_factory=set)
+    rating: set[str] = field(default_factory=set)
     decennia: set[str] = field(default_factory=set)
     film_size: set[str] = field(default_factory=set)
     stars: set[str] = field(default_factory=set)
 
     def is_empty(self) -> bool:
         return not any((self.search.strip(), self.markertype, self.include_actors, self.exclude_actors, self.traits,
-                        self.film_cats, self.kleur, self.grootte, self.decennia, self.film_size, self.stars))
+                        self.film_cats, self.kleur, self.grootte, self.rating, self.decennia, self.film_size,
+                        self.stars))
 
 
 def marker_matches(e: MarkerEntry, crit: MarkerCriteria, ctx: MarkerContext) -> bool:
@@ -339,6 +351,8 @@ def marker_matches(e: MarkerEntry, crit: MarkerCriteria, ctx: MarkerContext) -> 
     if crit.kleur and not any(m.kleur in crit.kleur for m in metas):
         return False
     if crit.grootte and not any(str(m.grootte) in crit.grootte for m in metas if m.grootte):
+        return False
+    if crit.rating and not any(str(m.rating) in crit.rating for m in metas if m.rating):
         return False
     if crit.decennia and not any(m.decennia in crit.decennia for m in metas):
         return False
@@ -372,6 +386,12 @@ def marker_sort_key(e: MarkerEntry, key: str, ctx: MarkerContext):
             m = ctx.actor_meta.get(a)
             if m and m.grootte:
                 return m.grootte
+        return 0
+    if key == "actrating":
+        for a in e.marker.actors:
+            m = ctx.actor_meta.get(a)
+            if m and m.rating:
+                return m.rating
         return 0
     if key == "filmgr":
         return ctx.film_size.get(e.film_path, 0)

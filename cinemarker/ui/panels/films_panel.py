@@ -21,7 +21,7 @@ from PyQt6.QtWidgets import (QCheckBox, QCompleter, QFileDialog, QGroupBox, QHBo
 from ...core import database as db, media, settings
 from ...core.filters import (FILM_SORT_FIELDS, FilmCriteria, compute_cross_film_ids, film_matches,
                              sort_film_cards)
-from ...core.formats import DECADE_OPTIONS, GROOTTE_MAX, GROOTTE_MIN, SIZE_BUCKETS
+from ...core.formats import DECADE_OPTIONS, GROOTTE_MAX, GROOTTE_MIN, RATING_MAX, RATING_MIN, SIZE_BUCKETS
 from ...core.markers_io import load_markers
 from ...core.models import ActorMeta, FilmCard, ZOOM_FILMS
 from ...core.paths import MARKER_THUMBS_DIR, ensure_volume_id
@@ -176,6 +176,8 @@ class FilmsPanel(QWidget):
         self.bar2 = FilterBar()
         self.dd_groo = MultiSelectDropdown("Act. grootte", tone="accent")
         self.dd_groo.set_items([DropdownItem(str(i), "★" * i, None, 0) for i in range(GROOTTE_MIN, GROOTTE_MAX + 1)])
+        self.dd_rating = MultiSelectDropdown("Act. rating", tone="accent")
+        self.dd_rating.set_items([DropdownItem(str(i), str(i), None, 0) for i in range(RATING_MAX, RATING_MIN - 1, -1)])
         self.dd_filmcat = MultiSelectDropdown("Filmcat.", tone="teal")
         self.dd_kleur = MultiSelectDropdown("Kleur", tone="accent")
         self.dd_dec = MultiSelectDropdown("Decennia", tone="blue")
@@ -183,7 +185,8 @@ class FilmsPanel(QWidget):
         self.dd_size = MultiSelectDropdown("Film gr.", tone="accent")
         self.dd_size.set_items([DropdownItem(k, lbl, None, 0) for k, lbl in SIZE_BUCKETS])
         self.dd_markercat = MultiSelectDropdown("Markertype", tone="purple")
-        for dd in (self.dd_groo, self.dd_filmcat, self.dd_kleur, self.dd_dec, self.dd_size, self.dd_markercat):
+        for dd in (self.dd_groo, self.dd_rating, self.dd_filmcat, self.dd_kleur, self.dd_dec, self.dd_size,
+                   self.dd_markercat):
             dd.selection_changed.connect(lambda _s: self._apply())
             self.bar2.add_widget(dd)
         self.bar2.add_widget(vseparator())
@@ -355,6 +358,7 @@ class FilmsPanel(QWidget):
             marker_cats={int(x) for x in self.dd_markercat.selected_ids()},
             film_size={str(x) for x in self.dd_size.selected_ids()},
             actor_groo={str(x) for x in self.dd_groo.selected_ids()},
+            actor_rating={str(x) for x in self.dd_rating.selected_ids()},
             film_cats={int(x) for x in self.dd_filmcat.selected_ids()},
             actor_kleur={str(x) for x in self.dd_kleur.selected_ids()},
             actor_dec={str(x) for x in self.dd_dec.selected_ids()},
@@ -391,7 +395,8 @@ class FilmsPanel(QWidget):
                 e.clear()
             for chip in (self.chip_1thumb, self.chip_multi, self.chip_nothumb, self.chip_markers, self.chip_nomarkers):
                 chip.setChecked(False)
-            for dd in (self.dd_groo, self.dd_filmcat, self.dd_kleur, self.dd_dec, self.dd_size, self.dd_markercat):
+            for dd in (self.dd_groo, self.dd_rating, self.dd_filmcat, self.dd_kleur, self.dd_dec, self.dd_size,
+                       self.dd_markercat):
                 dd.clear_selection()
             for aid in list(self._actor_chips):
                 self._remove_actor_chip(aid)
@@ -420,6 +425,7 @@ class FilmsPanel(QWidget):
             self.dd_markercat.set_selection(set(crit.marker_cats))
             self.dd_size.set_selection(set(crit.film_size))
             self.dd_groo.set_selection(set(crit.actor_groo))
+            self.dd_rating.set_selection(set(crit.actor_rating))
             self.dd_filmcat.set_selection(set(crit.film_cats))
             self.dd_kleur.set_selection(set(crit.actor_kleur))
             self.dd_dec.set_selection(set(crit.actor_dec))

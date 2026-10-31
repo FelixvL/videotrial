@@ -23,7 +23,7 @@ from PyQt6.QtWidgets import (QHBoxLayout, QLabel, QListWidget, QListWidgetItem, 
 from ...core import database as db, markers_store
 from ...core.filters import (MARKER_SORT_FIELDS, MarkerContext, MarkerCriteria, actor_marker_counts,
                              filter_and_sort_markers)
-from ...core.formats import DECADE_OPTIONS, GROOTTE_MAX, GROOTTE_MIN, SIZE_BUCKETS
+from ...core.formats import DECADE_OPTIONS, GROOTTE_MAX, GROOTTE_MIN, RATING_MAX, RATING_MIN, SIZE_BUCKETS
 from ...core.markers_io import load_markers
 from ...core.media import marker_frame_cache_name
 from ...core.models import ZOOM_MARKERS, ActorMeta, Marker, MarkerEntry
@@ -127,14 +127,16 @@ class MarkersPanel(QWidget):
         self.dd_kleur = MultiSelectDropdown("Kleur", tone="accent")
         self.dd_groo = MultiSelectDropdown("Grootte", tone="accent")
         self.dd_groo.set_items([DropdownItem(str(i), "★" * i, None, 0) for i in range(GROOTTE_MIN, GROOTTE_MAX + 1)])
+        self.dd_rating = MultiSelectDropdown("Rating", tone="accent")
+        self.dd_rating.set_items([DropdownItem(str(i), str(i), None, 0) for i in range(RATING_MAX, RATING_MIN - 1, -1)])
         self.dd_dec = MultiSelectDropdown("Decennia", tone="blue")
         self.dd_dec.set_items([DropdownItem(k, lbl, None, 0) for k, lbl in DECADE_OPTIONS])
         self.dd_size = MultiSelectDropdown("Film gr.", tone="accent")
         self.dd_size.set_items([DropdownItem(k, lbl, None, 0) for k, lbl in SIZE_BUCKETS])
         self.dd_stars = MultiSelectDropdown("Sterren", tone="accent")
         self.dd_stars.set_items([DropdownItem(str(i), "★" * i, None, 0) for i in range(1, 6)])
-        for dd in (self.dd_type, self.dd_filmcat, self.dd_trait, self.dd_kleur, self.dd_groo, self.dd_dec,
-                   self.dd_size, self.dd_stars):
+        for dd in (self.dd_type, self.dd_filmcat, self.dd_trait, self.dd_kleur, self.dd_groo, self.dd_rating,
+                   self.dd_dec, self.dd_size, self.dd_stars):
             dd.selection_changed.connect(lambda _s: self._apply())
             self.bar2.add_widget(dd)
         self.dd_type.selection_changed.connect(lambda _s: self._rebuild_actor_list())
@@ -313,6 +315,7 @@ class MarkersPanel(QWidget):
             film_cats={int(x) for x in self.dd_filmcat.selected_ids()},
             kleur={str(x) for x in self.dd_kleur.selected_ids()},
             grootte={str(x) for x in self.dd_groo.selected_ids()},
+            rating={str(x) for x in self.dd_rating.selected_ids()},
             decennia={str(x) for x in self.dd_dec.selected_ids()},
             film_size={str(x) for x in self.dd_size.selected_ids()},
             stars={str(x) for x in self.dd_stars.selected_ids()},
@@ -337,8 +340,8 @@ class MarkersPanel(QWidget):
         self.search.clear_silently()
         self.actor_search.clear_silently()
         self._actor_states.clear()
-        for dd in (self.dd_type, self.dd_filmcat, self.dd_trait, self.dd_kleur, self.dd_groo, self.dd_dec,
-                   self.dd_size, self.dd_stars):
+        for dd in (self.dd_type, self.dd_filmcat, self.dd_trait, self.dd_kleur, self.dd_groo, self.dd_rating,
+                   self.dd_dec, self.dd_size, self.dd_stars):
             dd.clear_selection()
         self._rebuild_actor_list()
         self._apply()

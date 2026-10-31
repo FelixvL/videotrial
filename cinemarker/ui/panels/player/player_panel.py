@@ -271,9 +271,9 @@ class PlayerPanel(QWidget):
         self._markers = load_markers(path)
         self.lbl_time.setText("--:--:-- / --:--:--")
         self.timeline.setValue(0)
-        self.ctrl.load(path, start_time)
-        if start_time:
-            self.ctrl.seek_when_ready(start_time)
+        started_at_time = self.ctrl.load(path, start_time)
+        if start_time and not started_at_time:
+            self.ctrl.seek_when_ready(start_time)       # alleen als terugval, anders verspringt het beeld
         film = db.get_or_create_film(path)
         self._film_id = film["id"] if film else None
         self.lbl_film.setText(Path(path).name)

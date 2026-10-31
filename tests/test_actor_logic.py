@@ -45,6 +45,8 @@ def test_actor_sorting_direction_and_empties_last():
     by_size = [c.stem for c in sort_actor_cards(cards, "grootte", True)]
     assert by_size[:2] == ["d", "c"] and set(by_size[2:]) == {"a", "b"}       # leeg achteraan
     assert [c.stem for c in sort_actor_cards(cards, "grootte", False)][:2] == ["c", "d"]
+    by_rating = [c.stem for c in sort_actor_cards(cards, "rating", True)]
+    assert by_rating[:2] == ["b", "a"] and set(by_rating[2:]) == {"c", "d"}      # rating ↓, leeg achteraan
 
 
 def test_import_parsing():

@@ -128,7 +128,9 @@ class PlayerController(QObject):
             self.mpv["wid"] = int(wid)
             self._attached = True
 
-    def load(self, path: str, start: float | None = None) -> None:
+    def load(self, path: str, start: float | None = None) -> bool:
+        """Laad een bestand; geeft True terug als het direct op `start` begint
+        (de aanroeper hoeft dan niet meer te seeken)."""
         self.reset_zoom()
         self.path = path
         self.duration = 0.0
@@ -152,13 +154,14 @@ class PlayerController(QObject):
                 self.mpv.play(path)
             except Exception as e:  # noqa: BLE001 — mpv-fouten mogen de UI niet laten crashen
                 _log.error("Laden mislukt (%s): %s", path, e)
-                return
+                return False
         try:
             self.mpv.speed = 1.0
             self.mpv.pause = False
         except Exception as e:  # noqa: BLE001
             _log.debug("speed/pause na laden: %s", e)
         self.speed_changed.emit(1.0)
+        return loaded
 
     def stop(self) -> None:
         self._stop_reverse(silent=True)

@@ -44,7 +44,7 @@ def test_marker_cats_and_cross_ids():
 
 def test_preset_roundtrip_and_legacy_keys():
     crit = FilmCriteria(search="x", one_thumb=True, marker_cats={1, 2}, film_cats={5}, actor_groo={"3"},
-                        actor_dec={"7"}, actors={4: "Jan"})
+                        actor_rating={"8", "9"}, actor_dec={"7"}, actors={4: "Jan"})
     d = crit.to_preset()
     d["ag_min"] = "2"                       # legacy, moet genegeerd worden
     back = FilmCriteria.from_preset(d)

@@ -11,7 +11,8 @@ def entry(path="C:/f/a.mp4", name="Alpha", time=1.0, actors=(1,), cats=(10,), st
 
 def ctx() -> MarkerContext:
     return MarkerContext(
-        actor_meta={1: ActorMeta(kleur="2", grootte=3, decennia="7"), 2: ActorMeta(grootte=5, decennia="0")},
+        actor_meta={1: ActorMeta(kleur="2", grootte=3, rating=8, decennia="7"),
+                    2: ActorMeta(grootte=5, rating=5, decennia="0")},
         actor_traits={1: {100}}, film_cats={5: {50}}, film_ids={"C:/f/a.mp4": 5},
         film_size={"C:/f/a.mp4": 3 * GB}, film_rating={"C:/f/a.mp4": 7.0},
     )
@@ -29,6 +30,8 @@ def test_marker_filters():
     assert marker_matches(e, MarkerCriteria(film_cats={50}), c)
     assert marker_matches(e, MarkerCriteria(kleur={"2"}, grootte={"3"}, decennia={"7"}), c)
     assert not marker_matches(e, MarkerCriteria(grootte={"4"}), c)
+    assert marker_matches(e, MarkerCriteria(rating={"8"}), c)
+    assert not marker_matches(e, MarkerCriteria(rating={"5"}), c)
     assert marker_matches(e, MarkerCriteria(film_size={"L"}), c)
     assert marker_matches(e, MarkerCriteria(stars={"4"}), c)
     assert marker_matches(e, MarkerCriteria(search="alp"), c) and marker_matches(e, MarkerCriteria(search="jan"), c)
@@ -44,6 +47,7 @@ def test_marker_sorting_and_shuffle_is_stable():
     assert [x.film_name for x in filter_and_sort_markers(es, MarkerCriteria(), c, "acteur", True)] == ["a", "b"]
     assert [x.film_name for x in filter_and_sort_markers(es, MarkerCriteria(), c, "decade", True)] == ["a", "b"]
     assert [x.film_name for x in filter_and_sort_markers(es, MarkerCriteria(), c, "maat", False)] == ["b", "a"]
+    assert [x.film_name for x in filter_and_sort_markers(es, MarkerCriteria(), c, "actrating", False)] == ["a", "b"]
     s1 = filter_and_sort_markers(es * 5, MarkerCriteria(), c, shuffle_seed=42)
     s2 = filter_and_sort_markers(es * 5, MarkerCriteria(), c, shuffle_seed=42)
     assert [x.time for x in s1] == [x.time for x in s2]
